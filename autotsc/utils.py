@@ -1,13 +1,15 @@
 """Utility functions for AutoTSC."""
 
 import os
+from contextlib import contextmanager
+
 import numpy as np
-import tensorflow as tf
 import polars as pl
+import ray
+import tensorflow as tf
 from aeon.datasets import load_classification
 from sklearn.model_selection import StratifiedKFold
-from contextlib import contextmanager
-import ray
+
 
 def load_dataset(dataset_name):
     """Load and normalize a dataset."""
@@ -35,7 +37,7 @@ def get_resource_config(n_jobs=-1, n_gpus=-1):
         n_cpus_to_use = min(n_jobs, n_cpus_available)
 
     # Detect available GPUs
-    n_gpus_available = len(tf.config.list_physical_devices('GPU'))
+    n_gpus_available = len(tf.config.list_physical_devices("GPU"))
     if n_gpus == -1:
         n_gpus_to_use = n_gpus_available
     else:
@@ -60,11 +62,13 @@ def generate_fold_indices(X, y, n_folds=8, shuffle=True):
     folds = []
     skf = StratifiedKFold(n_splits=n_folds, shuffle=shuffle)
     for i, (train_idx, test_idx) in enumerate(skf.split(X, y)):
-        folds.append({
-            'fold': i,
-            'train_idx': train_idx,
-            'test_idx': test_idx,
-        })
+        folds.append(
+            {
+                "fold": i,
+                "train_idx": train_idx,
+                "test_idx": test_idx,
+            }
+        )
     return pl.DataFrame(folds)
 
 
@@ -94,7 +98,6 @@ def print_fit_start_info(X, y, cpus_to_use, cpus_available, gpus_to_use, gpus_av
     for line in lines:
         print(f"| {line.ljust(max_len)} |")
     print(border)
-
 
 
 @contextmanager

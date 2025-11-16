@@ -1,8 +1,7 @@
 """Tests for AutoTSC models."""
 
-import pytest
-import numpy as np
 from sklearn.metrics import accuracy_score
+
 from autotsc.models import AutoTSCModel
 from autotsc.utils import load_dataset
 

@@ -52,5 +52,5 @@ class Difference(BaseCollectionTransformer):
         if self.lag <= 0:
             raise ValueError(f"lag must be > 0, got {self.lag}")
 
-        Xt = X[:, :, self.lag:] - X[:, :, :-self.lag]
+        Xt = X[:, :, self.lag :] - X[:, :, : -self.lag]
         return Xt
