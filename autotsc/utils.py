@@ -6,7 +6,8 @@ import tensorflow as tf
 import polars as pl
 from aeon.datasets import load_classification
 from sklearn.model_selection import StratifiedKFold
-
+from contextlib import contextmanager
+import ray
 
 def load_dataset(dataset_name):
     """Load and normalize a dataset."""
@@ -93,3 +94,22 @@ def print_fit_start_info(X, y, cpus_to_use, cpus_available, gpus_to_use, gpus_av
     for line in lines:
         print(f"| {line.ljust(max_len)} |")
     print(border)
+
+
+
+@contextmanager
+def ray_init_or_reuse(**ray_init_kwargs):
+    started_here = False
+    try:
+        # If Ray is already running, reuse it
+        if not ray.is_initialized():
+            # Start Ray with the requested resources only if not running
+            ray.init(**ray_init_kwargs)
+            started_here = True
+
+        yield
+
+    finally:
+        # Only shutdown if we started it
+        if started_here and ray.is_initialized():
+            ray.shutdown()

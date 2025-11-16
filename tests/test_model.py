@@ -3,7 +3,7 @@
 import pytest
 import numpy as np
 from sklearn.metrics import accuracy_score
-from autotsc.models import AutoTSCModel2
+from autotsc.models import AutoTSCModel
 from autotsc.utils import load_dataset
 
 
@@ -13,7 +13,7 @@ def test_model_accuracy_on_arrowhead():
     X_train, y_train, X_test, y_test = load_dataset("ArrowHead")
 
     # Initialize AutoTSCModel2
-    model = AutoTSCModel2(n_jobs=8, verbose=1)
+    model = AutoTSCModel(n_jobs=8, verbose=1)
 
     # Fit the model
     model.fit(X_train, y_train)
