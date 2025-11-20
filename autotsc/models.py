@@ -42,16 +42,26 @@ class RidgeClassifierCVWithProba(RidgeClassifierCV):
 def default_model_creators(model_n_jobs=4, type="all"):
     if type == "catch22":
         return [
-            lambda: Catch22Classifier(n_jobs=model_n_jobs),
-            lambda: Catch22Classifier(
-                n_jobs=model_n_jobs,
-                estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)),
-            ),
+            lambda: Catch22Classifier(n_jobs=model_n_jobs, random_state=0),
+            #lambda: Catch22Classifier(
+            #    n_jobs=model_n_jobs,
+            #    estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)),
+            #),
+            #lambda: Catch22Classifier(n_jobs=model_n_jobs),
+            #lambda: Catch22Classifier(n_jobs=model_n_jobs),
+            #lambda: Catch22Classifier(n_jobs=model_n_jobs),
+            #lambda: Catch22Classifier(n_jobs=model_n_jobs),
+            #lambda: Catch22Classifier(n_jobs=model_n_jobs),
         ]
-    if type != "rocket-catch22":
+    if type == "rocket-catch22":
         return [
-            lambda: RocketClassifier(n_jobs=model_n_jobs),
-            lambda: Catch22Classifier(n_jobs=model_n_jobs),
+            lambda: RocketClassifier(n_jobs=model_n_jobs, n_kernels=1000, random_state=0, estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10))),
+            lambda: Catch22Classifier(n_jobs=model_n_jobs, random_state=0),
+        ]
+
+    if type == "rocket":
+        return [
+            lambda: RocketClassifier(n_jobs=model_n_jobs, n_kernels=1000, random_state=0),
         ]
 
     return [
@@ -254,7 +264,7 @@ def train_fold(model_id, classifier, fold_id, X, y, folds):
     y_prob = classifier.predict_proba(X_test)
     y_prob_zip = zip(test_idx, y_prob.tolist())
 
-    return model_id, classifier, y_pred_zip, y_prob_zip, training_time
+    return model_id, classifier, y_pred_zip, y_prob_zip, training_time, classifier.classes_
 
 
 class AutoTSCModel(BaseClassifier):
@@ -274,11 +284,12 @@ class AutoTSCModel(BaseClassifier):
         self,
         n_jobs=-1,
         n_gpus=-1,
-        n_folds=8,
+        n_folds=12,
         verbose=0,
         model_n_jobs=4,
         model_types="all",
         use_stacking=True,
+        use_only_best_model=False,
     ):
         self.n_jobs = n_jobs
         self.n_gpus = n_gpus
@@ -286,11 +297,12 @@ class AutoTSCModel(BaseClassifier):
         self.verbose = verbose
         self.model_n_jobs = model_n_jobs
         self.use_stacking = use_stacking
+        self.use_only_best_model = use_only_best_model
 
         self.models_ = {}
         self.summary_ = []
         self.model_types = model_types
-        # self._owns_ray_cluster = False  # Track if we created the Ray cluster
+        self.model_predictions = None
 
         # Get model creators in priority order
         model_creators = default_model_creators(model_n_jobs=model_n_jobs, type=model_types)
@@ -416,9 +428,8 @@ class AutoTSCModel(BaseClassifier):
                 finished, remaining_tasks = ray.wait(remaining_tasks, num_returns=1)
                 for task in finished:
                     r = ray.get(task)
-                    # print(f'Completed task for model_id: {r[0]}')
-                    # results.append(r)
-                    model_id, model, y_pred, y_prob, model_duration = r
+
+                    model_id, model, y_pred, y_prob, model_duration, classes = r
                     model_classfiers[model_id].append(model)
                     model_training_time[model_id].append(model_duration)
                     model_predictions[model_id].extend(y_pred)
@@ -438,21 +449,32 @@ class AutoTSCModel(BaseClassifier):
                                 f"Model {model_id} fitted, accuracy: {acc:.4f}, time: {np.mean(model_training_time[model_id]):.2f}s"
                             )
 
-                        self.summary_.append(
-                            {
-                                "model_id": model_id,
-                                "classifier": repr(self.models[model_id])
-                                .replace("\n", "")
-                                .replace(" ", ""),
-                                "fold_predictions": fold_predictions,
-                                "fold_probabilities": fold_probabilities,
-                                "true_labels": self.y_.tolist(),
-                                "validation_accuracy": acc,
-                                "training_time_seconds": np.mean(model_training_time[model_id]),
-                                "stacking_level": 0,
-                            }
-                        )
+                        self.summary_.append({
+                            "model_id": model_id,
+                            "classifier": repr(self.models[model_id])
+                            .replace("\n", "")
+                            .replace(" ", ""),
+                            "fold_predictions": fold_predictions,
+                            "fold_probabilities": fold_probabilities,
+                            "true_labels": self.y_.tolist(),
+                            "validation_accuracy": acc,
+                            "training_time_seconds": np.mean(model_training_time[model_id]),
+                            "stacking_level": 0,
+                        })
+                        columns = [f'model_{model_id}__class_{l}' for l in list(classes)]
+                        if self.model_predictions is None:
+                            v = np.array(fold_probabilities)
+                            self.model_predictions = pl.DataFrame(v, schema=columns)
+                        else:
+                            v = np.array(fold_probabilities)
+                            df = pl.DataFrame(v, schema=columns)
+                            self.model_predictions = pl.concat([self.model_predictions, df], how="horizontal")
 
+
+
+            del X_ref
+            del y_ref
+            
             self.meta_models = {}
 
             from sklearn.decomposition import PCA
@@ -477,6 +499,14 @@ class AutoTSCModel(BaseClassifier):
                 self.meta_models["rf"] = tuple(m2)
                 self.meta_models["pca-ridge"] = tuple(m3)
                 self.meta_models["hgb"] = tuple(m4)
+
+            if self.use_only_best_model:
+                # set so only the best model is used by default
+                # !!!FIXXXXXX THISSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS
+                best_model = self.summary().sort("validation_accuracy", descending=True).to_dicts()[0]
+                print(f"Best model: {best_model['model_id']} with accuracy {best_model['validation_accuracy']:.4f}")
+                self.use_models = [best_model["model_id"]]
+                return self
 
             self.use_models = self.models_.keys()
 
@@ -569,6 +599,7 @@ class AutoTSCModel(BaseClassifier):
         return base_model_predictions
 
     def _predict(self, X):
+        print(9999999, self.use_models)
         if len(self.models_) == 0:
             raise ValueError("No models trained yet. Call fit().")
 
