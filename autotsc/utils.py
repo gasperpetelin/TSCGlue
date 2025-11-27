@@ -8,8 +8,7 @@ import polars as pl
 import ray
 import tensorflow as tf
 from aeon.datasets import load_classification
-from sklearn.model_selection import StratifiedKFold
-
+from sklearn.model_selection import StratifiedKFold, KFold
 
 def load_dataset(dataset_name):
     """Load and normalize a dataset."""
@@ -72,7 +71,7 @@ def generate_fold_indices(X, y, n_folds=8, shuffle=True):
     return pl.DataFrame(folds)
 
 
-def print_fit_start_info(X, y, cpus_to_use, cpus_available, gpus_to_use, gpus_available):
+def print_fit_start_info(X, y, cpus_to_use, cpus_available, gpus_to_use, gpus_available, random_seed, n_folds):
     """
     Print formatted training information.
 
@@ -91,6 +90,8 @@ def print_fit_start_info(X, y, cpus_to_use, cpus_available, gpus_to_use, gpus_av
         f"Number of classes: {len(np.unique(y))}",
         f"CPUs: {cpus_to_use}/{cpus_available}",
         f"GPUs: {gpus_to_use}/{gpus_available}",
+        f"Random seed: {random_seed}",
+        f"Number of folds: {n_folds}",
     ]
     max_len = max(len(line) for line in lines)
     border = "|" + "-" * (max_len + 2) + "|"
@@ -116,3 +117,25 @@ def ray_init_or_reuse(**ray_init_kwargs):
         # Only shutdown if we started it
         if started_here and ray.is_initialized():
             ray.shutdown()
+
+#def get_folds(X, y, n_splits=10):
+#    skf = StratifiedKFold(n_splits=n_splits, shuffle=True)
+#    folds = []
+#    for train_idx, val_idx in skf.split(X, y):
+#        folds.append((train_idx.tolist(), val_idx.tolist()))
+#    return folds
+
+def get_folds(X, y, n_splits=10, random_state=None):
+    folds = []
+    try:
+        # Try stratified split
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+        for train_idx, val_idx in skf.split(X, y):
+            folds.append((train_idx.tolist(), val_idx.tolist()))
+    except ValueError:
+        # Fall back to regular KFold
+        print(f"StratifiedKFold failed, falling back to regular KFold with n_splits={n_splits}")
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+        for train_idx, val_idx in kf.split(X):
+            folds.append((train_idx.tolist(), val_idx.tolist()))
+    return folds

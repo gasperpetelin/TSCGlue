@@ -15,7 +15,9 @@ dependencies = [
     "tabpfn",
     "huggingface-hub",
     "tsfresh",
-    "ray"
+    "ray",
+    "catboost",
+    "imblearn"
 ]
 
 [project.optional-dependencies]
@@ -29,7 +31,7 @@ notebooks = [
     "jupyter",
     "jupyterlab",
     "ipykernel",
-    "papermill"
+    "hvplot"
 ]
 
 [build-system]
