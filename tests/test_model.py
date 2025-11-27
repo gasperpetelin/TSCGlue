@@ -2,8 +2,8 @@
 
 from sklearn.metrics import accuracy_score
 
-from autotsc.models import AutoTSCModel
 from autotsc import utils
+from autotsc.models import AutoTSCModel
 
 
 def test_model_accuracy_on_arrowhead():
@@ -13,7 +13,7 @@ def test_model_accuracy_on_arrowhead():
 
     with utils.ray_init_or_reuse(num_cpus=24, resources={"meta": 100}, ignore_reinit_error=True):
         # Initialize AutoTSCModel2
-        model = AutoTSCModel(n_jobs=8, verbose=1, model_selection='fast')
+        model = AutoTSCModel(n_jobs=8, verbose=1, model_selection="fast")
 
         # Fit the model
         model.fit(X_train, y_train)

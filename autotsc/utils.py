@@ -8,7 +8,8 @@ import polars as pl
 import ray
 import tensorflow as tf
 from aeon.datasets import load_classification
-from sklearn.model_selection import StratifiedKFold, KFold
+from sklearn.model_selection import KFold, StratifiedKFold
+
 
 def load_dataset(dataset_name):
     """Load and normalize a dataset."""
@@ -71,7 +72,9 @@ def generate_fold_indices(X, y, n_folds=8, shuffle=True):
     return pl.DataFrame(folds)
 
 
-def print_fit_start_info(X, y, cpus_to_use, cpus_available, gpus_to_use, gpus_available, random_seed, n_folds):
+def print_fit_start_info(
+    X, y, cpus_to_use, cpus_available, gpus_to_use, gpus_available, random_seed, n_folds
+):
     """
     Print formatted training information.
 
@@ -118,12 +121,14 @@ def ray_init_or_reuse(**ray_init_kwargs):
         if started_here and ray.is_initialized():
             ray.shutdown()
 
-#def get_folds(X, y, n_splits=10):
+
+# def get_folds(X, y, n_splits=10):
 #    skf = StratifiedKFold(n_splits=n_splits, shuffle=True)
 #    folds = []
 #    for train_idx, val_idx in skf.split(X, y):
 #        folds.append((train_idx.tolist(), val_idx.tolist()))
 #    return folds
+
 
 def get_folds(X, y, n_splits=10, random_state=None):
     folds = []

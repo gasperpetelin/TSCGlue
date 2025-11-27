@@ -5,83 +5,41 @@ import polars as pl
 import ray
 from aeon.classification.base import BaseClassifier
 from aeon.classification.convolution_based import (
+    HydraClassifier,
     MiniRocketClassifier,
     MultiRocketClassifier,
+    MultiRocketHydraClassifier,
     RocketClassifier,
 )
+from aeon.classification.dictionary_based import WEASEL_V2, ContractableBOSS
 from aeon.classification.feature_based import (
     Catch22Classifier,
     SummaryClassifier,
 )
-from aeon.classification.interval_based import (
-    QUANTClassifier,
-)
-from aeon.classification.sklearn import SklearnClassifierWrapper
-from aeon.pipeline import make_pipeline as aeon_make_pipeline
-from sklearn.base import clone
-from sklearn.ensemble import (
-    ExtraTreesClassifier,
-    HistGradientBoostingClassifier,
-    RandomForestClassifier,
-)
-from sklearn.linear_model import RidgeClassifierCV
-from sklearn.metrics import accuracy_score
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
-
-import polars as pl
-from sklearn.metrics import accuracy_score
-
-from time import perf_counter
-
-import numpy as np
-import polars as pl
-import ray
-from aeon.classification.interval_based import SupervisedTimeSeriesForest
-
-from aeon.classification.base import BaseClassifier
-from aeon.classification.convolution_based import (
-    MiniRocketClassifier,
-    MultiRocketClassifier,
-    RocketClassifier,
-)
-from aeon.classification.feature_based import (
-    Catch22Classifier,
-    SummaryClassifier,
-)
-from aeon.classification.interval_based import (
-    QUANTClassifier,
-)
-from sklearn.svm import SVC
-from sklearn.linear_model import LogisticRegressionCV
-from aeon.classification.sklearn import SklearnClassifierWrapper
-from sklearn.base import clone
-from sklearn.ensemble import (
-    ExtraTreesClassifier,
-    HistGradientBoostingClassifier,
-    RandomForestClassifier,
-)
-from sklearn.linear_model import RidgeClassifierCV
-from sklearn.metrics import accuracy_score
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
-from aeon.classification.convolution_based import HydraClassifier
-from autotsc import transformers, utils
 from aeon.classification.interval_based import (
     RSTSF,
     DrCIFClassifier,
     QUANTClassifier,
     SupervisedTimeSeriesForest,
 )
-from aeon.classification.interval_based import RSTSF
-from aeon.classification.dictionary_based import WEASEL_V2
-from aeon.classification.dictionary_based import ContractableBOSS
+from aeon.classification.sklearn import SklearnClassifierWrapper
 from aeon.pipeline import make_pipeline as aeon_make_pipeline
-from aeon.classification.convolution_based import MultiRocketHydraClassifier
+from sklearn.base import clone
+from sklearn.ensemble import (
+    ExtraTreesClassifier,
+    HistGradientBoostingClassifier,
+    RandomForestClassifier,
+)
+from sklearn.linear_model import LogisticRegressionCV, RidgeClassifierCV
+from sklearn.metrics import accuracy_score
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+
 from autotsc import transformers, utils
 
-class AutoTSCModel(BaseClassifier):
 
+class AutoTSCModel(BaseClassifier):
     # TODO: change capability tags
     _tags = {
         "capability:multivariate": True,
@@ -92,6 +50,7 @@ class AutoTSCModel(BaseClassifier):
     }
 
     def __init__(self, n_jobs=1, n_gpus=0, verbose=0, model_selection=None):
+        # TODO Correctlx set resource usage
         self.models_ = {}
         self.meta_models_ = {}
         self.summary_ = []
@@ -102,86 +61,165 @@ class AutoTSCModel(BaseClassifier):
         self.model_selection = model_selection
         super().__init__()
 
-    def get_default_ray_models(self, random_seed, model_selection='fast'):
-        m1 = ('tab-ridge', RayCrossValidationWrapper(
+    def get_default_ray_models(self, random_seed, model_selection="fast"):
+        # add also scaled model versions
+        m1 = (
+            "tab-ridge",
+            RayCrossValidationWrapper(
                 SklearnClassifierWrapper(RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)))
-            ))
-        m2 = ('tab-rf', RayCrossValidationWrapper(
+            ),
+        )
+        m2 = (
+            "tab-rf",
+            RayCrossValidationWrapper(
                 SklearnClassifierWrapper(RandomForestClassifier(n_jobs=-1, n_estimators=500))
-            ))
-        if model_selection == 'fast':
+            ),
+        )
+        m3 = ("c22", RayCrossValidationWrapper(Catch22Classifier(n_jobs=1)))
+        m4 = (
+            "minroc",
+            RayCrossValidationWrapper(
+                MiniRocketClassifier(
+                    n_jobs=1,
+                    estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)),
+                    random_state=random_seed,
+                )
+            ),
+        )
+        m5 = (
+            "quant",
+            RayCrossValidationWrapper(
+                aeon_make_pipeline(transformers.CumSum(), QUANTClassifier(random_state=random_seed))
+            ),
+        )
+
+        if model_selection == "fast":
             return [
                 m1,
-                m2
+                m2,
+                m3,
+                m4,
+                m5,
             ]
-        return [   
+        return [
             m1,
             m2,
-            ('dif-roc', RayCrossValidationWrapper(aeon_make_pipeline(
-                transformers.Difference(),
-                RocketClassifier(n_jobs=1, estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)), random_state=random_seed)
-            ))),
-            ('cs-roc', RayCrossValidationWrapper(aeon_make_pipeline(
-                transformers.CumSum(),
-                MultiRocketClassifier(n_jobs=1, estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)), random_state=random_seed)
-            ))),
-            ('c22', RayCrossValidationWrapper(Catch22Classifier(n_jobs=1))),
-            ('roc', RayCrossValidationWrapper(RocketClassifier(n_jobs=1, estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)), random_state=random_seed))),
-            ('minroc', RayCrossValidationWrapper(MiniRocketClassifier(n_jobs=1, estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)), random_state=random_seed))),
-            ('quant', RayCrossValidationWrapper(
-                aeon_make_pipeline(
-                    transformers.CumSum(),
-                    QUANTClassifier(random_state=random_seed)
-                )
-            )),
-            ('dif-quant', RayCrossValidationWrapper(
-                aeon_make_pipeline(
-                    transformers.Difference(),
-                    QUANTClassifier(random_state=random_seed)
-                )
-            )),
-            ('cs-quant', RayCrossValidationWrapper(QUANTClassifier(random_state=random_seed))),
-
-            ('hydra', RayCrossValidationWrapper(HydraClassifier(n_jobs=1, random_state=random_seed))),
-            ('mulroc', RayCrossValidationWrapper(MultiRocketClassifier(n_jobs=1, estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)), random_state=random_seed))),
-            ('weasel', RayCrossValidationWrapper(WEASEL_V2(n_jobs=1, max_feature_count=3000))),
-            ('tsf', RayCrossValidationWrapper(SupervisedTimeSeriesForest(n_jobs=1, n_estimators=20))),
-            ('rstsf', RayCrossValidationWrapper(RSTSF(n_jobs=1, n_estimators=20))),
-            ('summry', RayCrossValidationWrapper(SummaryClassifier(n_jobs=1))),
-            ('rochydra', RayCrossValidationWrapper(MultiRocketHydraClassifier(n_jobs=1, random_state=random_seed+1))),
-            ('cboss', RayCrossValidationWrapper(ContractableBOSS(n_jobs=1, time_limit_in_minutes=1.0))),
-            ('drcif', RayCrossValidationWrapper(DrCIFClassifier(n_jobs=1, random_state=random_seed, time_limit_in_minutes=1.0))),
+            (
+                "dif-roc",
+                RayCrossValidationWrapper(
+                    aeon_make_pipeline(
+                        transformers.Difference(),
+                        RocketClassifier(
+                            n_jobs=1,
+                            estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)),
+                            random_state=random_seed,
+                        ),
+                    )
+                ),
+            ),
+            (
+                "cs-roc",
+                RayCrossValidationWrapper(
+                    aeon_make_pipeline(
+                        transformers.CumSum(),
+                        MultiRocketClassifier(
+                            n_jobs=1,
+                            estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)),
+                            random_state=random_seed,
+                        ),
+                    )
+                ),
+            ),
+            m3,
+            (
+                "roc",
+                RayCrossValidationWrapper(
+                    RocketClassifier(
+                        n_jobs=1,
+                        estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)),
+                        random_state=random_seed,
+                    )
+                ),
+            ),
+            m4,
+            m5,
+            (
+                "dif-quant",
+                RayCrossValidationWrapper(
+                    aeon_make_pipeline(
+                        transformers.Difference(), QUANTClassifier(random_state=random_seed)
+                    )
+                ),
+            ),
+            ("cs-quant", RayCrossValidationWrapper(QUANTClassifier(random_state=random_seed))),
+            (
+                "hydra",
+                RayCrossValidationWrapper(HydraClassifier(n_jobs=1, random_state=random_seed)),
+            ),
+            (
+                "mulroc",
+                RayCrossValidationWrapper(
+                    MultiRocketClassifier(
+                        n_jobs=1,
+                        estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)),
+                        random_state=random_seed,
+                    )
+                ),
+            ),
+            ("weasel", RayCrossValidationWrapper(WEASEL_V2(n_jobs=1, max_feature_count=3000))),
+            (
+                "tsf",
+                RayCrossValidationWrapper(SupervisedTimeSeriesForest(n_jobs=1, n_estimators=20)),
+            ),
+            ("rstsf", RayCrossValidationWrapper(RSTSF(n_jobs=1, n_estimators=20))),
+            ("summry", RayCrossValidationWrapper(SummaryClassifier(n_jobs=1))),
+            (
+                "rochydra",
+                RayCrossValidationWrapper(
+                    MultiRocketHydraClassifier(n_jobs=1, random_state=random_seed + 1)
+                ),
+            ),
+            (
+                "cboss",
+                RayCrossValidationWrapper(ContractableBOSS(n_jobs=1, time_limit_in_minutes=1.0)),
+            ),
+            (
+                "drcif",
+                RayCrossValidationWrapper(
+                    DrCIFClassifier(n_jobs=1, random_state=random_seed, time_limit_in_minutes=1.0)
+                ),
+            ),
             # RayCrossValidationWrapper(RISTClassifier(n_jobs=1)),
-            #RayCrossValidationWrapper(RDSTClassifier(n_jobs=-1)),
-            #REDCOMETS(n_jobs=-1, n_trees=50)
+            # RayCrossValidationWrapper(RDSTClassifier(n_jobs=-1)),
+            # REDCOMETS(n_jobs=-1, n_trees=50)
         ]
 
     def get_default_metamodels(self):
         from sklearn.decomposition import PCA
-        model1 = ('m-ridgecv', Ensemble(RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10))))
-        model2 = ('m-rf', Ensemble(RandomForestClassifier(n_jobs=-1, n_estimators=500)))
-        model3 = ('m-hgb', Ensemble(HistGradientBoostingClassifier()))
-        model4 = ('m-et', Ensemble(ExtraTreesClassifier(n_jobs=-1, n_estimators=500)))
-        model5 = ('m-rf-pruned', Ensemble(RandomForestClassifier(n_jobs=-1, n_estimators=500, ccp_alpha=0.01)))
-        model6 = ('m-pca-rf', Ensemble(
-            make_pipeline(
-                StandardScaler(),
-                PCA(n_components=0.95),
-                RandomForestClassifier(n_jobs=-1, n_estimators=500, ccp_alpha=0.01)
-            )
-        ))
 
-        model7 = ('m-svm', Ensemble(
-            SVC(kernel='linear', probability=True)
-        ))
-        model8 = ('m-log', Ensemble(
-            LogisticRegressionCV(cv=5, n_jobs=-1)
-        ))
+        model1 = ("m-ridgecv", Ensemble(RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10))))
+        model2 = ("m-rf", Ensemble(RandomForestClassifier(n_jobs=-1, n_estimators=500)))
+        model3 = ("m-hgb", Ensemble(HistGradientBoostingClassifier()))
+        model4 = ("m-et", Ensemble(ExtraTreesClassifier(n_jobs=-1, n_estimators=500)))
+        model5 = (
+            "m-rf-pruned",
+            Ensemble(RandomForestClassifier(n_jobs=-1, n_estimators=500, ccp_alpha=0.01)),
+        )
+        model6 = (
+            "m-pca-rf",
+            Ensemble(
+                make_pipeline(
+                    StandardScaler(),
+                    PCA(n_components=0.95),
+                    RandomForestClassifier(n_jobs=-1, n_estimators=500, ccp_alpha=0.01),
+                )
+            ),
+        )
 
-        return [model1, 
-                model7,
-                model8
-        ]
+        model7 = ("m-svm", Ensemble(SVC(kernel="linear", probability=True)))
+        model8 = ("m-log", Ensemble(LogisticRegressionCV(cv=5, n_jobs=-1)))
+
+        return [model1, model7, model8]
 
     def _fit(self, X, y):
         self.cpus_available_, self.cpus_to_use_, self.gpus_available_, self.gpus_to_use_ = (
@@ -201,8 +239,10 @@ class AutoTSCModel(BaseClassifier):
                 n_folds=n_folds,
             )
         folds = utils.get_folds(X, y, n_splits=n_folds)
-        #default_models = self.get_default_models()
-        default_ray_models = self.get_default_ray_models(random_seed, model_selection=self.model_selection)
+        # default_models = self.get_default_models()
+        default_ray_models = self.get_default_ray_models(
+            random_seed, model_selection=self.model_selection
+        )
 
         ts = []
         # create X and y reference
@@ -217,23 +257,29 @@ class AutoTSCModel(BaseClassifier):
             self.models_[model_id] = model
             pred_max = np.argmax(pred, axis=1)
             acc = accuracy_score(y, model.classes_[pred_max])
-            self.summary_.append({
-                "model_id": model_id,
-                "model": repr(model).replace("\n", "").replace(" ", ""),
-                "validation_accuracy": acc,
-                "stacking_level": 0,
-                "train_time": model.fit_time_mean_,
-            })
+            self.summary_.append(
+                {
+                    "model_id": model_id,
+                    "model": repr(model).replace("\n", "").replace(" ", ""),
+                    "validation_accuracy": acc,
+                    "stacking_level": 0,
+                    "train_time": model.fit_time_mean_,
+                }
+            )
 
             if self.verbose > 0:
-                print(f"Trained base model {model_id}, OOF accuracy: {acc:.4f} in {model.fit_time_mean_:.2f}s")
+                print(
+                    f"Trained base model {model_id}, OOF accuracy: {acc:.4f} in {model.fit_time_mean_:.2f}s"
+                )
 
-            columns = [f'model_{model_id}__class_{l}' for l in list(model.classes_)]
+            columns = [f"model_{model_id}__class_{l}" for l in list(model.classes_)]
             if self.oof_predictions_ is None:
                 self.oof_predictions_ = pl.DataFrame(pred, schema=columns)
             else:
                 df_pred = pl.DataFrame(pred, schema=columns)
-                self.oof_predictions_ = pl.concat([self.oof_predictions_, df_pred], how='horizontal')
+                self.oof_predictions_ = pl.concat(
+                    [self.oof_predictions_, df_pred], how="horizontal"
+                )
 
         default_metamodels = self.get_default_metamodels()
         for model_id, model in default_metamodels:
@@ -243,32 +289,37 @@ class AutoTSCModel(BaseClassifier):
             pred_max = np.argmax(pred, axis=1)
             acc = accuracy_score(y, model.models[0].classes_[pred_max])
             self.meta_models_[model_id] = model
-            self.summary_.append({
-                "model_id": model_id, 
-                "model": repr(model).replace("\n", "").replace(" ", ""),
-                "validation_accuracy": acc,
-                "stacking_level": 1,
-            })
+            self.summary_.append(
+                {
+                    "model_id": model_id,
+                    "model": repr(model).replace("\n", "").replace(" ", ""),
+                    "validation_accuracy": acc,
+                    "stacking_level": 1,
+                    "train_time": endtime - start_time,
+                }
+            )
             if self.verbose > 0:
-                print(f"Trained meta model {model_id}, OOF accuracy: {acc:.4f} in {endtime - start_time:.2f}s")
+                print(
+                    f"Trained meta model {model_id}, OOF accuracy: {acc:.4f} in {endtime - start_time:.2f}s"
+                )
 
         return self
-    
+
     def summary(self):
         return pl.DataFrame(self.summary_)
-    
+
     def predict_per_model(self, X):
         "make predictions for each model in the ensemble"
         all_preds = {}
         oof_predictions_ = None
         for model_id, model in self.models_.items():
             pred_probs = model.predict_proba(X)
-            columns = [f'model_{model_id}__class_{l}' for l in list(model.classes_)]
+            columns = [f"model_{model_id}__class_{l}" for l in list(model.classes_)]
             if oof_predictions_ is None:
                 oof_predictions_ = pl.DataFrame(pred_probs, schema=columns)
             else:
                 df_pred = pl.DataFrame(pred_probs, schema=columns)
-                oof_predictions_ = pl.concat([oof_predictions_, df_pred], how='horizontal')
+                oof_predictions_ = pl.concat([oof_predictions_, df_pred], how="horizontal")
             pred = np.argmax(pred_probs, axis=1)
             pred_labels = model.classes_[pred]
             all_preds[model_id] = pred_labels
@@ -280,12 +331,17 @@ class AutoTSCModel(BaseClassifier):
         return all_preds
 
     def _predict(self, X):
-        m = self.models_[list(self.models_.keys())[0]]
-        return m._predict(X)
+        best_model_id = self.summary().sort("validation_accuracy").tail(1)["model_id"].item()
+        if self.verbose > 0:
+            print(f"Using best model {best_model_id} for predictions")
+        predictions = self.predict_per_model(X)
+        return predictions[best_model_id]
+
 
 class RidgeClassifierCVWithProba(RidgeClassifierCV):
     def predict_proba(self, X):
         return self._predict_proba_lr(X)
+
 
 class RayCrossValidationWrapper(BaseClassifier):
     def __init__(self, model):
@@ -330,6 +386,7 @@ class RayCrossValidationWrapper(BaseClassifier):
         self.is_fitted = True
         return y_proba
 
+
 class Ensemble:
     def __init__(self, model):
         self.model_ = model
@@ -345,19 +402,21 @@ class Ensemble:
             proba_predictions.extend(zip(val_idx, y_proba))
         proba_predictions = sorted(proba_predictions)
         return np.array([proba for idx, proba in proba_predictions])
-    
+
     def predict(self, X):
         predictions = np.array([model.predict_proba(X) for model in self.models])
         avg_proba = predictions.mean(axis=0)
         predicted_indices = np.argmax(avg_proba, axis=1)
         return self.models[0].classes_[predicted_indices]
-    
+
     def __repr__(self):
-        return f'{self.__class__.__name__}({self.model_})'
+        return f"{self.__class__.__name__}({self.model_})"
+
 
 class EnsambleWeights:
     def __init__(self):
         pass
+
 
 @ray.remote(num_cpus=1)
 def ray_run_model_on_fold(model_clone, X, y, train_idx, valid_idx):
@@ -371,6 +430,7 @@ def ray_run_model_on_fold(model_clone, X, y, train_idx, valid_idx):
     # print(f"Train model {model_clone.__class__.__name__} on fold done in {fit_time:.2f}s")
     return model_clone, val_probs, fit_time
 
+
 @ray.remote(num_cpus=1)
 def ray_run_predict_proba(model, X):
     start_time = perf_counter()
@@ -378,6 +438,7 @@ def ray_run_predict_proba(model, X):
     pred_time = perf_counter() - start_time
     # print(f"Predict proba with model {model.__class__.__name__} done in {pred_time:.2f}s")
     return proba
+
 
 @ray.remote(num_cpus=0, resources={"meta": 1})
 def ray_run_fit_predict_proba_wrapper(model_id, wrapper, X, y, folds):
@@ -388,14 +449,7 @@ def ray_run_fit_predict_proba_wrapper(model_id, wrapper, X, y, folds):
     return model_id, wrapper, result
 
 
-
-
-
-
-
-
-
-#def default_model_creators(model_n_jobs=4, type="all"):
+# def default_model_creators(model_n_jobs=4, type="all"):
 #    if type == "catch22":
 #        return [
 #            lambda: Catch22Classifier(n_jobs=model_n_jobs, random_state=0),
@@ -599,8 +653,8 @@ def ray_run_fit_predict_proba_wrapper(model_id, wrapper, X, y, folds):
 #    ]
 #
 #
-#@ray.remote(num_cpus=4)
-#def train_fold(model_id, classifier, fold_id, X, y, folds):
+# @ray.remote(num_cpus=4)
+# def train_fold(model_id, classifier, fold_id, X, y, folds):
 #    selected_fold = folds.filter(pl.col("fold") == fold_id).to_dicts()[0]
 #    train_idx = selected_fold["train_idx"]
 #    test_idx = selected_fold["test_idx"]
@@ -623,7 +677,7 @@ def ray_run_fit_predict_proba_wrapper(model_id, wrapper, X, y, folds):
 #    return model_id, classifier, y_pred_zip, y_prob_zip, training_time, classifier.classes_
 #
 #
-#class AutoTSCModel(BaseClassifier):
+# class AutoTSCModel(BaseClassifier):
 #    # TODO: change capability tags
 #    _tags = {
 #        "capability:multivariate": True,
@@ -830,7 +884,7 @@ def ray_run_fit_predict_proba_wrapper(model_id, wrapper, X, y, folds):
 #
 #            del X_ref
 #            del y_ref
-#            
+#
 #            self.meta_models = {}
 #
 #            from sklearn.decomposition import PCA
@@ -992,8 +1046,8 @@ def ray_run_fit_predict_proba_wrapper(model_id, wrapper, X, y, folds):
 #            # return self.most_common_label(all_predictions)
 #
 #
-#@ray.remote(num_cpus=4)
-#def make_prediction(order, model, X, return_proba=False):
+# @ray.remote(num_cpus=4)
+# def make_prediction(order, model, X, return_proba=False):
 #    start_time = perf_counter()
 #    pred = model.predict(X)
 #    prob = model.predict_proba(X)
