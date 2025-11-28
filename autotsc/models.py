@@ -45,7 +45,7 @@ class AutoTSCModel(BaseClassifier):
         "algorithm_type": "convolution",
     }
 
-    def __init__(self, n_jobs=1, n_gpus=0, verbose=0, model_selection=None):
+    def __init__(self, n_jobs=1, n_gpus=0, verbose=0, n_folds = 20, model_selection=None):
         # TODO Correctlx set resource usage
         self.models_ = {}
         self.meta_models_ = {}
@@ -55,6 +55,8 @@ class AutoTSCModel(BaseClassifier):
         self.n_jobs = n_jobs
         self.n_gpus = n_gpus
         self.model_selection = model_selection
+        self.n_folds = n_folds
+        self.folds_ = None
         super().__init__()
 
     def get_default_ray_models(self, random_seed, model_selection="fast"):
@@ -73,7 +75,7 @@ class AutoTSCModel(BaseClassifier):
         )
         m3 = ("c22", RayCrossValidationWrapper(Catch22Classifier(n_jobs=1)))
         m4 = (
-            "minroc",
+            "minirocket",
             RayCrossValidationWrapper(
                 MiniRocketClassifier(
                     n_jobs=1,
@@ -94,7 +96,7 @@ class AutoTSCModel(BaseClassifier):
             # TODO add RidgeClassifierCVWithProba() not regular ridge
         )
         m7 = (
-            "roc",
+            "rocket",
             RayCrossValidationWrapper(
                 RocketClassifier(
                     n_jobs=1,
@@ -103,16 +105,27 @@ class AutoTSCModel(BaseClassifier):
                 )
             ),
         )
+        m8 = (
+            "dif-quant",
+            RayCrossValidationWrapper(
+                aeon_make_pipeline(
+                    transformers.Difference(), QUANTClassifier(random_state=random_seed)
+                )
+            ),
+        )
+        m9 = ("cs-quant", RayCrossValidationWrapper(QUANTClassifier(random_state=random_seed)))
+        m10 = (
+            "multirocket",
+            RayCrossValidationWrapper(
+                MultiRocketClassifier(
+                    n_jobs=1,
+                    estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)),
+                    random_state=random_seed,
+                )
+            ),
+        )
         if model_selection == "fast":
-            return [
-                m1,
-                m2,
-                m3,
-                m4,
-                m5,
-                m6,
-                m7,
-            ]
+            return [m1, m2]#, m3, m4, m5, m6, m7, m8, m9, m10]
         return [
             m1,
             m2,
@@ -146,26 +159,10 @@ class AutoTSCModel(BaseClassifier):
             m7,
             m4,
             m5,
-            (
-                "dif-quant",
-                RayCrossValidationWrapper(
-                    aeon_make_pipeline(
-                        transformers.Difference(), QUANTClassifier(random_state=random_seed)
-                    )
-                ),
-            ),
-            ("cs-quant", RayCrossValidationWrapper(QUANTClassifier(random_state=random_seed))),
+            m8,
+            m9,
             m6,
-            (
-                "mulroc",
-                RayCrossValidationWrapper(
-                    MultiRocketClassifier(
-                        n_jobs=1,
-                        estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)),
-                        random_state=random_seed,
-                    )
-                ),
-            ),
+            m10,
             ("weasel", RayCrossValidationWrapper(WEASEL_V2(n_jobs=1, max_feature_count=3000))),
             (
                 "tsf",
@@ -195,7 +192,6 @@ class AutoTSCModel(BaseClassifier):
         ]
 
     def get_default_metamodels(self):
-
         model1 = ("m-ridgecv", Ensemble(RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10))))
         # model2 = ("m-rf", Ensemble(RandomForestClassifier(n_jobs=-1, n_estimators=500)))
         # model3 = ("m-hgb", Ensemble(HistGradientBoostingClassifier()))
@@ -218,14 +214,13 @@ class AutoTSCModel(BaseClassifier):
         model7 = ("m-svm", Ensemble(SVC(kernel="linear", probability=True)))
         model8 = ("m-log", Ensemble(LogisticRegressionCV(cv=5, n_jobs=-1)))
 
-        return [model1, model7, model8]
+        return [model1, model8]#, model7]
 
     def _fit(self, X, y):
         self.cpus_available_, self.cpus_to_use_, self.gpus_available_, self.gpus_to_use_ = (
             utils.get_resource_config(self.n_jobs, self.n_gpus)
         )
         random_seed = np.random.randint(0, 10000)
-        n_folds = 20
         if self.verbose > 0:
             utils.print_fit_start_info(
                 X,
@@ -235,9 +230,9 @@ class AutoTSCModel(BaseClassifier):
                 self.gpus_to_use_,
                 self.gpus_available_,
                 random_seed,
-                n_folds=n_folds,
+                n_folds=self.n_folds,
             )
-        folds = utils.get_folds(X, y, n_splits=n_folds)
+        self.folds_ = utils.get_folds(X, y, n_splits=self.n_folds)
         # default_models = self.get_default_models()
         default_ray_models = self.get_default_ray_models(
             random_seed, model_selection=self.model_selection
@@ -248,7 +243,7 @@ class AutoTSCModel(BaseClassifier):
         X_ref = ray.put(X)
         y_ref = ray.put(y)
         for model_id, model in default_ray_models:
-            t = ray_run_fit_predict_proba_wrapper.remote(model_id, model, X_ref, y_ref, folds)
+            t = ray_run_fit_predict_proba_wrapper.remote(model_id, model, X_ref, y_ref, self.folds_)
             ts.append(t)
 
         ray_results = ray.get(ts)
@@ -282,11 +277,11 @@ class AutoTSCModel(BaseClassifier):
 
         default_metamodels = self.get_default_metamodels()
         for model_id, model in default_metamodels:
-            start_time = perf_counter()
-            pred = model.fit_predict_proba_cv(self.oof_predictions_.to_numpy(), y, folds)
-            endtime = perf_counter()
+            X = self.oof_predictions_.to_numpy(writable=True)
+            X = np.asarray(X, dtype=np.float64, order="C").copy()
+            pred = model.fit_predict_proba_cv(X, y, self.folds_)
             pred_max = np.argmax(pred, axis=1)
-            acc = accuracy_score(y, model.models[0].classes_[pred_max])
+            acc = accuracy_score(y, model.trained_models_[0].classes_[pred_max])
             self.meta_models_[model_id] = model
             self.summary_.append(
                 {
@@ -294,12 +289,12 @@ class AutoTSCModel(BaseClassifier):
                     "model": repr(model).replace("\n", "").replace(" ", ""),
                     "validation_accuracy": acc,
                     "stacking_level": 1,
-                    "train_time": endtime - start_time,
+                    "train_time": model.fit_time_mean_,
                 }
             )
             if self.verbose > 0:
                 print(
-                    f"Trained meta model {model_id}, OOF accuracy: {acc:.4f} in {endtime - start_time:.2f}s"
+                    f"Trained meta model {model_id}, OOF accuracy: {acc:.4f} in {model.fit_time_mean_:.2f}s"
                 )
 
         return self
@@ -312,8 +307,9 @@ class AutoTSCModel(BaseClassifier):
         all_preds = {}
         oof_predictions_ = None
         tasks = []
-        for model_id, model in self.models_.items():
-            t = ray_run_predict_proba_wrapper.remote(model_id, model, X)
+        X_ref = ray.put(X)
+        for model_id, model in reversed(list(self.models_.items())):
+            t = ray_run_predict_proba_wrapper.remote(model_id, model, X_ref)
             tasks.append(t)
 
         # for model_id, model in self.models_.items():
@@ -328,9 +324,15 @@ class AutoTSCModel(BaseClassifier):
             pred = np.argmax(pred_probs, axis=1)
             pred_labels = model.classes_[pred]
             all_preds[model_id] = pred_labels
+            if self.verbose > 0:
+                print(f"Prediction with {model_id} made in {model.predict_time_mean_:.2f}s")
 
         for model_id, model in self.meta_models_.items():
-            pred = model.predict(oof_predictions_.to_numpy())
+            X = oof_predictions_.select(self.oof_predictions_.columns).to_numpy(writable=True)
+            X = np.asarray(X, dtype=np.float64, order="C").copy()
+            print(type(X))
+            print(X.shape)
+            pred = model.predict(X)
             all_preds[model_id] = pred
 
         return all_preds
@@ -355,19 +357,31 @@ class RayCrossValidationWrapper(BaseClassifier):
         self.trained_models_ = []
         self.fit_time_ = []
         self.fit_time_mean_ = None
+        self.predict_time_ = []
+        self.predict_time_mean_ = None
 
     def _fit(self, X, y):
         raise NotImplementedError()
 
     def _predict_proba(self, X):
+        predictions = []
         tasks = [ray_run_predict_proba.remote(model, X) for model in self.trained_models_]
-        predictions = ray.get(tasks)
+        for task in tasks:
+            proba, pred_time = ray.get(task)
+            predictions.append(proba)
+            self.predict_time_.append(pred_time)
+        self.predict_time_mean_ = np.mean(self.predict_time_)
         avg_proba = np.mean(predictions, axis=0)
         return avg_proba
 
     def _predict(self, X):
         tasks = [ray_run_predict_proba.remote(model, X) for model in self.trained_models_]
-        predictions = ray.get(tasks)
+        predictions = []
+        for task in tasks:
+            proba, pred_time = ray.get(task)
+            predictions.append(proba)
+            self.predict_time_.append(pred_time)
+        self.predict_time_mean_ = np.mean(self.predict_time_)
         avg_proba = np.mean(predictions, axis=0)
         predicted_indices = np.argmax(avg_proba, axis=1)
         return self.classes_[predicted_indices]
@@ -400,28 +414,52 @@ class RayCrossValidationWrapper(BaseClassifier):
 
 class Ensemble:
     def __init__(self, model):
-        self.model_ = model
-        self.models = []
+        self.model = model
+        self.trained_models_ = []
+        self.fit_time_ = []
+        self.fit_time_mean_ = None
 
     def fit_predict_proba_cv(self, X, y, cv_splits):
-        proba_predictions = []
+        n_classes = len(np.unique(y))
+        oof_proba = np.zeros((len(y), n_classes))
+
+        fold_tasks = []
         for train_idx, val_idx in cv_splits:
-            model_clone = clone(self.model_)
-            model_clone.fit(X[train_idx], y[train_idx])
-            self.models.append(model_clone)
-            y_proba = model_clone.predict_proba(X[val_idx])
-            proba_predictions.extend(zip(val_idx, y_proba))
-        proba_predictions = sorted(proba_predictions)
-        return np.array([proba for idx, proba in proba_predictions])
+            pass
+            model_clone = clone(self.model)
+            task = ray_run_model_on_fold.remote(model_clone, X, y, train_idx, val_idx)
+            fold_tasks.append(task)
+
+        results = ray.get(fold_tasks)
+        for model, proba, fit_time in results:
+            self.trained_models_.append(model)
+            for idx, p in proba:
+                oof_proba[idx] = p
+            self.fit_time_.append(fit_time)
+        self.fit_time_mean_ = np.mean(self.fit_time_)
+        return oof_proba
+
+        #proba_predictions = []
+        #for train_idx, val_idx in cv_splits:
+        #    model_clone = clone(self.model)
+        #    model_clone.fit(X[train_idx], y[train_idx])
+        #    self.models.append(model_clone)
+        #    y_proba = model_clone.predict_proba(X[val_idx])
+        #    proba_predictions.extend(zip(val_idx, y_proba))
+        #proba_predictions = sorted(proba_predictions)
+        #return np.array([proba for idx, proba in proba_predictions])
 
     def predict(self, X):
-        predictions = np.array([model.predict_proba(X) for model in self.models])
+        # Create a truly writable copy for SVM's C code
+        X = np.array(X, dtype=np.float64, order='C', copy=True)
+        X.setflags(write=True)
+        predictions = np.array([model.predict_proba(X) for model in self.trained_models_])
         avg_proba = predictions.mean(axis=0)
         predicted_indices = np.argmax(avg_proba, axis=1)
-        return self.models[0].classes_[predicted_indices]
+        return self.trained_models_[0].classes_[predicted_indices]
 
     def __repr__(self):
-        return f"{self.__class__.__name__}({self.model_})"
+        return f"{self.__class__.__name__}({self.model})"
 
 
 class EnsambleWeights:
@@ -448,7 +486,7 @@ def ray_run_predict_proba(model, X):
     proba = model.predict_proba(X)
     pred_time = perf_counter() - start_time
     # print(f"Predict proba with model {model.__class__.__name__} done in {pred_time:.2f}s")
-    return proba
+    return proba, pred_time
 
 
 @ray.remote(num_cpus=0, resources={"meta": 1})
