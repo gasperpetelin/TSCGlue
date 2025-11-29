@@ -11,7 +11,7 @@ def test_model_accuracy_on_arrowhead():
     # Load the dataset
     X_train, y_train, X_test, y_test = utils.load_dataset("ArrowHead")
 
-    with utils.ray_init_or_reuse(num_cpus=24, resources={"meta": 100}, ignore_reinit_error=True):
+    with utils.ray_init_or_reuse(num_cpus=8, resources={"meta": 100}, ignore_reinit_error=True):
         # Initialize AutoTSCModel2
         model = AutoTSCModel(n_jobs=8, verbose=1, model_selection="fast")
 

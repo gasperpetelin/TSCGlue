@@ -28,7 +28,7 @@ from sklearn.base import clone
 from sklearn.ensemble import (
     RandomForestClassifier,
 )
-from sklearn.linear_model import LogisticRegressionCV, RidgeClassifierCV
+from sklearn.linear_model import LogisticRegression, LogisticRegressionCV, RidgeClassifierCV
 from sklearn.metrics import accuracy_score
 from sklearn.svm import SVC
 
@@ -212,7 +212,7 @@ class AutoTSCModel(BaseClassifier):
         # )
 
         model7 = ("m-svm", Ensemble(SVC(kernel="linear", probability=True)))
-        model8 = ("m-log", Ensemble(LogisticRegressionCV(cv=5, n_jobs=-1)))
+        model8 = ("m-log", Ensemble(LogisticRegression(n_jobs=-1)))
 
         return [model1, model8]#, model7]
 
@@ -330,8 +330,6 @@ class AutoTSCModel(BaseClassifier):
         for model_id, model in self.meta_models_.items():
             X = oof_predictions_.select(self.oof_predictions_.columns).to_numpy(writable=True)
             X = np.asarray(X, dtype=np.float64, order="C").copy()
-            print(type(X))
-            print(X.shape)
             pred = model.predict(X)
             all_preds[model_id] = pred
 
