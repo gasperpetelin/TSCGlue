@@ -1,8 +1,8 @@
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from time import perf_counter
 
 import numpy as np
 import polars as pl
-import ray
 from aeon.classification.base import BaseClassifier
 from aeon.classification.convolution_based import (
     HydraClassifier,
@@ -28,7 +28,7 @@ from sklearn.base import clone
 from sklearn.ensemble import (
     RandomForestClassifier,
 )
-from sklearn.linear_model import LogisticRegression, LogisticRegressionCV, RidgeClassifierCV
+from sklearn.linear_model import LogisticRegression, RidgeClassifierCV
 from sklearn.metrics import accuracy_score
 from sklearn.svm import SVC
 
@@ -59,24 +59,24 @@ class AutoTSCModel(BaseClassifier):
         self.folds_ = None
         super().__init__()
 
-    def get_default_ray_models(self, random_seed, model_selection="fast"):
+    def get_default_models(self, random_seed, model_selection="fast"):
         # add also scaled model versions
         m1 = (
             "tab-ridge",
-            RayCrossValidationWrapper(
+            CrossValidationWrapper(
                 SklearnClassifierWrapper(RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)))
             ),
         )
         m2 = (
             "tab-rf",
-            RayCrossValidationWrapper(
+            CrossValidationWrapper(
                 SklearnClassifierWrapper(RandomForestClassifier(n_jobs=-1, n_estimators=500))
             ),
         )
-        m3 = ("c22", RayCrossValidationWrapper(Catch22Classifier(n_jobs=1)))
+        m3 = ("c22", CrossValidationWrapper(Catch22Classifier(n_jobs=1)))
         m4 = (
             "minirocket",
-            RayCrossValidationWrapper(
+            CrossValidationWrapper(
                 MiniRocketClassifier(
                     n_jobs=1,
                     estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)),
@@ -86,18 +86,18 @@ class AutoTSCModel(BaseClassifier):
         )
         m5 = (
             "quant",
-            RayCrossValidationWrapper(
+            CrossValidationWrapper(
                 aeon_make_pipeline(transformers.CumSum(), QUANTClassifier(random_state=random_seed))
             ),
         )
         m6 = (
             "hydra",
-            RayCrossValidationWrapper(HydraClassifier(n_jobs=1, random_state=random_seed)),
+            CrossValidationWrapper(HydraClassifier(n_jobs=1, random_state=random_seed)),
             # TODO add RidgeClassifierCVWithProba() not regular ridge
         )
         m7 = (
             "rocket",
-            RayCrossValidationWrapper(
+            CrossValidationWrapper(
                 RocketClassifier(
                     n_jobs=1,
                     estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)),
@@ -107,16 +107,16 @@ class AutoTSCModel(BaseClassifier):
         )
         m8 = (
             "dif-quant",
-            RayCrossValidationWrapper(
+            CrossValidationWrapper(
                 aeon_make_pipeline(
                     transformers.Difference(), QUANTClassifier(random_state=random_seed)
                 )
             ),
         )
-        m9 = ("cs-quant", RayCrossValidationWrapper(QUANTClassifier(random_state=random_seed)))
+        m9 = ("cs-quant", CrossValidationWrapper(QUANTClassifier(random_state=random_seed)))
         m10 = (
             "multirocket",
-            RayCrossValidationWrapper(
+            CrossValidationWrapper(
                 MultiRocketClassifier(
                     n_jobs=1,
                     estimator=RidgeClassifierCVWithProba(alphas=np.logspace(-3, 3, 10)),
@@ -125,13 +125,13 @@ class AutoTSCModel(BaseClassifier):
             ),
         )
         if model_selection == "fast":
-            return [m1, m2]#, m3, m4, m5, m6, m7, m8, m9, m10]
+            return [m1, m2]  # , m3, m4, m5, m6, m7, m8, m9, m10]
         return [
             m1,
             m2,
             (
                 "dif-roc",
-                RayCrossValidationWrapper(
+                CrossValidationWrapper(
                     aeon_make_pipeline(
                         transformers.Difference(),
                         RocketClassifier(
@@ -144,7 +144,7 @@ class AutoTSCModel(BaseClassifier):
             ),
             (
                 "cs-roc",
-                RayCrossValidationWrapper(
+                CrossValidationWrapper(
                     aeon_make_pipeline(
                         transformers.CumSum(),
                         MultiRocketClassifier(
@@ -163,31 +163,31 @@ class AutoTSCModel(BaseClassifier):
             m9,
             m6,
             m10,
-            ("weasel", RayCrossValidationWrapper(WEASEL_V2(n_jobs=1, max_feature_count=3000))),
+            ("weasel", CrossValidationWrapper(WEASEL_V2(n_jobs=1, max_feature_count=3000))),
             (
                 "tsf",
-                RayCrossValidationWrapper(SupervisedTimeSeriesForest(n_jobs=1, n_estimators=20)),
+                CrossValidationWrapper(SupervisedTimeSeriesForest(n_jobs=1, n_estimators=20)),
             ),
-            ("rstsf", RayCrossValidationWrapper(RSTSF(n_jobs=1, n_estimators=20))),
-            ("summry", RayCrossValidationWrapper(SummaryClassifier(n_jobs=1))),
+            ("rstsf", CrossValidationWrapper(RSTSF(n_jobs=1, n_estimators=20))),
+            ("summry", CrossValidationWrapper(SummaryClassifier(n_jobs=1))),
             (
                 "rochydra",
-                RayCrossValidationWrapper(
+                CrossValidationWrapper(
                     MultiRocketHydraClassifier(n_jobs=1, random_state=random_seed + 1)
                 ),
             ),
             (
                 "cboss",
-                RayCrossValidationWrapper(ContractableBOSS(n_jobs=1, time_limit_in_minutes=1.0)),
+                CrossValidationWrapper(ContractableBOSS(n_jobs=1, time_limit_in_minutes=1.0)),
             ),
             (
                 "drcif",
-                RayCrossValidationWrapper(
+                CrossValidationWrapper(
                     DrCIFClassifier(n_jobs=1, random_state=random_seed, time_limit_in_minutes=1.0)
                 ),
             ),
-            # RayCrossValidationWrapper(RISTClassifier(n_jobs=1)),
-            # RayCrossValidationWrapper(RDSTClassifier(n_jobs=-1)),
+            # CrossValidationWrapper(RISTClassifier(n_jobs=1)),
+            # CrossValidationWrapper(RDSTClassifier(n_jobs=-1)),
             # REDCOMETS(n_jobs=-1, n_trees=50)
         ]
 
@@ -233,53 +233,54 @@ class AutoTSCModel(BaseClassifier):
                 n_folds=self.n_folds,
             )
         self.folds_ = utils.get_folds(X, y, n_splits=self.n_folds)
-        # default_models = self.get_default_models()
-        default_ray_models = self.get_default_ray_models(
+        default_models = self.get_default_models(
             random_seed, model_selection=self.model_selection
         )
 
-        ts = []
-        # create X and y reference
-        X_ref = ray.put(X)
-        y_ref = ray.put(y)
-        for model_id, model in default_ray_models:
-            t = ray_run_fit_predict_proba_wrapper.remote(model_id, model, X_ref, y_ref, self.folds_)
-            ts.append(t)
+        # Use ProcessPoolExecutor for parallel model training
+        with ProcessPoolExecutor(max_workers=self.cpus_to_use_) as executor:
+            futures = {}
+            for model_id, model in default_models:
+                future = executor.submit(
+                    run_fit_predict_proba_wrapper, model_id, model, X, y, self.folds_
+                )
+                futures[future] = model_id
 
-        ray_results = ray.get(ts)
-        for model_id, model, pred in ray_results:
-            self.models_[model_id] = model
-            pred_max = np.argmax(pred, axis=1)
-            acc = accuracy_score(y, model.classes_[pred_max])
-            self.summary_.append(
-                {
-                    "model_id": model_id,
-                    "model": repr(model).replace("\n", "").replace(" ", ""),
-                    "validation_accuracy": acc,
-                    "stacking_level": 0,
-                    "train_time": model.fit_time_mean_,
-                }
-            )
-
-            if self.verbose > 0:
-                print(
-                    f"Trained base model {model_id}, OOF accuracy: {acc:.4f} in {model.fit_time_mean_:.2f}s"
+            for future in as_completed(futures):
+                model_id, model, pred = future.result()
+                self.models_[model_id] = model
+                pred_max = np.argmax(pred, axis=1)
+                acc = accuracy_score(y, model.classes_[pred_max])
+                self.summary_.append(
+                    {
+                        "model_id": model_id,
+                        "model": repr(model).replace("\n", "").replace(" ", ""),
+                        "validation_accuracy": acc,
+                        "stacking_level": 0,
+                        "train_time": model.fit_time_mean_,
+                    }
                 )
 
-            columns = [f"model_{model_id}__class_{l}" for l in list(model.classes_)]
-            if self.oof_predictions_ is None:
-                self.oof_predictions_ = pl.DataFrame(pred, schema=columns)
-            else:
-                df_pred = pl.DataFrame(pred, schema=columns)
-                self.oof_predictions_ = pl.concat(
-                    [self.oof_predictions_, df_pred], how="horizontal"
-                )
+                if self.verbose > 0:
+                    print(
+                        f"Trained base model {model_id}, OOF accuracy: {acc:.4f} "
+                        f"in {model.fit_time_mean_:.2f}s"
+                    )
+
+                columns = [f"model_{model_id}__class_{l}" for l in list(model.classes_)]
+                if self.oof_predictions_ is None:
+                    self.oof_predictions_ = pl.DataFrame(pred, schema=columns)
+                else:
+                    df_pred = pl.DataFrame(pred, schema=columns)
+                    self.oof_predictions_ = pl.concat(
+                        [self.oof_predictions_, df_pred], how="horizontal"
+                    )
 
         default_metamodels = self.get_default_metamodels()
         for model_id, model in default_metamodels:
-            X = self.oof_predictions_.to_numpy(writable=True)
-            X = np.asarray(X, dtype=np.float64, order="C").copy()
-            pred = model.fit_predict_proba_cv(X, y, self.folds_)
+            X_meta = self.oof_predictions_.to_numpy(writable=True)
+            X_meta = np.asarray(X_meta, dtype=np.float64, order="C").copy()
+            pred = model.fit_predict_proba_cv(X_meta, y, self.folds_)
             pred_max = np.argmax(pred, axis=1)
             acc = accuracy_score(y, model.trained_models_[0].classes_[pred_max])
             self.meta_models_[model_id] = model
@@ -294,7 +295,8 @@ class AutoTSCModel(BaseClassifier):
             )
             if self.verbose > 0:
                 print(
-                    f"Trained meta model {model_id}, OOF accuracy: {acc:.4f} in {model.fit_time_mean_:.2f}s"
+                    f"Trained meta model {model_id}, OOF accuracy: {acc:.4f} "
+                    f"in {model.fit_time_mean_:.2f}s"
                 )
 
         return self
@@ -306,31 +308,32 @@ class AutoTSCModel(BaseClassifier):
         "make predictions for each model in the ensemble"
         all_preds = {}
         oof_predictions_ = None
-        tasks = []
-        X_ref = ray.put(X)
-        for model_id, model in reversed(list(self.models_.items())):
-            t = ray_run_predict_proba_wrapper.remote(model_id, model, X_ref)
-            tasks.append(t)
 
-        # for model_id, model in self.models_.items():
-        for model_id, model, pred_probs in ray.get(tasks):
-            # pred_probs = model.predict_proba(X)
-            columns = [f"model_{model_id}__class_{l}" for l in list(model.classes_)]
-            if oof_predictions_ is None:
-                oof_predictions_ = pl.DataFrame(pred_probs, schema=columns)
-            else:
-                df_pred = pl.DataFrame(pred_probs, schema=columns)
-                oof_predictions_ = pl.concat([oof_predictions_, df_pred], how="horizontal")
-            pred = np.argmax(pred_probs, axis=1)
-            pred_labels = model.classes_[pred]
-            all_preds[model_id] = pred_labels
-            if self.verbose > 0:
-                print(f"Prediction with {model_id} made in {model.predict_time_mean_:.2f}s")
+        # Use ProcessPoolExecutor for parallel predictions
+        with ProcessPoolExecutor(max_workers=self.cpus_to_use_) as executor:
+            futures = {}
+            for model_id, model in reversed(list(self.models_.items())):
+                future = executor.submit(run_predict_proba_wrapper, model_id, model, X)
+                futures[future] = model_id
+
+            for future in as_completed(futures):
+                model_id, model, pred_probs = future.result()
+                columns = [f"model_{model_id}__class_{l}" for l in list(model.classes_)]
+                if oof_predictions_ is None:
+                    oof_predictions_ = pl.DataFrame(pred_probs, schema=columns)
+                else:
+                    df_pred = pl.DataFrame(pred_probs, schema=columns)
+                    oof_predictions_ = pl.concat([oof_predictions_, df_pred], how="horizontal")
+                pred = np.argmax(pred_probs, axis=1)
+                pred_labels = model.classes_[pred]
+                all_preds[model_id] = pred_labels
+                if self.verbose > 0:
+                    print(f"Prediction with {model_id} made in {model.predict_time_mean_:.2f}s")
 
         for model_id, model in self.meta_models_.items():
-            X = oof_predictions_.select(self.oof_predictions_.columns).to_numpy(writable=True)
-            X = np.asarray(X, dtype=np.float64, order="C").copy()
-            pred = model.predict(X)
+            X_meta = oof_predictions_.select(self.oof_predictions_.columns).to_numpy(writable=True)
+            X_meta = np.asarray(X_meta, dtype=np.float64, order="C").copy()
+            pred = model.predict(X_meta)
             all_preds[model_id] = pred
 
         return all_preds
@@ -348,10 +351,11 @@ class RidgeClassifierCVWithProba(RidgeClassifierCV):
         return self._predict_proba_lr(X)
 
 
-class RayCrossValidationWrapper(BaseClassifier):
-    def __init__(self, model):
+class CrossValidationWrapper(BaseClassifier):
+    def __init__(self, model, n_workers=None):
         super().__init__()
         self.model = model
+        self.n_workers = n_workers
         self.trained_models_ = []
         self.fit_time_ = []
         self.fit_time_mean_ = None
@@ -363,22 +367,32 @@ class RayCrossValidationWrapper(BaseClassifier):
 
     def _predict_proba(self, X):
         predictions = []
-        tasks = [ray_run_predict_proba.remote(model, X) for model in self.trained_models_]
-        for task in tasks:
-            proba, pred_time = ray.get(task)
-            predictions.append(proba)
-            self.predict_time_.append(pred_time)
+        # Use ProcessPoolExecutor for parallel prediction
+        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+            futures = [
+                executor.submit(run_predict_proba, model, X)
+                for model in self.trained_models_
+            ]
+            for future in as_completed(futures):
+                proba, pred_time = future.result()
+                predictions.append(proba)
+                self.predict_time_.append(pred_time)
         self.predict_time_mean_ = np.mean(self.predict_time_)
         avg_proba = np.mean(predictions, axis=0)
         return avg_proba
 
     def _predict(self, X):
-        tasks = [ray_run_predict_proba.remote(model, X) for model in self.trained_models_]
         predictions = []
-        for task in tasks:
-            proba, pred_time = ray.get(task)
-            predictions.append(proba)
-            self.predict_time_.append(pred_time)
+        # Use ProcessPoolExecutor for parallel prediction
+        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+            futures = [
+                executor.submit(run_predict_proba, model, X)
+                for model in self.trained_models_
+            ]
+            for future in as_completed(futures):
+                proba, pred_time = future.result()
+                predictions.append(proba)
+                self.predict_time_.append(pred_time)
         self.predict_time_mean_ = np.mean(self.predict_time_)
         avg_proba = np.mean(predictions, axis=0)
         predicted_indices = np.argmax(avg_proba, axis=1)
@@ -388,18 +402,20 @@ class RayCrossValidationWrapper(BaseClassifier):
         n_classes = len(np.unique(y))
         oof_proba = np.zeros((len(y), n_classes))
 
-        fold_tasks = []
-        for train_idx, val_idx in cv_splits:
-            model_clone = clone(self.model)
-            task = ray_run_model_on_fold.remote(model_clone, X, y, train_idx, val_idx)
-            fold_tasks.append(task)
+        # Use ProcessPoolExecutor for parallel fold training
+        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+            futures = []
+            for train_idx, val_idx in cv_splits:
+                model_clone = clone(self.model)
+                future = executor.submit(run_model_on_fold, model_clone, X, y, train_idx, val_idx)
+                futures.append(future)
 
-        results = ray.get(fold_tasks)
-        for model, proba, fit_time in results:
-            self.trained_models_.append(model)
-            for idx, p in proba:
-                oof_proba[idx] = p
-            self.fit_time_.append(fit_time)
+            for future in as_completed(futures):
+                model, proba, fit_time = future.result()
+                self.trained_models_.append(model)
+                for idx, p in proba:
+                    oof_proba[idx] = p
+                self.fit_time_.append(fit_time)
         self.fit_time_mean_ = np.mean(self.fit_time_)
         return oof_proba
 
@@ -411,8 +427,9 @@ class RayCrossValidationWrapper(BaseClassifier):
 
 
 class Ensemble:
-    def __init__(self, model):
+    def __init__(self, model, n_workers=None):
         self.model = model
+        self.n_workers = n_workers
         self.trained_models_ = []
         self.fit_time_ = []
         self.fit_time_mean_ = None
@@ -421,35 +438,26 @@ class Ensemble:
         n_classes = len(np.unique(y))
         oof_proba = np.zeros((len(y), n_classes))
 
-        fold_tasks = []
-        for train_idx, val_idx in cv_splits:
-            pass
-            model_clone = clone(self.model)
-            task = ray_run_model_on_fold.remote(model_clone, X, y, train_idx, val_idx)
-            fold_tasks.append(task)
+        # Use ProcessPoolExecutor for parallel fold training
+        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+            futures = []
+            for train_idx, val_idx in cv_splits:
+                model_clone = clone(self.model)
+                future = executor.submit(run_model_on_fold, model_clone, X, y, train_idx, val_idx)
+                futures.append(future)
 
-        results = ray.get(fold_tasks)
-        for model, proba, fit_time in results:
-            self.trained_models_.append(model)
-            for idx, p in proba:
-                oof_proba[idx] = p
-            self.fit_time_.append(fit_time)
+            for future in as_completed(futures):
+                model, proba, fit_time = future.result()
+                self.trained_models_.append(model)
+                for idx, p in proba:
+                    oof_proba[idx] = p
+                self.fit_time_.append(fit_time)
         self.fit_time_mean_ = np.mean(self.fit_time_)
         return oof_proba
 
-        #proba_predictions = []
-        #for train_idx, val_idx in cv_splits:
-        #    model_clone = clone(self.model)
-        #    model_clone.fit(X[train_idx], y[train_idx])
-        #    self.models.append(model_clone)
-        #    y_proba = model_clone.predict_proba(X[val_idx])
-        #    proba_predictions.extend(zip(val_idx, y_proba))
-        #proba_predictions = sorted(proba_predictions)
-        #return np.array([proba for idx, proba in proba_predictions])
-
     def predict(self, X):
         # Create a truly writable copy for SVM's C code
-        X = np.array(X, dtype=np.float64, order='C', copy=True)
+        X = np.array(X, dtype=np.float64, order="C", copy=True)
         X.setflags(write=True)
         predictions = np.array([model.predict_proba(X) for model in self.trained_models_])
         avg_proba = predictions.mean(axis=0)
@@ -465,38 +473,36 @@ class EnsambleWeights:
         pass
 
 
-@ray.remote(num_cpus=1)
-def ray_run_model_on_fold(model_clone, X, y, train_idx, valid_idx):
+# Helper functions for parallel execution (replaces Ray remote functions)
+def run_model_on_fold(model_clone, X, y, train_idx, valid_idx):
+    """Train a model on a single fold and return predictions."""
     X_train, y_train = X[train_idx], y[train_idx]
-    X_valid, y_valid = X[valid_idx], y[valid_idx]
+    X_valid, _ = X[valid_idx], y[valid_idx]
     start_time = perf_counter()
     model_clone.fit(X_train, y_train)
     fit_time = perf_counter() - start_time
     proba = model_clone.predict_proba(X_valid)
     val_probs = list(zip(valid_idx, proba))
-    # print(f"Train model {model_clone.__class__.__name__} on fold done in {fit_time:.2f}s")
     return model_clone, val_probs, fit_time
 
 
-@ray.remote(num_cpus=1)
-def ray_run_predict_proba(model, X):
+def run_predict_proba(model, X):
+    """Run predict_proba on a model."""
     start_time = perf_counter()
     proba = model.predict_proba(X)
     pred_time = perf_counter() - start_time
-    # print(f"Predict proba with model {model.__class__.__name__} done in {pred_time:.2f}s")
     return proba, pred_time
 
 
-@ray.remote(num_cpus=0, resources={"meta": 1})
-def ray_run_fit_predict_proba_wrapper(model_id, wrapper, X, y, folds):
+def run_fit_predict_proba_wrapper(model_id, wrapper, X, y, folds):
+    """Fit a wrapper model and return predictions."""
     start_fp = perf_counter()
     result = wrapper.fit_predict_proba(X, y, cv_splits=folds)
-    total_fp_time = perf_counter() - start_fp
-    # print(f"Completed fit_predict_proba in Ray task in {total_fp_time:.2f}s")
+    perf_counter() - start_fp
     return model_id, wrapper, result
 
 
-@ray.remote(num_cpus=0, resources={"meta": 1})
-def ray_run_predict_proba_wrapper(model_id, wrapper, X):
+def run_predict_proba_wrapper(model_id, wrapper, X):
+    """Run predict_proba on a wrapper model."""
     result = wrapper.predict_proba(X)
     return model_id, wrapper, result

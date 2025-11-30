@@ -1,11 +1,9 @@
 """Utility functions for AutoTSC."""
 
 import os
-from contextlib import contextmanager
 
 import numpy as np
 import polars as pl
-import ray
 import tensorflow as tf
 from aeon.datasets import load_classification
 from sklearn.model_selection import KFold, StratifiedKFold
@@ -102,24 +100,6 @@ def print_fit_start_info(
     for line in lines:
         print(f"| {line.ljust(max_len)} |")
     print(border)
-
-
-@contextmanager
-def ray_init_or_reuse(**ray_init_kwargs):
-    started_here = False
-    try:
-        # If Ray is already running, reuse it
-        if not ray.is_initialized():
-            # Start Ray with the requested resources only if not running
-            ray.init(**ray_init_kwargs)
-            started_here = True
-
-        yield
-
-    finally:
-        # Only shutdown if we started it
-        if started_here and ray.is_initialized():
-            ray.shutdown()
 
 
 # def get_folds(X, y, n_splits=10):
