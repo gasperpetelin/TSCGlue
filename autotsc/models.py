@@ -477,7 +477,7 @@ class EnsambleWeights:
 def run_model_on_fold(model_clone, X, y, train_idx, valid_idx):
     """Train a model on a single fold and return predictions."""
     X_train, y_train = X[train_idx], y[train_idx]
-    X_valid, _ = X[valid_idx], y[valid_idx]
+    X_valid = X[valid_idx]
     start_time = perf_counter()
     model_clone.fit(X_train, y_train)
     fit_time = perf_counter() - start_time
@@ -496,9 +496,7 @@ def run_predict_proba(model, X):
 
 def run_fit_predict_proba_wrapper(model_id, wrapper, X, y, folds):
     """Fit a wrapper model and return predictions."""
-    start_fp = perf_counter()
     result = wrapper.fit_predict_proba(X, y, cv_splits=folds)
-    perf_counter() - start_fp
     return model_id, wrapper, result
 
 
