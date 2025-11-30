@@ -1,7 +1,5 @@
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from time import perf_counter
-
 import numpy as np
+import parsl
 import polars as pl
 from aeon.classification.base import BaseClassifier
 from aeon.classification.convolution_based import (
@@ -24,6 +22,9 @@ from aeon.classification.interval_based import (
 )
 from aeon.classification.sklearn import SklearnClassifierWrapper
 from aeon.pipeline import make_pipeline as aeon_make_pipeline
+from parsl import python_app
+from parsl.config import Config
+from parsl.executors.threads import ThreadPoolExecutor
 from sklearn.base import clone
 from sklearn.ensemble import (
     RandomForestClassifier,
@@ -31,8 +32,30 @@ from sklearn.ensemble import (
 from sklearn.linear_model import LogisticRegression, RidgeClassifierCV
 from sklearn.metrics import accuracy_score
 from sklearn.svm import SVC
+from time import perf_counter
 
 from autotsc import transformers, utils
+
+
+def _load_parsl_if_needed(n_workers):
+    """Load Parsl configuration if not already loaded."""
+    try:
+        parsl.dfk()
+        return False  # Already loaded
+    except parsl.errors.NoDataFlowKernelError:
+        config = Config(
+            executors=[
+                ThreadPoolExecutor(max_threads=n_workers, label="local_threads")
+            ]
+        )
+        parsl.load(config)
+        return True
+
+
+def _clear_parsl_if_needed(should_clear):
+    """Clear Parsl configuration if we loaded it."""
+    if should_clear:
+        parsl.clear()
 
 
 class AutoTSCModel(BaseClassifier):
@@ -237,16 +260,18 @@ class AutoTSCModel(BaseClassifier):
             random_seed, model_selection=self.model_selection
         )
 
-        # Use ProcessPoolExecutor for parallel model training
-        with ProcessPoolExecutor(max_workers=self.cpus_to_use_) as executor:
-            futures = {}
-            for model_id, model in default_models:
-                future = executor.submit(
-                    run_fit_predict_proba_wrapper, model_id, model, X, y, self.folds_
-                )
-                futures[future] = model_id
+        # Use Parsl for parallel model training
+        should_clear = _load_parsl_if_needed(self.cpus_to_use_)
 
-            for future in as_completed(futures):
+        try:
+            futures = []
+            for model_id, model in default_models:
+                future = parsl_run_fit_predict_proba_wrapper(
+                    model_id, model, X, y, self.folds_
+                )
+                futures.append(future)
+
+            for future in futures:
                 model_id, model, pred = future.result()
                 self.models_[model_id] = model
                 pred_max = np.argmax(pred, axis=1)
@@ -275,6 +300,8 @@ class AutoTSCModel(BaseClassifier):
                     self.oof_predictions_ = pl.concat(
                         [self.oof_predictions_, df_pred], how="horizontal"
                     )
+        finally:
+            _clear_parsl_if_needed(should_clear)
 
         default_metamodels = self.get_default_metamodels()
         for model_id, model in default_metamodels:
@@ -309,14 +336,16 @@ class AutoTSCModel(BaseClassifier):
         all_preds = {}
         oof_predictions_ = None
 
-        # Use ProcessPoolExecutor for parallel predictions
-        with ProcessPoolExecutor(max_workers=self.cpus_to_use_) as executor:
-            futures = {}
-            for model_id, model in reversed(list(self.models_.items())):
-                future = executor.submit(run_predict_proba_wrapper, model_id, model, X)
-                futures[future] = model_id
+        # Use Parsl for parallel predictions
+        should_clear = _load_parsl_if_needed(self.cpus_to_use_)
 
-            for future in as_completed(futures):
+        try:
+            futures = []
+            for model_id, model in reversed(list(self.models_.items())):
+                future = parsl_run_predict_proba_wrapper(model_id, model, X)
+                futures.append(future)
+
+            for future in futures:
                 model_id, model, pred_probs = future.result()
                 columns = [f"model_{model_id}__class_{l}" for l in list(model.classes_)]
                 if oof_predictions_ is None:
@@ -329,6 +358,8 @@ class AutoTSCModel(BaseClassifier):
                 all_preds[model_id] = pred_labels
                 if self.verbose > 0:
                     print(f"Prediction with {model_id} made in {model.predict_time_mean_:.2f}s")
+        finally:
+            _clear_parsl_if_needed(should_clear)
 
         for model_id, model in self.meta_models_.items():
             X_meta = oof_predictions_.select(self.oof_predictions_.columns).to_numpy(writable=True)
@@ -367,32 +398,22 @@ class CrossValidationWrapper(BaseClassifier):
 
     def _predict_proba(self, X):
         predictions = []
-        # Use ProcessPoolExecutor for parallel prediction
-        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
-            futures = [
-                executor.submit(run_predict_proba, model, X)
-                for model in self.trained_models_
-            ]
-            for future in as_completed(futures):
-                proba, pred_time = future.result()
-                predictions.append(proba)
-                self.predict_time_.append(pred_time)
+        # Run sequentially - this is called from within a Parsl task
+        for model in self.trained_models_:
+            proba, pred_time = _run_predict_proba(model, X)
+            predictions.append(proba)
+            self.predict_time_.append(pred_time)
         self.predict_time_mean_ = np.mean(self.predict_time_)
         avg_proba = np.mean(predictions, axis=0)
         return avg_proba
 
     def _predict(self, X):
         predictions = []
-        # Use ProcessPoolExecutor for parallel prediction
-        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
-            futures = [
-                executor.submit(run_predict_proba, model, X)
-                for model in self.trained_models_
-            ]
-            for future in as_completed(futures):
-                proba, pred_time = future.result()
-                predictions.append(proba)
-                self.predict_time_.append(pred_time)
+        # Run sequentially - this is called from within a Parsl task
+        for model in self.trained_models_:
+            proba, pred_time = _run_predict_proba(model, X)
+            predictions.append(proba)
+            self.predict_time_.append(pred_time)
         self.predict_time_mean_ = np.mean(self.predict_time_)
         avg_proba = np.mean(predictions, axis=0)
         predicted_indices = np.argmax(avg_proba, axis=1)
@@ -402,20 +423,14 @@ class CrossValidationWrapper(BaseClassifier):
         n_classes = len(np.unique(y))
         oof_proba = np.zeros((len(y), n_classes))
 
-        # Use ProcessPoolExecutor for parallel fold training
-        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
-            futures = []
-            for train_idx, val_idx in cv_splits:
-                model_clone = clone(self.model)
-                future = executor.submit(run_model_on_fold, model_clone, X, y, train_idx, val_idx)
-                futures.append(future)
-
-            for future in as_completed(futures):
-                model, proba, fit_time = future.result()
-                self.trained_models_.append(model)
-                for idx, p in proba:
-                    oof_proba[idx] = p
-                self.fit_time_.append(fit_time)
+        # Run sequentially - this is called from within a Parsl task
+        for train_idx, val_idx in cv_splits:
+            model_clone = clone(self.model)
+            model, proba, fit_time = _run_model_on_fold(model_clone, X, y, train_idx, val_idx)
+            self.trained_models_.append(model)
+            for idx, p in proba:
+                oof_proba[idx] = p
+            self.fit_time_.append(fit_time)
         self.fit_time_mean_ = np.mean(self.fit_time_)
         return oof_proba
 
@@ -438,20 +453,23 @@ class Ensemble:
         n_classes = len(np.unique(y))
         oof_proba = np.zeros((len(y), n_classes))
 
-        # Use ProcessPoolExecutor for parallel fold training
-        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+        # Use Parsl for parallel fold training
+        should_clear = _load_parsl_if_needed(self.n_workers or 4)
+        try:
             futures = []
             for train_idx, val_idx in cv_splits:
                 model_clone = clone(self.model)
-                future = executor.submit(run_model_on_fold, model_clone, X, y, train_idx, val_idx)
+                future = parsl_run_model_on_fold(model_clone, X, y, train_idx, val_idx)
                 futures.append(future)
 
-            for future in as_completed(futures):
+            for future in futures:
                 model, proba, fit_time = future.result()
                 self.trained_models_.append(model)
                 for idx, p in proba:
                     oof_proba[idx] = p
                 self.fit_time_.append(fit_time)
+        finally:
+            _clear_parsl_if_needed(should_clear)
         self.fit_time_mean_ = np.mean(self.fit_time_)
         return oof_proba
 
@@ -473,8 +491,8 @@ class EnsambleWeights:
         pass
 
 
-# Helper functions for parallel execution (replaces Ray remote functions)
-def run_model_on_fold(model_clone, X, y, train_idx, valid_idx):
+# Helper functions for sequential execution (used within Parsl tasks)
+def _run_model_on_fold(model_clone, X, y, train_idx, valid_idx):
     """Train a model on a single fold and return predictions."""
     X_train, y_train = X[train_idx], y[train_idx]
     X_valid = X[valid_idx]
@@ -486,7 +504,7 @@ def run_model_on_fold(model_clone, X, y, train_idx, valid_idx):
     return model_clone, val_probs, fit_time
 
 
-def run_predict_proba(model, X):
+def _run_predict_proba(model, X):
     """Run predict_proba on a model."""
     start_time = perf_counter()
     proba = model.predict_proba(X)
@@ -494,13 +512,31 @@ def run_predict_proba(model, X):
     return proba, pred_time
 
 
-def run_fit_predict_proba_wrapper(model_id, wrapper, X, y, folds):
+# Parsl app functions for parallel execution
+@python_app
+def parsl_run_model_on_fold(model_clone, X, y, train_idx, valid_idx):
+    """Train a model on a single fold and return predictions."""
+    from time import perf_counter
+
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_valid = X[valid_idx]
+    start_time = perf_counter()
+    model_clone.fit(X_train, y_train)
+    fit_time = perf_counter() - start_time
+    proba = model_clone.predict_proba(X_valid)
+    val_probs = list(zip(valid_idx, proba))
+    return model_clone, val_probs, fit_time
+
+
+@python_app
+def parsl_run_fit_predict_proba_wrapper(model_id, wrapper, X, y, folds):
     """Fit a wrapper model and return predictions."""
     result = wrapper.fit_predict_proba(X, y, cv_splits=folds)
     return model_id, wrapper, result
 
 
-def run_predict_proba_wrapper(model_id, wrapper, X):
+@python_app
+def parsl_run_predict_proba_wrapper(model_id, wrapper, X):
     """Run predict_proba on a wrapper model."""
     result = wrapper.predict_proba(X)
     return model_id, wrapper, result

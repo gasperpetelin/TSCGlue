@@ -1,0 +1,185 @@
+1764538605.498577 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:99 __init__ INFO: Starting DataFlowKernel with config
+Config(
+    app_cache=True, 
+    checkpoint_files=None, 
+    checkpoint_mode=None, 
+    checkpoint_period=None, 
+    dependency_resolver=None, 
+    executors=(ThreadPoolExecutor(
+        label='local_threads', 
+        max_threads=4, 
+        remote_monitoring_radio=<parsl.monitoring.radios.multiprocessing.MultiprocessingQueueRadio object at 0x7fed5c7122d0>, 
+        storage_access=None, 
+        thread_name_prefix='ThreadPoolExecutor-local_threads', 
+        working_dir=None
+    ),), 
+    exit_mode='cleanup', 
+    garbage_collect=True, 
+    initialize_logging=True, 
+    internal_tasks_max_threads=10, 
+    max_idletime=120.0, 
+    monitoring=None, 
+    project_name=None, 
+    retries=0, 
+    retry_handler=None, 
+    run_dir='runinfo', 
+    std_autopath=None, 
+    strategy='simple', 
+    strategy_period=5, 
+    usage_tracking=0
+)
+1764538605.498770 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:101 __init__ INFO: Parsl version: 2025.11.24
+1764538605.498883 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.usage_tracking.usage:119 __init__ DEBUG: Tracking level: 0
+1764538605.498963 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:124 __init__ INFO: Run id is: 38060462-1cfe-4bce-b5cf-9dbcc6374422
+1764538605.500240 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:131 __init__ DEBUG: Considering candidate for workflow name: /home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/dataflow/dflow.py
+1764538605.500305 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:131 __init__ DEBUG: Considering candidate for workflow name: /home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/dataflow/dflow.py
+1764538605.500355 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:131 __init__ DEBUG: Considering candidate for workflow name: /home/runner/work/AutoTSC/AutoTSC/autotsc/models.py
+1764538605.500396 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:137 __init__ DEBUG: Using models.py as workflow name
+1764538605.500551 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.memoization:190 start INFO: App caching initialized
+1764538605.500613 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.jobs.strategy:145 __init__ DEBUG: Scaling strategy: simple
+1764538605.500922 2025-11-30 21:36:45 MainProcess-3582 JobStatusPoller-Timer-Thread-140650802175184-140650800125632 parsl.jobs.strategy:184 _general_strategy DEBUG: general strategy starting with strategy_type simple for 0 executors
+1764538605.501190 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:973 submit DEBUG: Task 0 will be sent to executor local_threads
+1764538605.501271 2025-11-30 21:36:45 MainProcess-3582 JobStatusPoller-Timer-Thread-140650802175184-140650800125632 parsl.process_loggers:27 wrapped DEBUG: Normal ending for _general_strategy on thread JobStatusPoller-Timer-Thread-140650802175184
+1764538605.501381 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:781 _add_output_deps DEBUG: Adding output dependencies
+1764538605.501535 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:1022 submit DEBUG: Added output dependencies
+1764538605.501582 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:1031 submit DEBUG: Gathering dependencies
+1764538605.501769 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:1034 submit DEBUG: Gathered dependencies
+1764538605.501818 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:1046 submit INFO: Task 0 submitted for App parsl_run_fit_predict_proba_wrapper, not waiting on any dependency
+1764538605.501908 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:1056 submit DEBUG: Task 0 set to pending state with AppFuture: <AppFuture at 0x7febd119e270 state=pending>
+1764538605.502275 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.memoization:269 check_memo DEBUG: Task 0 will not be memoized
+1764538605.502384 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:973 submit DEBUG: Task 1 will be sent to executor local_threads
+1764538605.502473 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:781 _add_output_deps DEBUG: Adding output dependencies
+1764538605.502530 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:1022 submit DEBUG: Added output dependencies
+1764538605.502577 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:1031 submit DEBUG: Gathering dependencies
+1764538605.502627 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:1034 submit DEBUG: Gathered dependencies
+1764538605.502675 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:1046 submit INFO: Task 1 submitted for App parsl_run_fit_predict_proba_wrapper, not waiting on any dependency
+1764538605.502729 2025-11-30 21:36:45 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:1056 submit DEBUG: Task 1 set to pending state with AppFuture: <AppFuture at 0x7febd119e780 state=pending>
+1764538605.503865 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.dflow:739 launch_task INFO: Parsl task 0 try 0 launched on executor local_threads
+1764538605.503942 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.dflow:1237 log_std_stream INFO: Standard out for task 0 will not be redirected.
+1764538605.503994 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.dflow:1237 log_std_stream INFO: Standard error for task 0 will not be redirected.
+1764538605.504059 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.app.errors:110 reraise DEBUG: Reraising exception of type <class 'parsl.errors.ConfigurationError'>
+1764538605.504202 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.dflow:331 handle_exec_update INFO: Task 0 try 0 failed with exception of type ConfigurationError
+1764538605.504278 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.dflow:374 handle_exec_update ERROR: Task 0 failed after 0 retry attempts
+Traceback (most recent call last):
+  File "/home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/dataflow/dflow.py", line 328, in handle_exec_update
+    res = self._unwrap_remote_exception_wrapper(future)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/dataflow/dflow.py", line 583, in _unwrap_remote_exception_wrapper
+    result.reraise()
+  File "/home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/app/errors.py", line 114, in reraise
+    raise v
+  File "/home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/app/errors.py", line 138, in wrapper
+    return func(*args, **kwargs)
+    ^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/AutoTSC/AutoTSC/autotsc/models.py", line 557, in parsl_run_fit_predict_proba_wrapper
+    result = wrapper.fit_predict_proba(X, y, cv_splits=folds)
+      ^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/AutoTSC/AutoTSC/autotsc/models.py", line 467, in fit_predict_proba
+    y_proba = self._fit_predict_proba(X, y, cv_splits)
+    ^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/AutoTSC/AutoTSC/autotsc/models.py", line 446, in _fit_predict_proba
+    parsl.load(config)
+    ^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/dataflow/dflow.py", line 1306, in load
+    raise ConfigurationError('Config has already been loaded')
+    ^^^^^^^^^^^^^^^^^
+parsl.errors.ConfigurationError: Config has already been loaded
+1764538605.504840 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.dflow:558 _complete_task_exception INFO: Task 0 failed (launched -> failed)
+1764538605.504954 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.dflow:1237 log_std_stream INFO: Standard out for task 0 will not be redirected.
+1764538605.505005 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.dflow:1237 log_std_stream INFO: Standard error for task 0 will not be redirected.
+1764538605.505049 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.process_loggers:27 wrapped DEBUG: Normal ending for _launch_if_ready_async on thread Task-Launch_0
+1764538605.505115 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.memoization:269 check_memo DEBUG: Task 1 will not be memoized
+1764538605.505182 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.dflow:739 launch_task INFO: Parsl task 1 try 0 launched on executor local_threads
+1764538605.505228 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.dflow:1237 log_std_stream INFO: Standard out for task 1 will not be redirected.
+1764538605.505267 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.dataflow.dflow:1237 log_std_stream INFO: Standard error for task 1 will not be redirected.
+1764538605.505311 2025-11-30 21:36:45 MainProcess-3582 Task-Launch_0-140650783344320 parsl.process_loggers:27 wrapped DEBUG: Normal ending for _launch_if_ready_async on thread Task-Launch_0
+1764538605.517287 2025-11-30 21:36:45 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.rundirs:34 make_rundir DEBUG: Parsl run initializing in rundir: runinfo/002
+1764538605.517991 2025-11-30 21:36:45 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:99 __init__ INFO: Starting DataFlowKernel with config
+Config(
+    app_cache=True, 
+    checkpoint_files=None, 
+    checkpoint_mode=None, 
+    checkpoint_period=None, 
+    dependency_resolver=None, 
+    executors=(ThreadPoolExecutor(
+        label='local_threads', 
+        max_threads=4, 
+        remote_monitoring_radio=<parsl.monitoring.radios.multiprocessing.MultiprocessingQueueRadio object at 0x7febd119ffe0>, 
+        storage_access=None, 
+        thread_name_prefix='ThreadPoolExecutor-local_threads', 
+        working_dir=None
+    ),), 
+    exit_mode='cleanup', 
+    garbage_collect=True, 
+    initialize_logging=True, 
+    internal_tasks_max_threads=10, 
+    max_idletime=120.0, 
+    monitoring=None, 
+    project_name=None, 
+    retries=0, 
+    retry_handler=None, 
+    run_dir='runinfo', 
+    std_autopath=None, 
+    strategy='simple', 
+    strategy_period=5, 
+    usage_tracking=0
+)
+1764538605.518162 2025-11-30 21:36:45 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:101 __init__ INFO: Parsl version: 2025.11.24
+1764538605.518271 2025-11-30 21:36:45 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.usage_tracking.usage:119 __init__ DEBUG: Tracking level: 0
+1764538605.518352 2025-11-30 21:36:45 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:124 __init__ INFO: Run id is: c92d27dd-9069-4300-868e-91c06d597cf9
+1764538605.594473 2025-11-30 21:36:45 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:131 __init__ DEBUG: Considering candidate for workflow name: /home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/dataflow/dflow.py
+1764538605.594808 2025-11-30 21:36:45 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:131 __init__ DEBUG: Considering candidate for workflow name: /home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/dataflow/dflow.py
+1764538605.596184 2025-11-30 21:36:45 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:131 __init__ DEBUG: Considering candidate for workflow name: /home/runner/work/AutoTSC/AutoTSC/autotsc/models.py
+1764538605.596350 2025-11-30 21:36:45 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:137 __init__ DEBUG: Using models.py as workflow name
+1764538605.599481 2025-11-30 21:36:45 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.memoization:190 start INFO: App caching initialized
+1764538605.599647 2025-11-30 21:36:45 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.jobs.strategy:145 __init__ DEBUG: Scaling strategy: simple
+1764538605.827305 2025-11-30 21:36:45 MainProcess-3582 JobStatusPoller-Timer-Thread-140650802269984-140650745587392 parsl.jobs.strategy:184 _general_strategy DEBUG: general strategy starting with strategy_type simple for 0 executors
+1764538606.048032 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:973 submit DEBUG: Task 0 will be sent to executor local_threads
+1764538606.481982 2025-11-30 21:36:46 MainProcess-3582 JobStatusPoller-Timer-Thread-140650802269984-140650745587392 parsl.process_loggers:27 wrapped DEBUG: Normal ending for _general_strategy on thread JobStatusPoller-Timer-Thread-140650802269984
+1764538606.694185 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:781 _add_output_deps DEBUG: Adding output dependencies
+1764538606.694397 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:1022 submit DEBUG: Added output dependencies
+1764538606.694450 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:1031 submit DEBUG: Gathering dependencies
+1764538606.694633 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:1034 submit DEBUG: Gathered dependencies
+1764538606.694718 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:1046 submit INFO: Task 0 submitted for App parsl_run_model_on_fold, not waiting on any dependency
+1764538606.694773 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:1056 submit DEBUG: Task 0 set to pending state with AppFuture: <AppFuture at 0x7fed5ddfd1c0 state=pending>
+1764538606.694958 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.app.errors:110 reraise DEBUG: Reraising exception of type <class 'RuntimeError'>
+1764538606.695100 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:331 handle_exec_update INFO: Task 1 try 0 failed with exception of type RuntimeError
+1764538606.695162 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:374 handle_exec_update ERROR: Task 1 failed after 0 retry attempts
+Traceback (most recent call last):
+  File "/home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/dataflow/dflow.py", line 328, in handle_exec_update
+    res = self._unwrap_remote_exception_wrapper(future)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/dataflow/dflow.py", line 583, in _unwrap_remote_exception_wrapper
+    result.reraise()
+  File "/home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/app/errors.py", line 114, in reraise
+    raise v
+  File "/home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/app/errors.py", line 138, in wrapper
+    return func(*args, **kwargs)
+    ^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/AutoTSC/AutoTSC/autotsc/models.py", line 557, in parsl_run_fit_predict_proba_wrapper
+    result = wrapper.fit_predict_proba(X, y, cv_splits=folds)
+      ^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/AutoTSC/AutoTSC/autotsc/models.py", line 467, in fit_predict_proba
+    y_proba = self._fit_predict_proba(X, y, cv_splits)
+    ^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/AutoTSC/AutoTSC/autotsc/models.py", line 451, in _fit_predict_proba
+    future = parsl_run_model_on_fold(model_clone, X, y, train_idx, val_idx)
+    ^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/app/python.py", line 77, in __call__
+    app_fut = dfk.submit(func, app_args=args,
+    ^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/dataflow/dflow.py", line 1082, in submit
+    self.launch_if_ready(task_record)
+    ^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/AutoTSC/AutoTSC/.venv/lib/python3.12/site-packages/parsl/dataflow/dflow.py", line 611, in launch_if_ready
+    self._task_launch_pool.submit(self._launch_if_ready_async, task_record)
+    ^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 172, in submit
+    raise RuntimeError('cannot schedule new futures after '
+    ^^^^^^^^^^^^^^^^^
+RuntimeError: cannot schedule new futures after interpreter shutdown
+1764538606.695718 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:558 _complete_task_exception INFO: Task 1 failed (launched -> failed)
+1764538606.695779 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:1237 log_std_stream INFO: Standard out for task 1 will not be redirected.
+1764538606.695812 2025-11-30 21:36:46 MainProcess-3582 ThreadPoolExecutor-local_threads_0-140650766563008 parsl.dataflow.dflow:1237 log_std_stream INFO: Standard error for task 1 will not be redirected.
+1764538606.695942 2025-11-30 21:36:46 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:1125 atexit_cleanup WARNING: Python is exiting with a DFK still running. You should call parsl.dfk().cleanup() before exiting to release any resources
+1764538606.696010 2025-11-30 21:36:46 MainProcess-3582 MainThread-140657465307264 parsl.dataflow.dflow:1125 atexit_cleanup WARNING: Python is exiting with a DFK still running. You should call parsl.dfk().cleanup() before exiting to release any resources

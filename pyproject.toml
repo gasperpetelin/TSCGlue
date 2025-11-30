@@ -15,6 +15,7 @@ dependencies = [
     "tabpfn",
     "huggingface-hub",
     "tsfresh",
+    "parsl",
     "catboost",
     "imblearn"
 ]
