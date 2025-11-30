@@ -513,6 +513,9 @@ def _run_predict_proba(model, X):
 
 
 # Parsl app functions for parallel execution
+# Note: These functions duplicate logic from the sequential helpers above
+# because Parsl @python_app functions run in isolated contexts and cannot
+# easily call external functions.
 @python_app
 def parsl_run_model_on_fold(model_clone, X, y, train_idx, valid_idx):
     """Train a model on a single fold and return predictions."""

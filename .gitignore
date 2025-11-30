@@ -26,3 +26,6 @@ ENV/
 dist/
 build/
 *.egg-info/
+
+# Parsl run info
+runinfo/
