@@ -214,7 +214,7 @@ class AutoTSCModel(BaseClassifier):
         model7 = ("m-svm", Ensemble(SVC(kernel="linear", probability=True)))
         model8 = ("m-log", Ensemble(LogisticRegression(n_jobs=-1)))
 
-        return [model1, model8]#, model7]
+        return [model1]#, model8]#, model7]
 
     def _fit(self, X, y):
         self.cpus_available_, self.cpus_to_use_, self.gpus_available_, self.gpus_to_use_ = (

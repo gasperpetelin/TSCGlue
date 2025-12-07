@@ -111,7 +111,12 @@ def ray_init_or_reuse(**ray_init_kwargs):
         # If Ray is already running, reuse it
         if not ray.is_initialized():
             # Start Ray with the requested resources only if not running
-            ray.init(**ray_init_kwargs)
+            ray.init(
+                runtime_env={
+                    "working_dir": None,  # Disable auto-packaging of local module
+                }, 
+                **ray_init_kwargs
+            )
             started_here = True
 
         yield
@@ -120,14 +125,6 @@ def ray_init_or_reuse(**ray_init_kwargs):
         # Only shutdown if we started it
         if started_here and ray.is_initialized():
             ray.shutdown()
-
-
-# def get_folds(X, y, n_splits=10):
-#    skf = StratifiedKFold(n_splits=n_splits, shuffle=True)
-#    folds = []
-#    for train_idx, val_idx in skf.split(X, y):
-#        folds.append((train_idx.tolist(), val_idx.tolist()))
-#    return folds
 
 
 def get_folds(X, y, n_splits=10, random_state=None):
