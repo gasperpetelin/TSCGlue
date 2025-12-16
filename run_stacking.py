@@ -706,6 +706,460 @@ class StackerV2(BaseClassifier):
             X_meta = np.hstack([self.test_pred1, self.test_pred2, self.test_pred3, self.test_pred4, self.test_pred5])
             return self.meta_model.predict(X_meta)
 
+from sklearn.pipeline import make_pipeline
+from sklearn.ensemble import ExtraTreesClassifier
+from aeon.transformations.collection.shapelet_based import (
+    RandomDilatedShapeletTransform,
+)
+from aeon.transformations.collection.convolution_based import MultiRocket
+import polars.selectors as cs
+from time import perf_counter
+
+from sklearn.base import BaseEstimator, TransformerMixin
+import numpy as np
+from sklearn.svm import LinearSVC
+from sklearn.svm import SVC
+from sklearn.preprocessing import RobustScaler
+from aeon.transformations.collection.feature_based import Catch22
+from aeon.classification.interval_based import DrCIFClassifier
+from aeon.classification.interval_based import RSTSF
+
+class MultiScaler(BaseEstimator, TransformerMixin):
+    """
+    Applies different scalers to different feature groups.
+    Features not in any group are ignored.
+    
+    Parameters
+    ----------
+    scalers : dict
+        Dictionary mapping feature prefix to scaler instance.
+        Example: {'hydra': SparseScaler(), 'multirocket': StandardScaler()}
+    verbose : bool, default=False
+        If True, print information about which features are scaled with which scaler.
+    """
+    def __init__(self, scalers, verbose=False):
+        self.scalers = scalers
+        self.verbose = verbose
+    
+    def fit(self, X, y=None):
+        self.scalers_ = {}
+        self.feature_groups_ = {}
+        
+        # Group columns by prefix
+        for prefix, scaler in self.scalers.items():
+            cols = [col for col in X.columns if col.startswith(prefix)]
+            if cols:
+                self.feature_groups_[prefix] = cols
+                self.scalers_[prefix] = scaler
+                self.scalers_[prefix].fit(X.select(cols).to_numpy())
+                
+                if self.verbose:
+                    print(f"[MultiScaler] {len(cols)} '{prefix}' features -> {scaler.__class__.__name__}")
+        
+        # Store output column order
+        self.output_cols_ = [col for prefix in self.scalers.keys() 
+                            for col in self.feature_groups_.get(prefix, [])]
+        
+        if self.verbose:
+            total_input = len(X.columns)
+            total_output = len(self.output_cols_)
+            ignored = total_input - total_output
+            print(f"[MultiScaler] Total: {total_output}/{total_input} features kept, {ignored} ignored")
+        
+        return self
+    
+    def transform(self, X):
+        parts = []
+        for prefix in self.scalers_.keys():
+            if prefix in self.feature_groups_:
+                cols = self.feature_groups_[prefix]
+                scaled = self.scalers_[prefix].transform(X.select(cols).to_numpy())
+                parts.append(scaled)
+        
+        return np.hstack(parts) if parts else np.empty((len(X), 0))
+    
+    def get_feature_names_out(self, input_features=None):
+        return np.array(self.output_cols_)
+
+class NoScaler(BaseEstimator, TransformerMixin):
+    def fit(self, X, y=None):
+        return self
+    def transform(self, X):
+        return X
+
+class RidgeClassifierCVIndicator(RidgeClassifierCV):
+    def predict_proba(self, X):
+        dists = np.zeros((X.shape[0], len(self.classes_)))
+        preds = self.predict(X)
+        for i in range(0, X.shape[0]):
+            dists[i, np.where(self.classes_ == preds[i])] = 1
+        return dists
+
+class StackerV3(BaseClassifier):
+    def __init__(self, random_state=None, n_repetitions = 1, k_folds=10):
+        super().__init__()
+        self.n_repetitions = n_repetitions
+        self.k_folds = k_folds
+        self.random_state = random_state
+        self.cv_splits = None
+
+    def get_model(self, name):
+        if name == 'multirocket-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'hydra_': SparseScaler(),
+                        'multirocket_': StandardScaler()
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 10))
+            )
+            return pipe
+        elif name == 'rstsf':
+            return RSTSF(random_state=self.random_state, n_jobs=-1, n_estimators=100)
+        elif name == 'quant-etc':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'quant_': NoScaler(),
+                    },
+                    verbose=False
+                ),
+                ExtraTreesClassifier(
+                    n_estimators=200,
+                    max_features=0.1,
+                    criterion="entropy",
+                    random_state=self.random_state, # pass this in 
+                    n_jobs=-1
+                )
+            )
+            return pipe
+        elif name == 'rdst-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'rdst_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-4, 4, 20))
+            )
+            return pipe
+        elif name == 'rdst-robustscale-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'rdst_': RobustScaler(),
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-4, 4, 20))
+            )
+            return pipe
+        elif name == 'catch22-quant-et':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'catch22_': NoScaler(),
+                        'quant_': NoScaler(),
+                    },
+                    verbose=False
+                ),
+                ExtraTreesClassifier(
+                    n_estimators=200,
+                    max_features=0.1,
+                    criterion="entropy",
+                    random_state=self.random_state, # pass this in 
+                    n_jobs=-1
+                )
+            )
+            return pipe
+        elif name == 'probability-linear-svc':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'proba_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                SVC(kernel='linear', probability=True, random_state=self.random_state)
+            )
+            return pipe
+        elif name == 'probability-et':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'proba_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                ExtraTreesClassifier(
+                    n_estimators=500,
+                    #max_features=0.3,
+                    #criterion="entropy",
+                    random_state=self.random_state, # pass this in 
+                    n_jobs=-1,
+                    bootstrap=True
+                )
+            )
+            return pipe
+        elif name == 'probability-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'proba_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 10))
+            )
+            return pipe
+        elif name == 'probability-rf':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'proba_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                RandomForestClassifier(n_estimators=200, random_state=self.random_state, n_jobs=-1)
+            )
+            return pipe
+        else:
+            raise ValueError(f"Unknown model name: {name}")
+
+    def fit_tranformers(self, X):
+        self.t1 = RandomDilatedShapeletTransform(n_jobs=-1, random_state=self.random_state)
+        self.t2 = QUANTTransformer()
+        self.t3 = MultiRocket(n_jobs=-1, random_state=self.random_state)
+        self.t4 = HydraTransformer(n_jobs=-1, random_state=self.random_state)
+        self.t5 = Catch22(n_jobs=-1)
+        self.t1.fit(X)
+        self.t2.fit(X)
+        self.t3.fit(X)
+        self.t4.fit(X)
+        self.t5.fit(X)
+
+    def transform_series(self, X):
+        
+        start = perf_counter()
+        Xt1 = self.t1.transform(X)
+        t1_time = perf_counter() - start
+        print(f"RDST transform: {t1_time:.4f}s")
+        
+        start = perf_counter()
+        Xt2 = self.t2.transform(X)
+        t2_time = perf_counter() - start
+        print(f"QUANT transform: {t2_time:.4f}s")
+        
+        start = perf_counter()
+        Xt3 = self.t3.transform(X)
+        t3_time = perf_counter() - start
+        print(f"MultiRocket transform: {t3_time:.4f}s")
+        
+        start = perf_counter()
+        Xt4 = self.t4.transform(X)
+        t4_time = perf_counter() - start
+        print(f"Hydra transform: {t4_time:.4f}s")
+        
+        start = perf_counter()
+        Xt5 = self.t5.transform(X)
+        t5_time = perf_counter() - start
+        print(f"Catch22 transform: {t5_time:.4f}s")
+
+        return pl.DataFrame(np.hstack([Xt1, Xt2, Xt3, Xt4, Xt5]), schema=
+            [f'rdst_{i}' for i in range(Xt1.shape[1])] + 
+            [f'quant_{i}' for i in range(Xt2.shape[1])] + 
+            [f'multirocket_{i}' for i in range(Xt3.shape[1])] + 
+            [f'hydra_{i}' for i in range(Xt4.shape[1])] + 
+            [f'catch22_{i}' for i in range(Xt5.shape[1])]
+        )
+
+    def _fit(self, X, y):
+        if self.cv_splits is None:
+            self.cv_splits = generate_folds(X, y, n_splits=self.k_folds, n_repetitions=self.n_repetitions, random_state=self.random_state)
+        self.fit_tranformers(X)
+        self.Xt_ = self.transform_series(X)
+        self.trained_models_ = []
+
+        self.tsc_algos = ['rstsf']
+        self.feature_algos = ['multirocket-ridgecv', 'quant-etc', 'rdst-ridgecv']
+        self.stacking_models = ['probability-ridgecv', 'probability-et']
+
+        for model_name in self.tsc_algos:
+            oof_proba = []
+            model_group = []
+            for train_idx, val_idx in tqdm(self.cv_splits):
+                pipe = self.get_model(model_name)
+                pipe.fit(X[train_idx], y[train_idx])
+                proba = pipe.predict_proba(X[val_idx])
+
+                prob_columns = []
+                for idx, p in zip(val_idx, proba):
+                    d = {
+                        'index': idx,
+                    }
+                    for scls, prob in zip(pipe.classes_, p):
+                        k = f'proba_model0_{model_name}_class_{scls}'
+                        d[k] = prob.item()
+                        if k not in prob_columns:
+                            prob_columns.append(k)
+                    oof_proba.append(d)
+                model_group.append(pipe)
+            self.trained_models_.append((model_name, model_group))
+            agg_probs = pl.DataFrame(oof_proba).group_by('index').mean().sort('index').select(prob_columns)
+            self.Xt_ = pl.concat([self.Xt_, agg_probs], how='horizontal')
+
+            # for each model compute oof accuracy
+            oof_probas = agg_probs.to_numpy()
+            oof_pred_indices = np.argmax(oof_probas, axis=1)
+            oof_preds = self.classes_[oof_pred_indices]
+            oof_acc = accuracy_score(y, oof_preds)
+            print(f"Model {model_name}| CA: {oof_acc:.4f}")
+
+        for model_name in self.feature_algos:
+            oof_proba = []
+            model_group = []
+            for train_idx, val_idx in tqdm(self.cv_splits):
+                pipe = self.get_model(model_name)
+                pipe.fit(self.Xt_[train_idx], y[train_idx])
+                proba = pipe.predict_proba(self.Xt_[val_idx])
+
+                prob_columns = []
+                for idx, p in zip(val_idx, proba):
+                    d = {
+                        'index': idx,
+                    }
+                    for scls, prob in zip(pipe.classes_, p):
+                        k = f'proba_model0_{model_name}_class_{scls}'
+                        d[k] = prob.item()
+                        if k not in prob_columns:
+                            prob_columns.append(k)
+                    oof_proba.append(d)
+                model_group.append(pipe)
+            self.trained_models_.append((model_name, model_group))
+            agg_probs = pl.DataFrame(oof_proba).group_by('index').mean().sort('index').select(prob_columns)
+            self.Xt_ = pl.concat([self.Xt_, agg_probs], how='horizontal')
+
+            # for each model compute oof accuracy
+            oof_probas = agg_probs.to_numpy()
+            oof_pred_indices = np.argmax(oof_probas, axis=1)
+            oof_preds = self.classes_[oof_pred_indices]
+            oof_acc = accuracy_score(y, oof_preds)
+            # ocmute also log loss
+            #from sklearn.metrics import log_loss, roc_auc_score
+            #log_loss_value = log_loss(y, oof_probas)
+            # ocmpute AUC 
+            #if len(np.unique(y)) == 2:
+            #    auc_value = roc_auc_score(y, oof_probas[:, 1])
+            #else:
+            #    auc_value = roc_auc_score(y, oof_probas, multi_class='ovr', average='macro')
+            #print(f"Model {model_name}| CA: {oof_acc:.4f}, Log Loss: {log_loss_value:.4f}, AUC: {auc_value:.4f}")
+            print(f"Model {model_name}| CA: {oof_acc:.4f}")
+
+        for model_name in self.stacking_models:
+            oof_proba = []
+            model_group = []
+            for train_idx, val_idx in tqdm(self.cv_splits):
+                pipe = self.get_model(model_name)
+                pipe.fit(self.Xt_[train_idx], y[train_idx])
+                proba = pipe.predict_proba(self.Xt_[val_idx])
+
+                prob_columns = []
+                for idx, p in zip(val_idx, proba):
+                    d = {
+                        'index': idx,
+                    }
+                    for scls, prob in zip(pipe.classes_, p):
+                        k = f'proba_model1_{model_name}_class_{scls}'
+                        d[k] = prob.item()
+                        if k not in prob_columns:
+                            prob_columns.append(k)
+                    oof_proba.append(d)
+                model_group.append(pipe)
+            self.trained_models_.append((model_name, model_group))
+            agg_probs = pl.DataFrame(oof_proba).group_by('index').mean().sort('index').select(prob_columns)
+            self.Xt_ = pl.concat([self.Xt_, agg_probs], how='horizontal')
+
+            oof_probas = agg_probs.to_numpy()
+            oof_pred_indices = np.argmax(oof_probas, axis=1)
+            oof_preds = self.classes_[oof_pred_indices]
+            oof_acc = accuracy_score(y, oof_preds)
+
+            print(f"Model {model_name}| CA: {oof_acc:.4f}")
+
+        stats_df = []
+        for model in self.tsc_algos + self.feature_algos + self.stacking_models:
+            stack = '0' if model in self.tsc_algos + self.feature_algos else '1'
+            model_columns = [col for col in self.Xt_.columns if col.startswith(f'proba_model{stack}_{model}_class_')]
+            #print(model_columns)
+            oof_proba = self.Xt_.select(model_columns)
+            #print(oof_proba)
+            oof_pred_indices = np.argmax(oof_proba, axis=1)
+            oof_preds = self.classes_[oof_pred_indices]
+            oof_acc = accuracy_score(y, oof_preds)
+            #print(f"{model}:{oof_acc:.4f}")
+            stats_df.append({
+                'model': model,
+                'stack': stack,
+                'oof_acc': oof_acc,
+            })
+
+        stats_df = pl.DataFrame(stats_df).with_columns(
+            pl.when(pl.col('model') == 'probability-ridgecv')
+            .then(pl.lit(1))
+            .otherwise(pl.lit(0))
+            .alias('is_preferred')
+        ).filter(pl.col('stack')=='1').sort(
+            ['oof_acc', 'stack', 'is_preferred'], descending=True
+        )
+        # print(stats_df)
+
+        self.best_model = (
+            stats_df
+            .row(0, named=True)
+        )['model']
+        print(f"Best model selected for prediction: {self.best_model}")
+
+
+
+    def predict_proba_per_model(self, X):
+        Xt = self.transform_series(X)
+        return_dict = {}
+        for model_name, model_group in self.trained_models_:
+            oof_proba = []
+            for model in model_group:
+                if model_name in self.tsc_algos:
+                    proba = model.predict_proba(X)
+                else:
+                    proba = model.predict_proba(Xt)
+                prob_columns = []
+                for i, p in enumerate(proba):
+                    d = {
+                        'index': i,
+                    }
+                    for scls, prob in zip(model.classes_, p):
+                        model_stack_number = '0' if model_name in self.tsc_algos + self.feature_algos else '1'
+                        k = f'proba_model{model_stack_number}_{model_name}_class_{scls}'
+                        d[k] = prob.item()
+                        if k not in prob_columns:
+                            prob_columns.append(k)
+                    oof_proba.append(d)
+            df = pl.DataFrame(oof_proba).group_by('index').mean().sort('index').select(prob_columns)
+            Xt = pl.concat([Xt, df], how='horizontal')
+            return_dict[model_name] = df.to_numpy()
+        return return_dict
+
+
+    def _predict_proba(self, X):
+        return self.predict_proba_per_model(X)[self.best_model]
+
+    def _predict(self, X):
+        probas = self._predict_proba(X)
+        predicted_indices = np.argmax(probas, axis=1)
+        return self.classes_[predicted_indices]
+
 def get_model(model_name, random_state):
     if model_name == 'mr-hydra':
         return MultiRocketHydraClassifier(n_jobs=-1, random_state=random_state)
@@ -717,17 +1171,24 @@ def get_model(model_name, random_state):
         return Stacker(random_state=random_state, n_repetitions=3)
     elif model_name == 'mixed-v2':
         return StackerV2(random_state=random_state)
+    elif model_name == 'mixed-v3':
+        return StackerV3(random_state=random_state, n_repetitions=3)
     else:
         raise ValueError(f'Unknown model name: {model_name}')
 
-if __name__ == '__main__':
 
+
+
+if __name__ == '__main__':
+    import random
     write_dir = "experiments/stacking_run_v1"
     os.makedirs(write_dir, exist_ok=True)
 
+    datasets = univariate
+    random.shuffle(datasets)
     for dataset in tqdm(univariate):
-        for model_name in ['mr-hydra', 'quant', 'rdst', 'mixed', 'mixed-v2']:
-            for run in [100, 200, 300]:
+        for model_name in ['mixed-v3', 'mr-hydra', 'quant', 'rdst', 'mixed']:
+            for run in [100, 200, 300, 400, 500]:
                 try:
                     print(f'Running {dataset} with model {model_name} run {run}')
 
