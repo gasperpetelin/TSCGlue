@@ -9,6 +9,9 @@ from aeon.classification.base import BaseClassifier
 from aeon.classification.feature_based import (
     Catch22Classifier,
 )
+from aeon.classification.interval_based import DrCIFClassifier
+from aeon.classification.dictionary_based import WEASEL_V2
+from aeon.classification.dictionary_based import ContractableBOSS
 import os
 from aeon.pipeline import make_pipeline as aeon_make_pipeline
 
@@ -29,6 +32,404 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from catboost import CatBoostClassifier
+
+from joblib import delayed
+from sklearn.calibration import Parallel
+
+
+class StackerV4(BaseClassifier):
+    def __init__(self, random_state=None, n_repetitions = 1, k_folds=10, time_limit_in_seconds = None):
+        super().__init__()
+        self.n_repetitions = n_repetitions
+        self.k_folds = k_folds
+        self.random_state = random_state
+        self.cv_splits = None
+
+        self.feature_seed = np.random.default_rng(random_state)
+        self.feature_transformers = []
+        self.features = None
+        self.predictions = None
+        self.trained_models_ = None
+        self.time_limit_in_seconds = time_limit_in_seconds
+
+        self.last_repetition = False
+
+    def _get_feature_seed(self):
+        return int(self.feature_seed.integers(0, 2**31 - 1, dtype=np.int32))
+    
+    def get_next_feature_transformer(self, feature_type: str):
+        # implement python switch
+        seed = self._get_feature_seed()
+        match feature_type:
+            case 'multirocket':
+                return MultiRocket(n_jobs=-1, random_state=seed)
+            case 'rdst':
+                return RandomDilatedShapeletTransform(n_jobs=-1, random_state=seed)
+            case 'quant':
+                return QUANTTransformer()
+            case 'hydra':
+                return HydraTransformer(n_jobs=-1, random_state=seed)
+            case _:
+                raise ValueError(f"Unknown feature transformer type: {feature_type}")
+
+    def get_model(self, name, seed=None):
+        if name == 'multirockethydra-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'feature|hydra': SparseScaler(),
+                        'feature|multirocket': StandardScaler()
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 10))
+            )
+            return pipe
+        elif name == 'all-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'hydra_': SparseScaler(),
+                        'multirocket_': StandardScaler(),
+                        'rdst_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 10))
+            )
+            return pipe
+        elif name == 'rstsf':
+            return RSTSF(random_state=seed, n_jobs=-1, n_estimators=100)
+        elif name == 'drcif':
+            return DrCIFClassifier(random_state=seed, n_jobs=-1, time_limit_in_minutes=2)
+        elif name == 'weasel-v2':
+            return WEASEL_V2(random_state=seed, n_jobs=-1)
+        elif name == 'contractable-boss':
+            return ContractableBOSS(random_state=seed, n_jobs=-1, time_limit_in_minutes=0.1)
+        elif name == 'quant-etc':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'feature|quant': NoScaler(),
+                    },
+                    verbose=False
+                ),
+                ExtraTreesClassifier(
+                    n_estimators=200,
+                    max_features=0.1,
+                    criterion="entropy",
+                    random_state=seed,
+                    n_jobs=-1
+                )
+            )
+            return pipe
+        elif name == 'rdst-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'feature|randomdilatedshapelet': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-4, 4, 20))
+            )
+            return pipe
+        elif name == 'rdst-robustscale-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'rdst_': RobustScaler(),
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-4, 4, 20))
+            )
+            return pipe
+        elif name == 'catch22-quant-et':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'catch22_': NoScaler(),
+                        'quant_': NoScaler(),
+                    },
+                    verbose=False
+                ),
+                ExtraTreesClassifier(
+                    n_estimators=200,
+                    max_features=0.1,
+                    criterion="entropy",
+                    random_state=seed,
+                    n_jobs=-1
+                )
+            )
+            return pipe
+        elif name == 'probability-linear-svc':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'proba_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                SVC(kernel='linear', probability=True, random_state=seed)
+            )
+            return pipe
+        elif name == 'probability-et':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'proba_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                ExtraTreesClassifier(
+                    n_estimators=500,
+                    #max_features=0.3,
+                    #criterion="entropy",
+                    random_state=seed,
+                    n_jobs=-1,
+                    bootstrap=True
+                )
+            )
+            return pipe
+        elif name == 'probability-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'probability|model0': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 20))
+            )
+            return pipe
+        elif name == 'probability-rf':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'proba_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=-1)
+            )
+            return pipe
+        else:
+            raise ValueError(f"Unknown model name: {name}")
+
+    def _fit(self, X, y):
+        fit_start_time = perf_counter()
+        self.predictions = []
+        self.trained_models_ = []
+
+        self.feature_models = ['multirockethydra-ridgecv', 'quant-etc', 'rdst-ridgecv']
+        self.series_models = ['rstsf']#, 'drcif', 'weasel-v2']#, 'contractable-boss']
+        self.oof_models = []#['drcif']
+        self.stacking_models = ['probability-ridgecv']
+
+        if self.cv_splits is None:
+            self.cv_splits = []
+        print(f'[{perf_counter() - fit_start_time:.4f}s] Starting fitting')
+
+        quant_start_time = perf_counter()
+        self.add_features(feature_type='quant', X=X)
+        quant_durration = perf_counter() - quant_start_time
+        print(f'[{perf_counter() - fit_start_time:.4f}s] Computed QUANT features in {quant_durration:.4f}s')
+
+        for repetition in range(self.n_repetitions):
+            if self.last_repetition:
+                break
+            
+            print(f'[{perf_counter() - fit_start_time:.4f}s] Starting repetition {repetition}')
+
+            multirocket_start_time = perf_counter()
+            self.add_features(feature_type='multirocket', X=X)
+            multirocket_durration = perf_counter() - multirocket_start_time
+            print(f'[{perf_counter() - fit_start_time:.4f}s] Computed MultiRocket features in {multirocket_durration:.4f}s')
+
+            hydra_start_time = perf_counter()
+            self.add_features(feature_type='hydra', X=X)
+            hydra_durration = perf_counter() - hydra_start_time
+            print(f'[{perf_counter() - fit_start_time:.4f}s] Computed Hydra features in {hydra_durration:.4f}s')
+
+            rdst_start_time = perf_counter()
+            self.add_features(feature_type='rdst', X=X)
+            rdst_durration = perf_counter() - rdst_start_time
+            print(f'[{perf_counter() - fit_start_time:.4f}s] Computed RDST features in {rdst_durration:.4f}s')
+
+            current_splits = generate_folds(X, y, n_splits=self.k_folds, n_repetitions=1, random_state=self._get_feature_seed())
+            for model_name in self.feature_models + self.series_models + self.stacking_models:
+                model_group = []
+
+                #check if model trainign should be terminated due to time limit
+                # skip only nonstacking models
+                elapsed_time = perf_counter() - fit_start_time
+                if self.time_limit_in_seconds is not None and elapsed_time > self.time_limit_in_seconds:
+                    self.last_repetition = True
+                    if model_name not in self.stacking_models:
+                        print(f'[{perf_counter() - fit_start_time:.4f}s] Skipping training of model {model_name} due to time limit')
+                        continue
+
+                for fold_number, (train_idx, val_idx) in enumerate(current_splits):
+                    pipe = self.get_model(model_name)
+
+                    start_train = perf_counter()
+                    if model_name in self.series_models:
+                        pipe.fit(X[train_idx], y[train_idx])
+                        proba = pipe.predict_proba(X[val_idx])
+                    else:
+                        pipe.fit(self.get_Xt()[train_idx], y[train_idx])
+                        proba = pipe.predict_proba(self.get_Xt()[val_idx])
+                    end_train = perf_counter()
+                    train_dur = end_train - start_train
+
+                    print(f'[{perf_counter() - fit_start_time:.4f}s] Trained {model_name} in {train_dur:.4f}s for f-{fold_number}/r-{repetition}')
+
+                    level = 0 if model_name in self.feature_models + self.series_models else 1
+
+                    for idx, p in zip(val_idx, proba):
+                        for scls, prob in zip(pipe.classes_, p):
+                            d = {
+                                'index': idx,
+                                'model': model_name,
+                                'repetition': repetition,
+                                'level': level,
+                                'class': scls.item(),
+                                'probability': prob.item(),
+                            }
+                            self.predictions.append(d)
+                    model_group.append(pipe)
+
+                self.trained_models_.append((model_name, model_group))
+
+                Xt = self.get_Xt()
+                prob_columns = [col for col in Xt.columns if model_name in col]
+                agg_probs = Xt.select(prob_columns)
+                oof_probas = agg_probs.to_numpy()
+                oof_pred_indices = np.argmax(oof_probas, axis=1)
+                oof_preds = self.classes_[oof_pred_indices]
+                oof_acc = accuracy_score(y, oof_preds)
+
+                print(f'[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name}: {oof_acc}')
+
+            for model_name in self.oof_models:
+                pipe = self.get_model(model_name)
+                start_train = perf_counter()
+                oof_probas = pipe.fit_predict_proba(X, y)
+                end_train = perf_counter()
+                train_dur = end_train - start_train
+                print(f'[{perf_counter() - fit_start_time:.4f}s] Trained OOF model {model_name} in {train_dur:.4f}s for r-{repetition}')
+
+                oof_pred_indices = np.argmax(oof_probas, axis=1)
+                oof_preds = self.classes_[oof_pred_indices]
+                oof_acc = accuracy_score(y, oof_preds)
+                print(f'[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name} after repetition {repetition}: {oof_acc}')
+
+            print(f'[{perf_counter() - fit_start_time:.4f}s] Completed repetition {repetition}')
+        print(f'[{perf_counter() - fit_start_time:.4f}s] Completed all repetitions')
+        self.best_model = 'probability-ridgecv'
+
+    def combine_features_and_predictions(self, features, predictions):
+        if len(predictions) == 0:
+            return features
+        df = pl.DataFrame(predictions).pivot(values='probability', index='index', on=['level', 'model', 'class'], aggregate_function='mean').sort('index')
+        rename_dict = {}
+        for c in df.columns[1:]:
+            t = tuple([v.replace('{', '').replace('}', '').replace('"', '') for v in c.split(',')])
+            level, model_name, prob_class = t
+            rename_dict[c] = f'probability|model{level}_{model_name}_class_{prob_class}'
+
+        df = df.rename(rename_dict)
+
+        return features.with_row_index("index").join(df, on="index", how="full").sort('index').drop('index', 'index_right')      
+
+    def add_probabilities(self, probas, classes, model_name, level):
+        predictions = []
+        for idx, p in enumerate(probas):
+            for scls, prob in zip(classes, p):
+                d = {
+                    'index': idx,
+                    'model': model_name,
+                    'level': level,
+                    'class': scls.item(),
+                    'probability': prob.item(),
+                }
+                predictions.append(d)
+        return predictions
+
+    def predict_proba_per_model(self, X):
+        predict_start_time = perf_counter()
+        return_dict = {}
+        Xt = self.compute_features(X)
+
+        predictions = []
+        for model_name, model_group in self.trained_models_:
+            Xt_ = self.combine_features_and_predictions(Xt, predictions)
+            for model in model_group:
+                start_predict = perf_counter()
+                if model_name in self.series_models:
+                    proba = model.predict_proba(X)
+                else:
+                    proba = model.predict_proba(Xt_)
+                end_predict = perf_counter()
+                predict_dur = end_predict - start_predict
+                print(f'[{perf_counter() - predict_start_time:.4f}s] Predicted probabilities with {model_name} in {predict_dur:.4f}s')
+
+                level = 0 if model_name in self.feature_models + self.series_models else 1
+
+                pred_list = self.add_probabilities(proba, model.classes_, model_name, level)
+                predictions.extend(pred_list)
+
+        df = self.combine_features_and_predictions(Xt, predictions)
+        for model_name, _ in self.trained_models_:
+            prob_columns = [col for col in df.columns if model_name in col]
+            agg_probs = df.select(prob_columns)
+            return_dict[model_name] = agg_probs.to_numpy()
+        return return_dict
+
+    def _predict_proba(self, X):
+        return self.predict_proba_per_model(X)[self.best_model]
+
+    def _predict(self, X):
+        probas = self._predict_proba(X)
+        predicted_indices = np.argmax(probas, axis=1)
+        return self.classes_[predicted_indices]
+    
+    def add_features(self, feature_type:str, X:np.ndarray):
+        transform = self.get_next_feature_transformer(feature_type=feature_type)
+        transform.fit(X)
+        X_t = transform.transform(X)
+        params = transform.get_params()
+        if 'n_jobs' in params:
+            del params['n_jobs']
+        param_strs = [f'{k}={v}' for k, v in params.items()]        
+        param_str = ';'.join(param_strs)
+        transform_id = f'{transform.__class__.__name__.lower()};{param_str}'
+        schema = ['feature|'+transform_id+';index='+str(i) for i in range(X_t.shape[1])]
+        feature_df = pl.DataFrame(X_t, schema=schema)
+        self.feature_transformers.append(transform)
+        if self.features is None:
+            self.features = feature_df
+        else:
+            self.features = pl.concat([self.features, feature_df], how='horizontal')
+
+    def compute_features(self, X:np.ndarray):
+        feature_dfs = []
+        for transform in self.feature_transformers:
+            X_t = transform.transform(X)
+            params = transform.get_params()
+            if 'n_jobs' in params:
+                del params['n_jobs']
+            param_strs = [f'{k}={v}' for k, v in params.items()]        
+            param_str = ';'.join(param_strs)
+            transform_id = f'{transform.__class__.__name__.lower()};{param_str}'
+            schema = ['feature|'+transform_id+';index='+str(i) for i in range(X_t.shape[1])]
+            feature_df = pl.DataFrame(X_t, schema=schema)
+            feature_dfs.append(feature_df)
+        return pl.concat(feature_dfs, how='horizontal')
+
+    def get_Xt(self):
+        return self.combine_features_and_predictions(self.features, self.predictions)
 
 def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
     all_folds = []
@@ -1173,6 +1574,8 @@ def get_model(model_name, random_state):
         return StackerV2(random_state=random_state)
     elif model_name == 'mixed-v3':
         return StackerV3(random_state=random_state, n_repetitions=3)
+    elif model_name == 'mixed-v4':
+        return StackerV4(random_state=random_state, n_repetitions=3)
     else:
         raise ValueError(f'Unknown model name: {model_name}')
 
@@ -1181,43 +1584,47 @@ def get_model(model_name, random_state):
 
 if __name__ == '__main__':
     import random
+    from itertools import product
     write_dir = "experiments/stacking_run_v1"
     os.makedirs(write_dir, exist_ok=True)
 
     datasets = univariate
-    random.shuffle(datasets)
-    for dataset in tqdm(univariate):
-        for model_name in ['mixed-v3', 'mr-hydra', 'quant', 'rdst', 'mixed']:
-            for run in [100, 200, 300, 400, 500]:
-                try:
-                    print(f'Running {dataset} with model {model_name} run {run}')
+    model_names = ['mixed-v4', 'mixed-v3', 'mr-hydra', 'quant', 'rdst', 'mixed']
+    runs = [100, 200, 300, 400, 500]
 
-                    stats = {
-                        'dataset': dataset,
-                        'model': model_name,
-                        'run': run,
-                    }
+    triplets = list(product(datasets, model_names, runs))
+    random.shuffle(triplets)
 
-                    hash_val = pl.DataFrame([stats]).hash_rows(seed=42, seed_1=1, seed_2=2, seed_3=3).item()
-                    file = f"{write_dir}/{hash_val}.parquet"
+    for dataset, model_name, run in tqdm(triplets):
+        try:
+            print(f'Running {dataset} with model {model_name} run {run}')
 
-                    if os.path.exists(file):
-                        print(f"Skipping: Dataset={dataset}, Run={run}, Model={model_name}")
-                        continue
-                    else:
-                        print(f"Processing: Dataset={dataset}, Run={run}, Model={model_name}")
+            stats = {
+                'dataset': dataset,
+                'model': model_name,
+                'run': run,
+            }
 
-                    X_train, y_train, X_test, y_test = utils.load_dataset(dataset)
+            hash_val = pl.DataFrame([stats]).hash_rows(seed=42, seed_1=1, seed_2=2, seed_3=3).item()
+            file = f"{write_dir}/{hash_val}.parquet"
+
+            if os.path.exists(file):
+                print(f"Skipping: Dataset={dataset}, Run={run}, Model={model_name}")
+                continue
+            else:
+                print(f"Processing: Dataset={dataset}, Run={run}, Model={model_name}")
+
+            X_train, y_train, X_test, y_test = utils.load_dataset(dataset)
 
 
-                    model = get_model(model_name, random_state=run)
-                    model.fit(X_train, y_train)
-                    preds = model.predict(X_test)
-                    acc = accuracy_score(y_test, preds)
+            model = get_model(model_name, random_state=run)
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
+            acc = accuracy_score(y_test, preds)
 
-                    stats['test_accuracy'] = acc
+            stats['test_accuracy'] = acc
 
-                    df_stat = pl.DataFrame([stats])
-                    df_stat.write_parquet(file, mkdir=True)
-                except Exception as e:
-                    print(f"Error processing Dataset={dataset}, Run={run}, Model={model_name}: {e}")
+            df_stat = pl.DataFrame([stats])
+            df_stat.write_parquet(file, mkdir=True)
+        except Exception as e:
+            print(f"Error processing Dataset={dataset}, Run={run}, Model={model_name}: {e}")
