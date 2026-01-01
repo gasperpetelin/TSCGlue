@@ -32,10 +32,16 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from catboost import CatBoostClassifier
-
+import ray
 from joblib import delayed
 from sklearn.calibration import Parallel
 
+@ray.remote(num_cpus=1)
+def ray_run_predict_proba(model, X):
+    start_time = perf_counter()
+    proba = model.predict_proba(X)
+    pred_time = perf_counter() - start_time
+    return proba, pred_time
 
 class StackerV4(BaseClassifier):
     def __init__(self, random_state=None, n_repetitions = 1, k_folds=10, time_limit_in_seconds = None):
@@ -270,6 +276,7 @@ class StackerV4(BaseClassifier):
                         print(f'[{perf_counter() - fit_start_time:.4f}s] Skipping training of model {model_name} due to time limit')
                         continue
 
+                Xt = self.get_Xt()
                 for fold_number, (train_idx, val_idx) in enumerate(current_splits):
                     pipe = self.get_model(model_name)
 
@@ -278,8 +285,8 @@ class StackerV4(BaseClassifier):
                         pipe.fit(X[train_idx], y[train_idx])
                         proba = pipe.predict_proba(X[val_idx])
                     else:
-                        pipe.fit(self.get_Xt()[train_idx], y[train_idx])
-                        proba = pipe.predict_proba(self.get_Xt()[val_idx])
+                        pipe.fit(Xt[train_idx], y[train_idx])
+                        proba = pipe.predict_proba(Xt[val_idx])
                     end_train = perf_counter()
                     train_dur = end_train - start_train
 
@@ -302,6 +309,7 @@ class StackerV4(BaseClassifier):
 
                 self.trained_models_.append((model_name, model_group))
 
+                # get updated Xt
                 Xt = self.get_Xt()
                 prob_columns = [col for col in Xt.columns if model_name in col]
                 agg_probs = Xt.select(prob_columns)
@@ -357,27 +365,37 @@ class StackerV4(BaseClassifier):
                 predictions.append(d)
         return predictions
 
+    def _predict_one_model(self, model, model_name, X, Xt_):
+        start_predict = perf_counter()
+        if model_name in self.series_models:
+            proba = model.predict_proba(X)
+        else:
+            proba = model.predict_proba(Xt_)
+        end_predict = perf_counter()
+        predict_dur = end_predict - start_predict
+        return proba, model.classes_, predict_dur
+
     def predict_proba_per_model(self, X):
+        from sklearn.utils.parallel import Parallel, delayed
         predict_start_time = perf_counter()
+        print(f'[{perf_counter() - predict_start_time:.4f}s] Starting prediction')
         return_dict = {}
         Xt = self.compute_features(X)
-
+        print(f'[{perf_counter() - predict_start_time:.4f}s] Computed features for prediction')
         predictions = []
         for model_name, model_group in self.trained_models_:
             Xt_ = self.combine_features_and_predictions(Xt, predictions)
-            for model in model_group:
-                start_predict = perf_counter()
-                if model_name in self.series_models:
-                    proba = model.predict_proba(X)
-                else:
-                    proba = model.predict_proba(Xt_)
-                end_predict = perf_counter()
-                predict_dur = end_predict - start_predict
+
+            results = Parallel(n_jobs=-1, prefer="threads")(
+                delayed(self._predict_one_model)(model, model_name, X, Xt_)
+                for model in model_group
+            )
+            for proba, classes_, predict_dur in results:
                 print(f'[{perf_counter() - predict_start_time:.4f}s] Predicted probabilities with {model_name} in {predict_dur:.4f}s')
 
                 level = 0 if model_name in self.feature_models + self.series_models else 1
 
-                pred_list = self.add_probabilities(proba, model.classes_, model_name, level)
+                pred_list = self.add_probabilities(proba, classes_, model_name, level)
                 predictions.extend(pred_list)
 
         df = self.combine_features_and_predictions(Xt, predictions)
@@ -1124,6 +1142,7 @@ from sklearn.preprocessing import RobustScaler
 from aeon.transformations.collection.feature_based import Catch22
 from aeon.classification.interval_based import DrCIFClassifier
 from aeon.classification.interval_based import RSTSF
+from threadpoolctl import threadpool_limits
 
 class MultiScaler(BaseEstimator, TransformerMixin):
     """
@@ -1188,6 +1207,7 @@ class NoScaler(BaseEstimator, TransformerMixin):
     def transform(self, X):
         return X
 
+
 class RidgeClassifierCVIndicator(RidgeClassifierCV):
     def predict_proba(self, X):
         dists = np.zeros((X.shape[0], len(self.classes_)))
@@ -1195,6 +1215,10 @@ class RidgeClassifierCVIndicator(RidgeClassifierCV):
         for i in range(0, X.shape[0]):
             dists[i, np.where(self.classes_ == preds[i])] = 1
         return dists
+
+    def _fit(self, X, y):
+        with threadpool_limits(limits=1):
+            return super().fit(X, y)
 
 class StackerV3(BaseClassifier):
     def __init__(self, random_state=None, n_repetitions = 1, k_folds=10):
@@ -1585,8 +1609,7 @@ def get_model(model_name, random_state):
 if __name__ == '__main__':
     import random
     from itertools import product
-    write_dir = "experiments/stacking_run_v1"
-    os.makedirs(write_dir, exist_ok=True)
+    write_dir = "s3://tsc-glue/experiments/stacking_run_v1"
 
     datasets = univariate
     model_names = ['mixed-v4', 'mixed-v3', 'mr-hydra', 'quant', 'rdst', 'mixed']
@@ -1608,10 +1631,12 @@ if __name__ == '__main__':
             hash_val = pl.DataFrame([stats]).hash_rows(seed=42, seed_1=1, seed_2=2, seed_3=3).item()
             file = f"{write_dir}/{hash_val}.parquet"
 
-            if os.path.exists(file):
+            # Check if file exists in S3
+            try:
+                pl.read_parquet(file)
                 print(f"Skipping: Dataset={dataset}, Run={run}, Model={model_name}")
                 continue
-            else:
+            except:
                 print(f"Processing: Dataset={dataset}, Run={run}, Model={model_name}")
 
             X_train, y_train, X_test, y_test = utils.load_dataset(dataset)
@@ -1625,6 +1650,6 @@ if __name__ == '__main__':
             stats['test_accuracy'] = acc
 
             df_stat = pl.DataFrame([stats])
-            df_stat.write_parquet(file, mkdir=True)
+            df_stat.write_parquet(file)
         except Exception as e:
             print(f"Error processing Dataset={dataset}, Run={run}, Model={model_name}: {e}")

@@ -25,6 +25,9 @@ dev = [
     "ruff",
     "isort",
     "pytest",
+    "s3fs",
+    "boto3",
+    "awscli"
 ]
 notebooks = [
     "marimo[recommended]",
