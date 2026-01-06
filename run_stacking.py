@@ -36,6 +36,581 @@ import ray
 from joblib import delayed
 from sklearn.calibration import Parallel
 
+from aeon.classification.base import BaseClassifier
+
+from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+import ray
+from aeon.transformations.collection.shapelet_based import (
+    RandomDilatedShapeletTransform,
+)
+#from run_stacking import generate_folds, SparseScaler, MultiScaler, RidgeClassifierCVIndicator, NoScaler, StackerV4
+from sklearn.pipeline import make_pipeline
+from sklearn.ensemble import ExtraTreesClassifier
+from aeon.transformations.collection.shapelet_based import (
+    RandomDilatedShapeletTransform,
+)
+from aeon.classification.interval_based import RSTSF
+
+
+@ray.remote(num_cpus=1)
+def train_predict(train_idx, val_idx, model_name, X, y, pipe, columns, fold_number):
+    if columns is not None:
+        X = pl.DataFrame(X, schema=columns)
+    # print('START')
+    start_train = perf_counter()
+    pipe.fit(X[train_idx], y[train_idx])
+    proba = pipe.predict_proba(X[val_idx])
+    end_train = perf_counter()
+    train_dur = end_train - start_train
+    # print('END')
+    return train_idx, val_idx, proba, pipe, train_dur, model_name, fold_number
+
+@ray.remote(num_cpus=1)
+def predict_proba(pipe, X, columns, model_name):
+    start_train = perf_counter()
+    if columns is not None:
+        X = pl.DataFrame(X, schema=columns)
+    prob = pipe.predict_proba(X)
+    end_train = perf_counter()
+    train_dur = end_train - start_train
+    return prob, pipe.classes_, train_dur, model_name
+
+class StackerV4Ray(BaseClassifier):
+    def __init__(self, random_state=None, n_repetitions = 1, k_folds=10, time_limit_in_seconds = None):
+        super().__init__()
+        self.n_repetitions = n_repetitions
+        self.k_folds = k_folds
+        self.random_state = random_state
+        self.cv_splits = None
+
+        self.feature_seed = np.random.default_rng(random_state)
+        self.feature_transformers = []
+        self.features = None
+        self.predictions = None
+        self.trained_models_ = None
+        self.time_limit_in_seconds = time_limit_in_seconds
+
+        self.last_repetition = False
+
+    def _get_feature_seed(self):
+        return int(self.feature_seed.integers(0, 2**31 - 1, dtype=np.int32))
+    
+    def get_next_feature_transformer(self, feature_type: str):
+        from aeon.transformations.collection.convolution_based import MultiRocket
+        from aeon.transformations.collection.convolution_based._hydra import HydraTransformer
+        from aeon.transformations.collection.interval_based import QUANTTransformer
+        # implement python switch
+        seed = self._get_feature_seed()
+        match feature_type:
+            case 'multirocket':
+                return MultiRocket(n_jobs=-1, random_state=seed)
+            case 'rdst':
+                return RandomDilatedShapeletTransform(n_jobs=-1, random_state=seed)
+            case 'quant':
+                return QUANTTransformer()
+            case 'hydra':
+                return HydraTransformer(n_jobs=-1, random_state=seed)
+            case _:
+                raise ValueError(f"Unknown feature transformer type: {feature_type}")
+
+    def get_model(self, name, seed=None):
+        if name == 'multirockethydra-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'feature|hydra': SparseScaler(),
+                        'feature|multirocket': StandardScaler()
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 10))
+            )
+            return pipe
+        elif name == 'all-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'hydra_': SparseScaler(),
+                        'multirocket_': StandardScaler(),
+                        'rdst_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 10))
+            )
+            return pipe
+        elif name == 'rstsf':
+            return RSTSF(random_state=seed, n_jobs=1, n_estimators=100)
+        elif name == 'drcif':
+            return DrCIFClassifier(random_state=seed, n_jobs=-1, time_limit_in_minutes=2)
+        elif name == 'weasel-v2':
+            return WEASEL_V2(random_state=seed, n_jobs=-1)
+        elif name == 'contractable-boss':
+            return ContractableBOSS(random_state=seed, n_jobs=-1, time_limit_in_minutes=0.1)
+        elif name == 'quant-etc':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'feature|quant': NoScaler(),
+                    },
+                    verbose=False
+                ),
+                ExtraTreesClassifier(
+                    n_estimators=200,
+                    max_features=0.1,
+                    criterion="entropy",
+                    random_state=seed,
+                    n_jobs=-1
+                )
+            )
+            return pipe
+        elif name == 'rdst-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'feature|randomdilatedshapelet': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-4, 4, 20))
+            )
+            return pipe
+        elif name == 'rdst-robustscale-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'rdst_': RobustScaler(),
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-4, 4, 20))
+            )
+            return pipe
+        elif name == 'catch22-quant-et':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'catch22_': NoScaler(),
+                        'quant_': NoScaler(),
+                    },
+                    verbose=False
+                ),
+                ExtraTreesClassifier(
+                    n_estimators=200,
+                    max_features=0.1,
+                    criterion="entropy",
+                    random_state=seed,
+                    n_jobs=-1
+                )
+            )
+            return pipe
+        elif name == 'probability-linear-svc':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'proba_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                SVC(kernel='linear', probability=True, random_state=seed)
+            )
+            return pipe
+        elif name == 'probability-et':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'proba_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                ExtraTreesClassifier(
+                    n_estimators=500,
+                    #max_features=0.3,
+                    #criterion="entropy",
+                    random_state=seed,
+                    n_jobs=-1,
+                    bootstrap=True
+                )
+            )
+            return pipe
+        elif name == 'probability-ridgecv':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'probability|model0': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 20))
+            )
+            return pipe
+        elif name == 'probability-rf':
+            pipe = make_pipeline(
+                MultiScaler(
+                    scalers={
+                        'proba_': StandardScaler(),
+                    },
+                    verbose=False
+                ),
+                RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=-1)
+            )
+            return pipe
+        else:
+            raise ValueError(f"Unknown model name: {name}")
+
+    def _timestep_print(self, message: str, start_time: float):
+        elapsed_time = perf_counter() - start_time
+        print(f'[{elapsed_time:.2f}s] {message}')
+
+    def _feature_calc(self, X, fit_start_time):
+        multirocket_start_time = perf_counter()
+        self.add_features(feature_type='multirocket', X=X)
+        multirocket_durration = perf_counter() - multirocket_start_time
+        self._timestep_print(f'Computed MultiRocket features in {multirocket_durration:.2f}s', fit_start_time)
+
+        hydra_start_time = perf_counter()
+        self.add_features(feature_type='hydra', X=X)
+        hydra_durration = perf_counter() - hydra_start_time
+        self._timestep_print(f'Computed Hydra features in {hydra_durration:.2f}s', fit_start_time)
+
+        rdst_start_time = perf_counter()
+        self.add_features(feature_type='rdst', X=X)
+        rdst_durration = perf_counter() - rdst_start_time
+        self._timestep_print(f'Computed RDST features in {rdst_durration:.2f}s', fit_start_time)
+
+
+    def _fit(self, X, y):
+        fit_start_time = perf_counter()
+        self.predictions = []
+        self.trained_models_ = []
+
+        self.feature_models = ['multirockethydra-ridgecv', 'quant-etc', 'rdst-ridgecv']
+        self.series_models = ['rstsf']#, 'drcif', 'weasel-v2']#, 'contractable-boss']
+        self.oof_models = []#['drcif']
+        self.stacking_models = ['probability-ridgecv']
+
+        if self.cv_splits is None:
+            self.cv_splits = []
+        self._timestep_print('Starting fitting', fit_start_time)
+
+        quant_start_time = perf_counter()
+        self.add_features(feature_type='quant', X=X)
+        quant_durration = perf_counter() - quant_start_time
+        self._timestep_print(f'Computed QUANT features in {quant_durration:.2f}s', fit_start_time)
+        #print(f'[{perf_counter() - fit_start_time:.4f}s] Computed QUANT features in {quant_durration:.4f}s')
+
+        rX = ray.put(X)
+        for repetition in range(self.n_repetitions):
+            if self.last_repetition:
+                break
+            
+            print(f'[{perf_counter() - fit_start_time:.4f}s] Starting repetition {repetition}')
+
+            self._feature_calc(X, fit_start_time)
+
+            Xt = self.get_Xt()
+            rXt = ray.put(Xt.to_numpy())
+            r_columns = ray.put(Xt.columns)
+            #print(f'[{perf_counter() - fit_start_time:.4f}s] Data put called with type {type(X)}')
+            current_splits = generate_folds(X, y, n_splits=self.k_folds, n_repetitions=1, random_state=self._get_feature_seed())
+
+            tasks = []
+            for model_name in self.feature_models + self.series_models:
+                #check if model trainign should be terminated due to time limit
+                # skip only nonstacking models
+                elapsed_time = perf_counter() - fit_start_time
+                if self.time_limit_in_seconds is not None and elapsed_time > self.time_limit_in_seconds:
+                    self.last_repetition = True
+                    if model_name not in self.stacking_models:
+                        print(f'[{perf_counter() - fit_start_time:.4f}s] Skipping training of model {model_name} due to time limit')
+                        continue
+                
+                for fold_number, (train_idx, val_idx) in enumerate(current_splits):
+                    pipe = self.get_model(model_name) 
+                    if model_name in self.series_models:
+                        tasks.append(train_predict.remote(train_idx, val_idx, model_name, rX, y, pipe, None, fold_number=fold_number))
+                    else:
+                        tasks.append(train_predict.remote(train_idx, val_idx, model_name, rXt, y, pipe, r_columns, fold_number=fold_number))
+
+                print(f'[{perf_counter() - fit_start_time:.4f}s] Tasks queued for model {model_name}')
+
+            model_groups = {model_name: [] for model_name in self.feature_models + self.series_models}
+            #results = ray.get(tasks)
+            #print(f'[{perf_counter() - fit_start_time:.4f}s] Results received for all models')
+
+            #for fold_number, (train_idx, val_idx, proba, pipe, train_dur, model_name) in enumerate(results):
+            pending = tasks
+            while pending:
+                ready, pending = ray.wait(pending, num_returns=1)
+                train_idx, val_idx, proba, pipe, train_dur, model_name, fold_number = ray.get(ready[0])
+                print(f'[{perf_counter() - fit_start_time:.4f}s] Trained {model_name} in {train_dur:.4f}s for f-{fold_number}/r-{repetition}')
+
+                level = 0 if model_name in self.feature_models + self.series_models else 1
+
+                predictions = self.add_probabilities0(proba, val_idx, pipe.classes_, model_name, level, repetition)
+                self.predictions.extend(predictions)
+
+                #model_group.append(pipe)
+                model_groups[model_name].append(pipe)
+
+            for model_name, model_group in model_groups.items():
+                self.trained_models_.append((model_name, model_group))
+
+            Xt = self.get_Xt()
+            for model_name in self.feature_models + self.series_models:
+                prob_columns = [col for col in Xt.columns if model_name in col]
+                agg_probs = Xt.select(prob_columns)
+                oof_probas = agg_probs.to_numpy()
+                oof_pred_indices = np.argmax(oof_probas, axis=1)
+                oof_preds = self.classes_[oof_pred_indices]
+                oof_acc = accuracy_score(y, oof_preds)
+                print(f'[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name}: {oof_acc}')
+
+            for model_name in self.stacking_models:
+                model_group = []
+
+                #check if model trainign should be terminated due to time limit
+                # skip only nonstacking models
+                elapsed_time = perf_counter() - fit_start_time
+                if self.time_limit_in_seconds is not None and elapsed_time > self.time_limit_in_seconds:
+                    self.last_repetition = True
+                    if model_name not in self.stacking_models:
+                        print(f'[{perf_counter() - fit_start_time:.4f}s] Skipping training of model {model_name} due to time limit')
+                        continue
+                
+                Xt = self.get_Xt()
+                rXt = ray.put(Xt.to_numpy())
+                r_columns = ray.put(Xt.columns)
+                print(f'[{perf_counter() - fit_start_time:.4f}s] Data put called')
+
+                tasks = []
+
+                for fold_number, (train_idx, val_idx) in enumerate(current_splits):
+                    pipe = self.get_model(model_name) 
+                    if model_name in self.series_models:
+                        tasks.append(train_predict.remote(train_idx, val_idx, model_name, rX, y, pipe, None, fold_number=fold_number))
+                    else:
+                        tasks.append(train_predict.remote(train_idx, val_idx, model_name, rXt, y, pipe, r_columns, fold_number=fold_number))
+
+                print(f'[{perf_counter() - fit_start_time:.4f}s] Tasks created for model {model_name}')
+
+                #results = ray.get(tasks)
+                #print(f'[{perf_counter() - fit_start_time:.4f}s] Results received for model {model_name}')
+                #for fold_number, (train_idx, val_idx, proba, pipe, train_dur, model_name) in enumerate(results):
+                pending = tasks
+                while pending:
+                    ready, pending = ray.wait(pending, num_returns=1)
+                    train_idx, val_idx, proba, pipe, train_dur, model_name, fold_number = ray.get(ready[0])
+
+                    print(f'[{perf_counter() - fit_start_time:.4f}s] Trained {model_name} in {train_dur:.4f}s for f-{fold_number}/r-{repetition}')
+
+                    level = 0 if model_name in self.feature_models + self.series_models else 1
+
+                    predictions = self.add_probabilities0(proba, val_idx, pipe.classes_, model_name, level, repetition)
+                    self.predictions.extend(predictions)
+
+                    model_group.append(pipe)
+
+                self.trained_models_.append((model_name, model_group))
+
+                # get updated Xt
+                Xt = self.get_Xt()
+                prob_columns = [col for col in Xt.columns if model_name in col]
+                agg_probs = Xt.select(prob_columns)
+                oof_probas = agg_probs.to_numpy()
+                oof_pred_indices = np.argmax(oof_probas, axis=1)
+                oof_preds = self.classes_[oof_pred_indices]
+                oof_acc = accuracy_score(y, oof_preds)
+
+                print(f'[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name}: {oof_acc}')
+
+            for model_name in self.oof_models:
+                pipe = self.get_model(model_name)
+                start_train = perf_counter()
+                oof_probas = pipe.fit_predict_proba(X, y)
+                end_train = perf_counter()
+                train_dur = end_train - start_train
+                print(f'[{perf_counter() - fit_start_time:.4f}s] Trained OOF model {model_name} in {train_dur:.4f}s for r-{repetition}')
+
+                oof_pred_indices = np.argmax(oof_probas, axis=1)
+                oof_preds = self.classes_[oof_pred_indices]
+                oof_acc = accuracy_score(y, oof_preds)
+                print(f'[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name} after repetition {repetition}: {oof_acc}')
+
+            print(f'[{perf_counter() - fit_start_time:.4f}s] Completed repetition {repetition}')
+        print(f'[{perf_counter() - fit_start_time:.4f}s] Completed all repetitions')
+        self.best_model = 'probability-ridgecv'
+
+    def combine_features_and_predictions(self, features, predictions):
+        if len(predictions) == 0:
+            return features
+        df = pl.DataFrame(predictions).pivot(values='probability', index='index', on=['level', 'model', 'class'], aggregate_function='mean').sort('index')
+        rename_dict = {}
+        for c in df.columns[1:]:
+            t = tuple([v.replace('{', '').replace('}', '').replace('"', '') for v in c.split(',')])
+            level, model_name, prob_class = t
+            rename_dict[c] = f'probability|model{level}_{model_name}_class_{prob_class}'
+
+        df = df.rename(rename_dict)
+
+        return features.with_row_index("index").join(df, on="index", how="full").sort('index').drop('index', 'index_right')      
+
+    def add_probabilities0(self, probas, val_idx, classes, model_name, level, repetition):
+        predictions = []
+        for idx_in_fold, p in zip(val_idx, probas):
+            for scls, prob in zip(classes, p):
+                d = {
+                    'index': idx_in_fold,
+                    'model': model_name,
+                    'level': level,
+                    'repetition': repetition,
+                    'class': scls.item(),
+                    'probability': prob.item(),
+                }
+                predictions.append(d)
+        return predictions
+
+    def add_probabilities(self, probas, classes, model_name, level, repetition=None):
+        predictions = []
+        for idx, p in enumerate(probas):
+            for scls, prob in zip(classes, p):
+                d = {
+                    'index': idx,
+                    'model': model_name,
+                    'level': level,
+                    'class': scls.item(),
+                    'probability': prob.item(),
+                }
+                if repetition is not None:
+                    d['repetition'] = repetition
+                predictions.append(d)
+        return predictions
+
+    def _predict_one_model(self, model, model_name, X, Xt_):
+        start_predict = perf_counter()
+        if model_name in self.series_models:
+            proba = model.predict_proba(X)
+        else:
+            proba = model.predict_proba(Xt_)
+        end_predict = perf_counter()
+        predict_dur = end_predict - start_predict
+        return proba, model.classes_, predict_dur
+
+    def predict_proba_per_model(self, X):
+        predict_start_time = perf_counter()
+        print(f'[{perf_counter() - predict_start_time:.4f}s] Starting prediction')
+        return_dict = {}
+        Xt = self.compute_features(X)
+        print(f'[{perf_counter() - predict_start_time:.4f}s] Computed features for prediction')
+        predictions = []
+
+        rX = ray.put(X)
+        Xt_ = self.combine_features_and_predictions(Xt, predictions)
+        rXt = ray.put(Xt_.to_numpy())
+        r_columns = ray.put(Xt_.columns)
+
+        tasks = []
+        for model_name, model_group in self.trained_models_:
+            if model_name in self.stacking_models:
+                continue
+            print(model_name)
+
+            for model in model_group:
+                if model_name in self.series_models:
+                    tasks.append(predict_proba.remote(model, rX, None, model_name=model_name))
+                else:
+                    tasks.append(predict_proba.remote(model, rXt, r_columns, model_name=model_name))
+
+
+        pending = tasks
+        while pending:
+            ready, pending = ray.wait(pending, num_returns=1)
+            proba, classes_, predict_dur, model_name = ray.get(ready[0])
+            
+            print(f'[{perf_counter() - predict_start_time:.4f}s] Predicted probabilities with {model_name} in {predict_dur:.4f}s')
+            
+            level = 0 if model_name in self.feature_models + self.series_models else 1
+            pred_list = self.add_probabilities(proba, classes_, model_name, level)
+            predictions.extend(pred_list)
+
+        tasks = []
+        for model_name, model_group in self.trained_models_[::-1]:
+            if model_name not in self.stacking_models:
+                continue
+            Xt_ = self.combine_features_and_predictions(Xt, predictions)
+
+            rXt = ray.put(Xt_.to_numpy())
+            for model in model_group:
+                if model_name in self.series_models:
+                    tasks.append(predict_proba.remote(model, rX, None, model_name=model_name))
+                else:
+                    r_columns = ray.put(Xt_.columns)
+                    tasks.append(predict_proba.remote(model, rXt, r_columns, model_name=model_name))
+
+            pending = tasks
+            while pending:
+                ready, pending = ray.wait(pending, num_returns=1)
+                proba, classes_, predict_dur, model_name = ray.get(ready[0])
+                
+                print(f'[{perf_counter() - predict_start_time:.4f}s] Predicted probabilities with {model_name} in {predict_dur:.4f}s')
+                
+                level = 0 if model_name in self.feature_models + self.series_models else 1
+                pred_list = self.add_probabilities(proba, classes_, model_name, level)
+                predictions.extend(pred_list)
+
+        df = self.combine_features_and_predictions(Xt, predictions)
+        for model_name, _ in self.trained_models_:
+            prob_columns = [col for col in df.columns if model_name in col]
+            agg_probs = df.select(prob_columns)
+            return_dict[model_name] = agg_probs.to_numpy()
+        return return_dict
+
+    def _predict_proba(self, X):
+        return self.predict_proba_per_model(X)[self.best_model]
+
+    def _predict(self, X):
+        probas = self._predict_proba(X)
+        predicted_indices = np.argmax(probas, axis=1)
+        return self.classes_[predicted_indices]
+    
+    def add_features(self, feature_type:str, X:np.ndarray):
+        transform = self.get_next_feature_transformer(feature_type=feature_type)
+        transform.fit(X)
+        X_t = transform.transform(X)
+        params = transform.get_params()
+        if 'n_jobs' in params:
+            del params['n_jobs']
+        param_strs = [f'{k}={v}' for k, v in params.items()]        
+        param_str = ';'.join(param_strs)
+        transform_id = f'{transform.__class__.__name__.lower()};{param_str}'
+        schema = ['feature|'+transform_id+';index='+str(i) for i in range(X_t.shape[1])]
+        feature_df = pl.DataFrame(X_t, schema=schema)
+        self.feature_transformers.append(transform)
+        if self.features is None:
+            self.features = feature_df
+        else:
+            self.features = pl.concat([self.features, feature_df], how='horizontal')
+
+    def compute_features(self, X:np.ndarray):
+        feature_dfs = []
+        for transform in self.feature_transformers:
+            X_t = transform.transform(X)
+            params = transform.get_params()
+            if 'n_jobs' in params:
+                del params['n_jobs']
+            param_strs = [f'{k}={v}' for k, v in params.items()]        
+            param_str = ';'.join(param_strs)
+            transform_id = f'{transform.__class__.__name__.lower()};{param_str}'
+            schema = ['feature|'+transform_id+';index='+str(i) for i in range(X_t.shape[1])]
+            feature_df = pl.DataFrame(X_t, schema=schema)
+            feature_dfs.append(feature_df)
+        return pl.concat(feature_dfs, how='horizontal')
+
+    def get_Xt(self):
+        return self.combine_features_and_predictions(self.features, self.predictions)
+
 @ray.remote(num_cpus=1)
 def ray_run_predict_proba(model, X):
     start_time = perf_counter()
@@ -1600,6 +2175,8 @@ def get_model(model_name, random_state):
         return StackerV3(random_state=random_state, n_repetitions=3)
     elif model_name == 'mixed-v4':
         return StackerV4(random_state=random_state, n_repetitions=3)
+    elif model_name == 'mixed-v4-ray':
+        return StackerV4Ray(random_state=random_state, n_repetitions=3)
     else:
         raise ValueError(f'Unknown model name: {model_name}')
 
@@ -1609,10 +2186,11 @@ def get_model(model_name, random_state):
 if __name__ == '__main__':
     import random
     from itertools import product
+    import sys
     write_dir = "s3://tsc-glue/experiments/stacking_run_v1"
 
     datasets = univariate
-    model_names = ['mixed-v4', 'mixed-v3', 'mr-hydra', 'quant', 'rdst', 'mixed']
+    model_names = ['mixed-v4-ray', 'mixed-v4', 'mixed-v3', 'mr-hydra', 'quant', 'rdst', 'mixed']
     runs = [100, 200, 300, 400, 500]
 
     triplets = list(product(datasets, model_names, runs))
@@ -1643,8 +2221,14 @@ if __name__ == '__main__':
 
 
             model = get_model(model_name, random_state=run)
+            ray.init(
+                num_cpus=48,
+                ignore_reinit_error=True,
+                runtime_env={"py_executable": sys.executable},
+            )
             model.fit(X_train, y_train)
             preds = model.predict(X_test)
+            ray.shutdown()
             acc = accuracy_score(y_test, preds)
 
             stats['test_accuracy'] = acc

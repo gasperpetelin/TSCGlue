@@ -6,7 +6,7 @@ from contextlib import contextmanager
 import numpy as np
 import polars as pl
 import ray
-import tensorflow as tf
+#import tensorflow as tf
 from aeon.datasets import load_classification
 from sklearn.model_selection import KFold, StratifiedKFold
 
