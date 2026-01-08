@@ -6,7 +6,8 @@ from contextlib import contextmanager
 import numpy as np
 import polars as pl
 import ray
-#import tensorflow as tf
+
+# import tensorflow as tf
 from aeon.datasets import load_classification
 from sklearn.model_selection import KFold, StratifiedKFold
 
@@ -114,8 +115,8 @@ def ray_init_or_reuse(**ray_init_kwargs):
             ray.init(
                 runtime_env={
                     "working_dir": None,  # Disable auto-packaging of local module
-                }, 
-                **ray_init_kwargs
+                },
+                **ray_init_kwargs,
             )
             started_here = True
 

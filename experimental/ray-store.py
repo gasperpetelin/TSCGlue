@@ -1,8 +1,10 @@
-import ray
-import numpy as np
-import sys
 import gc
+import sys
 import time
+
+import numpy as np
+import ray
+
 
 def main():
     ray.init(ignore_reinit_error=True)
@@ -24,25 +26,25 @@ def main():
     print(f"String (repeated): {sys.getsizeof(data4) / (1024**2):.2f} MB")
     print(f"Numpy array (20000x20000): {sys.getsizeof(data5) / (1024**2):.2f} MB")
 
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("Object store memory BEFORE putting objects:")
-    print("="*50)
+    print("=" * 50)
 
     total_resources = ray.cluster_resources()
-    object_store_total = total_resources.get('object_store_memory', 0)
+    object_store_total = total_resources.get("object_store_memory", 0)
 
     available_resources = ray.available_resources()
-    object_store_available = available_resources.get('object_store_memory', 0)
+    object_store_available = available_resources.get("object_store_memory", 0)
     object_store_used = object_store_total - object_store_available
 
     print(f"Total: {object_store_total / (1024**3):.2f} GB")
     print(f"Used: {object_store_used / (1024**3):.2f} GB ({object_store_used / (1024**2):.2f} MB)")
     print(f"Available: {object_store_available / (1024**3):.2f} GB")
-    print(f"Usage: {(object_store_used/object_store_total)*100:.1f}%")
+    print(f"Usage: {(object_store_used / object_store_total) * 100:.1f}%")
 
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("Putting objects in Ray object store...")
-    print("="*50 + "\n")
+    print("=" * 50 + "\n")
 
     obj1 = ray.put(data5)
     obj2 = ray.put(data2)
@@ -57,7 +59,7 @@ def main():
     time.sleep(2)
 
     available_resources = ray.available_resources()
-    object_store_available = available_resources.get('object_store_memory', 0)
+    object_store_available = available_resources.get("object_store_memory", 0)
     object_store_used = object_store_total - object_store_available
 
     print("Object store memory AFTER putting objects:")
@@ -65,22 +67,23 @@ def main():
     print(f"Total: {object_store_total / (1024**3):.2f} GB")
     print(f"Used: {object_store_used / (1024**3):.2f} GB ({object_store_used / (1024**2):.2f} MB)")
     print(f"Available: {object_store_available / (1024**3):.2f} GB")
-    print(f"Usage: {(object_store_used/object_store_total)*100:.1f}%")
+    print(f"Usage: {(object_store_used / object_store_total) * 100:.1f}%")
 
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("Deleting objects...")
-    print("="*50 + "\n")
+    print("=" * 50 + "\n")
 
     del obj1, obj2, obj3, obj4, obj5, obj6, obj7
-
 
     time.sleep(5)
 
     # Force Python GC
     gc.collect()
     from ray._private.internal_api import global_gc
+
     global_gc()
     from ray._private.internal_api import memory_summary
+
     summary = memory_summary(stats_only=True)
     print("Summary --------------------------------------------")
     print(summary)
@@ -98,16 +101,16 @@ def main():
     print("Summary --------------------------------------------")
 
     available_resources = ray.available_resources()
-    object_store_available = available_resources.get('object_store_memory', 0)
+    object_store_available = available_resources.get("object_store_memory", 0)
     object_store_used = object_store_total - object_store_available
 
     print(f"Total: {object_store_total / (1024**3):.2f} GB")
     print(f"Used: {object_store_used / (1024**3):.2f} GB ({object_store_used / (1024**2):.2f} MB)")
     print(f"Available: {object_store_available / (1024**3):.2f} GB")
-    print(f"Usage: {(object_store_used/object_store_total)*100:.1f}%")
+    print(f"Usage: {(object_store_used / object_store_total) * 100:.1f}%")
 
     ray.shutdown()
 
+
 if __name__ == "__main__":
     main()
-

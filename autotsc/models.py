@@ -28,7 +28,7 @@ from sklearn.base import clone
 from sklearn.ensemble import (
     RandomForestClassifier,
 )
-from sklearn.linear_model import LogisticRegression, LogisticRegressionCV, RidgeClassifierCV
+from sklearn.linear_model import LogisticRegression, RidgeClassifierCV
 from sklearn.metrics import accuracy_score
 from sklearn.svm import SVC
 
@@ -45,7 +45,7 @@ class AutoTSCModel(BaseClassifier):
         "algorithm_type": "convolution",
     }
 
-    def __init__(self, n_jobs=1, n_gpus=0, verbose=0, n_folds = 20, model_selection=None):
+    def __init__(self, n_jobs=1, n_gpus=0, verbose=0, n_folds=20, model_selection=None):
         # TODO Correctlx set resource usage
         self.models_ = {}
         self.meta_models_ = {}
@@ -125,7 +125,7 @@ class AutoTSCModel(BaseClassifier):
             ),
         )
         if model_selection == "fast":
-            return [m1, m2]#, m3, m4, m5, m6, m7, m8, m9, m10]
+            return [m1, m2]  # , m3, m4, m5, m6, m7, m8, m9, m10]
         return [
             m1,
             m2,
@@ -214,7 +214,7 @@ class AutoTSCModel(BaseClassifier):
         model7 = ("m-svm", Ensemble(SVC(kernel="linear", probability=True)))
         model8 = ("m-log", Ensemble(LogisticRegression(n_jobs=-1)))
 
-        return [model1]#, model8]#, model7]
+        return [model1]  # , model8]#, model7]
 
     def _fit(self, X, y):
         self.cpus_available_, self.cpus_to_use_, self.gpus_available_, self.gpus_to_use_ = (
@@ -437,19 +437,19 @@ class Ensemble:
         self.fit_time_mean_ = np.mean(self.fit_time_)
         return oof_proba
 
-        #proba_predictions = []
-        #for train_idx, val_idx in cv_splits:
+        # proba_predictions = []
+        # for train_idx, val_idx in cv_splits:
         #    model_clone = clone(self.model)
         #    model_clone.fit(X[train_idx], y[train_idx])
         #    self.models.append(model_clone)
         #    y_proba = model_clone.predict_proba(X[val_idx])
         #    proba_predictions.extend(zip(val_idx, y_proba))
-        #proba_predictions = sorted(proba_predictions)
-        #return np.array([proba for idx, proba in proba_predictions])
+        # proba_predictions = sorted(proba_predictions)
+        # return np.array([proba for idx, proba in proba_predictions])
 
     def predict(self, X):
         # Create a truly writable copy for SVM's C code
-        X = np.array(X, dtype=np.float64, order='C', copy=True)
+        X = np.array(X, dtype=np.float64, order="C", copy=True)
         X.setflags(write=True)
         predictions = np.array([model.predict_proba(X) for model in self.trained_models_])
         avg_proba = predictions.mean(axis=0)

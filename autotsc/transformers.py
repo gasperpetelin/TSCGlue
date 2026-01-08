@@ -55,9 +55,9 @@ class Difference(BaseCollectionTransformer):
         Xt = X[:, :, self.lag :] - X[:, :, : -self.lag]
         return Xt
 
-import numpy as np
-from scipy.interpolate import interp1d
+
 from aeon.transformations.collection.base import BaseCollectionTransformer
+from scipy.interpolate import interp1d
 
 
 class DownsampleTransformer(BaseCollectionTransformer):
@@ -136,10 +136,10 @@ class PolarCoordinates(BaseCollectionTransformer):
             raise ValueError(f"lag must be > 0, got {self.lag}")
 
         # x(t)
-        x = X[:, :, self.lag:]
+        x = X[:, :, self.lag :]
 
         # dx = x(t) - x(t - lag)
-        dx = X[:, :, self.lag:] - X[:, :, :-self.lag]
+        dx = X[:, :, self.lag :] - X[:, :, : -self.lag]
 
         out_list = []
 
@@ -158,6 +158,7 @@ class PolarCoordinates(BaseCollectionTransformer):
 
         return Xt
 
+
 from scipy.stats import rankdata
 
 
@@ -170,7 +171,7 @@ class RankTransform(BaseCollectionTransformer):
     method : {"average", "min", "max", "dense", "ordinal"}, default="average"
         Ranking method passed to `scipy.stats.rankdata`.
         Matches behavior of pandas/numpy rank methods.
-    
+
     normalize : bool, default=True
         If True, normalize ranks to [0, 1].
         If False, return raw ranks in [1, T].
@@ -204,9 +205,9 @@ class RankTransform(BaseCollectionTransformer):
         for i in range(n_instances):
             for c in range(n_channels):
                 ranks = rankdata(X[i, c], method=self.method)
-                
+
                 if self.normalize:
-                    ranks = (ranks - ranks.min()) / (ranks.max()-ranks.min())  # scale to [0, 1]
+                    ranks = (ranks - ranks.min()) / (ranks.max() - ranks.min())  # scale to [0, 1]
 
                 Xt[i, c] = ranks
 
@@ -251,4 +252,3 @@ class LocalMeanSubtract(BaseCollectionTransformer):
                 Xt[i, c] = out
 
         return Xt
-

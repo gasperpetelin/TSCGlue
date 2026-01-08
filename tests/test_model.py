@@ -1,6 +1,7 @@
 """Tests for AutoTSC models."""
 
 import os
+
 os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 from sklearn.metrics import accuracy_score
 
