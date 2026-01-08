@@ -201,12 +201,13 @@ def predict_proba(pipe, X, columns, model_name):
     return prob, pipe.classes_, train_dur, model_name
 
 class StackerV4Ray(BaseClassifier):
-    def __init__(self, random_state=None, n_repetitions = 1, k_folds=10, time_limit_in_seconds = None, ray_config=None, auto_shutdown_ray=True):
+    def __init__(self, random_state=None, n_repetitions = 1, k_folds=10, time_limit_in_seconds = None, ray_config=None, auto_shutdown_ray=True, n_jobs=-1):
         super().__init__()
         self.n_repetitions = n_repetitions
         self.k_folds = k_folds
         self.random_state = random_state
         self.cv_splits = None
+        self.n_jobs = n_jobs
 
         self.feature_seed = np.random.default_rng(random_state)
         self.feature_transformers = []
@@ -227,9 +228,19 @@ class StackerV4Ray(BaseClassifier):
         import ray
 
         if not ray.is_initialized():
+            # Determine number of CPUs to use
+            total_cpus = os.cpu_count()
+            if self.n_jobs == -1:
+                num_cpus = total_cpus
+            else:
+                num_cpus = min(self.n_jobs, total_cpus)
+
+            if start_time is not None:
+                self._timestep_print(f'Total CPUs available: {total_cpus}', start_time)
+
             # Default config that uses current environment without creating copies
             default_config = {
-                "num_cpus": os.cpu_count(),
+                "num_cpus": num_cpus,
                 "ignore_reinit_error": True,
                 # No runtime_env - Ray will inherit current Python environment
             }
@@ -238,19 +249,17 @@ class StackerV4Ray(BaseClassifier):
 
             if start_time is not None:
                 self._timestep_print(f'Initializing Ray with {config["num_cpus"]} CPUs', start_time)
-                self._timestep_print(f'Ray config: {config}', start_time)
 
             ray.init(**config)
             self._ray_initialized_by_us = True
 
             if start_time is not None:
                 self._timestep_print('Ray initialized successfully', start_time)
-                # Print runtime env to see what Ray is actually using
-                #import sys
-                #self._timestep_print(f'Ray using Python: {sys.executable}', start_time)
         else:
             if start_time is not None:
                 self._timestep_print('Ray already initialized, reusing existing instance', start_time)
+            # We didn't initialize it, so we shouldn't shut it down
+            self._ray_initialized_by_us = False
 
     def _shutdown_ray_if_needed(self, start_time=None):
         """Shutdown Ray if we initialized it and auto_shutdown_ray is enabled."""
@@ -500,6 +509,18 @@ class StackerV4Ray(BaseClassifier):
             r_columns = ray.put(Xt.columns)
             current_splits = generate_folds(X, y, n_splits=self.k_folds, n_repetitions=1, random_state=self._get_feature_seed())
 
+            all_classes = np.unique(y)
+            self._timestep_print(f'Total classes: {len(all_classes)}, classes: {all_classes}', fit_start_time)
+
+            all_folds_valid = True
+            for fold_idx, (train_idx, val_idx) in enumerate(current_splits):
+                train_classes = np.unique(y[train_idx])
+                if len(train_classes) != len(all_classes):
+                    all_folds_valid = False
+                    self._timestep_print(f'Fold {fold_idx}: Train n_classes={len(train_classes)} {train_classes}', fit_start_time)
+
+            assert all_folds_valid, f"Not all folds have all classes in training set. Some folds are missing classes."
+
             self._print_ray_memory_summary(fit_start_time)
 
             tasks = []
@@ -514,7 +535,7 @@ class StackerV4Ray(BaseClassifier):
                         continue
 
                 for fold_number, (train_idx, val_idx) in enumerate(current_splits):
-                    pipe = self.get_model(model_name)
+                    pipe = self.get_model(model_name, seed=self._get_feature_seed())
                     rpipe = ray.put(pipe)
                     if model_name in self.series_models:
                         tasks.append(train_predict.remote(train_idx, val_idx, model_name, rX, ry, rpipe, None, fold_number=fold_number))
@@ -587,7 +608,7 @@ class StackerV4Ray(BaseClassifier):
                 tasks = []
 
                 for fold_number, (train_idx, val_idx) in enumerate(current_splits):
-                    pipe = self.get_model(model_name)
+                    pipe = self.get_model(model_name, seed=self._get_feature_seed())
                     if model_name in self.series_models:
                         tasks.append(train_predict.remote(train_idx, val_idx, model_name, rX, ry, pipe, None, fold_number=fold_number))
                     else:
@@ -595,9 +616,6 @@ class StackerV4Ray(BaseClassifier):
 
                 self._timestep_print(f'Tasks created for model {model_name}', fit_start_time)
 
-                #results = ray.get(tasks)
-                #print(f'[{perf_counter() - fit_start_time:.4f}s] Results received for model {model_name}')
-                #for fold_number, (train_idx, val_idx, proba, pipe, train_dur, model_name) in enumerate(results):
                 pending = tasks
                 while pending:
                     ready, pending = ray.wait(pending, num_returns=1)
@@ -628,7 +646,7 @@ class StackerV4Ray(BaseClassifier):
                 self._timestep_print(f'OOF acc for model {model_name}: {oof_acc}', fit_start_time)
 
             for model_name in self.oof_models:
-                pipe = self.get_model(model_name)
+                pipe = self.get_model(model_name, seed=self._get_feature_seed())
                 start_train = perf_counter()
                 oof_probas = pipe.fit_predict_proba(X, y)
                 end_train = perf_counter()
@@ -749,12 +767,13 @@ class StackerV4Ray(BaseClassifier):
             predictions.extend(pred_list)
 
         tasks = []
+        Xt_ = self.combine_features_and_predictions(Xt, predictions)
+        rXt = ray.put(Xt_.to_numpy())
+        
         for model_name, model_group in self.trained_models_[::-1]:
             if model_name not in self.stacking_models:
                 continue
-            Xt_ = self.combine_features_and_predictions(Xt, predictions)
 
-            rXt = ray.put(Xt_.to_numpy())
             for model in model_group:
                 if model_name in self.series_models:
                     tasks.append(predict_proba.remote(model, rX, None, model_name=model_name))

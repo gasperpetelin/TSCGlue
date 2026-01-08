@@ -1,9 +1,11 @@
 """Tests for AutoTSC models."""
 
+import os
+os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 from sklearn.metrics import accuracy_score
 
 from autotsc import utils
-from autotsc.models import AutoTSCModel
+from autotsc.models2 import StackerV4Ray
 
 
 def test_model_accuracy_on_arrowhead():
@@ -11,21 +13,12 @@ def test_model_accuracy_on_arrowhead():
     # Load the dataset
     X_train, y_train, X_test, y_test = utils.load_dataset("ArrowHead")
 
-    with utils.ray_init_or_reuse(num_cpus=8, resources={"meta": 100}, ignore_reinit_error=True):
-        # Initialize AutoTSCModel2
-        model = AutoTSCModel(n_jobs=8, verbose=1, model_selection="fast")
+    model = StackerV4Ray(random_state=270, n_repetitions=1, k_folds=10, time_limit_in_seconds=None)
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
 
-        # Fit the model
-        model.fit(X_train, y_train)
+    assert accuracy > 0.1, f"Accuracy {accuracy} is too low (<=0.1)"
+    assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
 
-        # Predict
-        y_pred = model.predict(X_test)
-
-        # Calculate accuracy
-        accuracy = accuracy_score(y_test, y_pred)
-
-        # Check that accuracy is within expected range
-        assert accuracy > 0.1, f"Accuracy {accuracy} is too low (<=0.1)"
-        assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
-
-        print(f"Test passed with accuracy: {accuracy:.4f}")
+    print(f"Test passed with accuracy: {accuracy:.4f}")
