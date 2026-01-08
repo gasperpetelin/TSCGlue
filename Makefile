@@ -1,4 +1,4 @@
-.PHONY: help list update tests clean format
+.PHONY: help install-uv setup list clean tests format
 .ONESHELL:
 
 help:   ## Show available commands
@@ -8,8 +8,7 @@ install-uv:  ## Install uv package manager
 	curl -LsSf https://astral.sh/uv/install.sh | sh
 
 setup:  ## Sets up everything needed for a new deployment
-	uv venv --python 3.12
-	uv pip install -e ".[dev,notebooks]"
+	uv sync --all-extras
 
 list:
 	@LC_ALL=C $(MAKE) -pRrq -f $(firstword $(MAKEFILE_LIST)) : 2>/dev/null | awk -v RS= -F: '/(^|\n)# Files(\n|$$)/,/(^|\n)# Finished Make data base/ {if ($$1 !~ "^[#.]") {print $$1}}' | sort | grep -E -v -e '^[^[:alnum:]]' -e '^$@$$'
