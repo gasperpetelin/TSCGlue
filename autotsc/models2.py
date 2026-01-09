@@ -207,6 +207,12 @@ class StackerV4Ray(BaseClassifier):
 
         self.last_repetition = False
 
+        # Model configuration
+        self.feature_models = ["multirockethydra-ridgecv", "quant-etc", "rdst-ridgecv"]
+        self.series_models = ["rstsf"]  # , 'drcif', 'weasel-v2']#, 'contractable-boss']
+        self.oof_models = []  # ['drcif']
+        self.stacking_models = ["probability-ridgecv"]
+
         # Ray configuration
         self.ray_config = ray_config or {}
         self.auto_shutdown_ray = auto_shutdown_ray
@@ -269,6 +275,66 @@ class StackerV4Ray(BaseClassifier):
 
     def _get_feature_seed(self):
         return int(self.feature_seed.integers(0, 2**31 - 1, dtype=np.int32))
+
+    def _get_transform_id(self, transform):
+        """Generate a unique identifier for a transform based on its class and parameters."""
+        params = transform.get_params()
+        if "n_jobs" in params:
+            del params["n_jobs"]
+        param_strs = [f"{k}={v}" for k, v in params.items()]
+        param_str = ";".join(param_strs)
+        return f"{transform.__class__.__name__.lower()};{param_str}"
+
+    def _create_training_tasks(self, model_name, current_splits, rX, rXt, ry, r_columns):
+        tasks = []
+        for fold_number, (train_idx, val_idx) in enumerate(current_splits):
+            pipe = self.get_model(model_name, seed=self._get_feature_seed())
+            data_X = rX if model_name in self.series_models else rXt
+            columns = None if model_name in self.series_models else r_columns
+
+            tasks.append(
+                train_predict.remote(
+                    train_idx,
+                    val_idx,
+                    model_name,
+                    data_X,
+                    ry,
+                    pipe,
+                    columns,
+                    fold_number=fold_number,
+                )
+            )
+
+        return tasks
+
+    def _process_training_tasks(self, tasks, repetition, fit_start_time):
+        model_groups = {}
+        pending = tasks
+
+        while pending:
+            ready, pending = ray.wait(pending, num_returns=1)
+            train_idx, val_idx, proba, pipe, train_dur, model_name, fold_number = ray.get(ready[0])
+
+            pipe_size_mb = len(pipe) / (1024 * 1024)
+            pipe = pickle.loads(pipe)
+
+            self._timestep_print(
+                f"Trained {model_name} in {train_dur:.4f}s for f-{fold_number}/r-{repetition}, size: {pipe_size_mb:.2f}MB",
+                fit_start_time,
+            )
+
+            level = 0 if model_name in self.feature_models + self.series_models else 1
+
+            predictions = self.add_probabilities0(
+                proba, val_idx, pipe.classes_, model_name, level, repetition
+            )
+            self.predictions.extend(predictions)
+
+            if model_name not in model_groups:
+                model_groups[model_name] = []
+            model_groups[model_name].append(pipe)
+
+        return model_groups
 
     def get_next_feature_transformer(self, feature_type: str):
 
@@ -473,11 +539,6 @@ class StackerV4Ray(BaseClassifier):
         self.predictions = []
         self.trained_models_ = []
 
-        self.feature_models = ["multirockethydra-ridgecv", "quant-etc", "rdst-ridgecv"]
-        self.series_models = ["rstsf"]  # , 'drcif', 'weasel-v2']#, 'contractable-boss']
-        self.oof_models = []  # ['drcif']
-        self.stacking_models = ["probability-ridgecv"]
-
         if self.cv_splits is None:
             self.cv_splits = []
 
@@ -516,7 +577,7 @@ class StackerV4Ray(BaseClassifier):
                 if len(train_classes) != len(all_classes):
                     all_folds_valid = False
                     self._timestep_print(
-                        f"Fold {fold_idx}: Train n_classes={len(train_classes)} {train_classes}",
+                        f"Fold {fold_idx}: Train n_classes={len(train_classes)}",
                         fit_start_time,
                     )
 
@@ -543,69 +604,14 @@ class StackerV4Ray(BaseClassifier):
                         )
                         continue
 
-                for fold_number, (train_idx, val_idx) in enumerate(current_splits):
-                    pipe = self.get_model(model_name, seed=self._get_feature_seed())
-                    rpipe = ray.put(pipe)
-                    if model_name in self.series_models:
-                        tasks.append(
-                            train_predict.remote(
-                                train_idx,
-                                val_idx,
-                                model_name,
-                                rX,
-                                ry,
-                                rpipe,
-                                None,
-                                fold_number=fold_number,
-                            )
-                        )
-                    else:
-                        tasks.append(
-                            train_predict.remote(
-                                train_idx,
-                                val_idx,
-                                model_name,
-                                rXt,
-                                ry,
-                                rpipe,
-                                r_columns,
-                                fold_number=fold_number,
-                            )
-                        )
-                    del rpipe
+                model_tasks = self._create_training_tasks(
+                    model_name, current_splits, rX, rXt, ry, r_columns
+                )
+                tasks.extend(model_tasks)
 
                 self._timestep_print(f"Tasks queued for model {model_name}", fit_start_time)
 
-            model_groups = {
-                model_name: [] for model_name in self.feature_models + self.series_models
-            }
-
-            pending = tasks
-            while pending:
-                ready, pending = ray.wait(pending, num_returns=1)
-                train_idx, val_idx, proba, pipe, train_dur, model_name, fold_number = ray.get(
-                    ready[0]
-                )
-
-                pipe_size_mb = len(pipe) / (1024 * 1024)
-                pipe = pickle.loads(pipe)
-
-                # print(type(train_idx), type(val_idx), type(proba), type(pipe), type(train_dur), type(model_name), type(fold_number))
-                self._timestep_print(
-                    f"Trained {model_name} in {train_dur:.4f}s for f-{fold_number}/r-{repetition}, size: {pipe_size_mb:.2f}MB",
-                    fit_start_time,
-                )
-
-                level = 0 if model_name in self.feature_models + self.series_models else 1
-
-                predictions = self.add_probabilities0(
-                    proba, val_idx, pipe.classes_, model_name, level, repetition
-                )
-                self.predictions.extend(predictions)
-
-                # pipe = None
-                # pipe_clean = pickle.loads(pickle.dumps(pipe))
-                model_groups[model_name].append(pipe)
+            model_groups = self._process_training_tasks(tasks, repetition, fit_start_time)
 
             for model_name, model_group in model_groups.items():
                 self.trained_models_.append((model_name, model_group))
@@ -621,7 +627,7 @@ class StackerV4Ray(BaseClassifier):
                 self._timestep_print(f"OOF acc for model {model_name}: {oof_acc}", fit_start_time)
 
             self._print_ray_memory_summary(fit_start_time)
-            del rXt, tasks, pending, ready, r_columns
+            del rXt, tasks, r_columns
             gc.collect()
             global_gc()
             self._print_ray_memory_summary(fit_start_time)
@@ -650,63 +656,16 @@ class StackerV4Ray(BaseClassifier):
 
                 self._timestep_print("Data put called", fit_start_time)
 
-                tasks = []
-
-                for fold_number, (train_idx, val_idx) in enumerate(current_splits):
-                    pipe = self.get_model(model_name, seed=self._get_feature_seed())
-                    if model_name in self.series_models:
-                        tasks.append(
-                            train_predict.remote(
-                                train_idx,
-                                val_idx,
-                                model_name,
-                                rX,
-                                ry,
-                                pipe,
-                                None,
-                                fold_number=fold_number,
-                            )
-                        )
-                    else:
-                        tasks.append(
-                            train_predict.remote(
-                                train_idx,
-                                val_idx,
-                                model_name,
-                                rXt,
-                                ry,
-                                pipe,
-                                r_columns,
-                                fold_number=fold_number,
-                            )
-                        )
+                tasks = self._create_training_tasks(
+                    model_name, current_splits, rX, rXt, ry, r_columns
+                )
 
                 self._timestep_print(f"Tasks created for model {model_name}", fit_start_time)
 
-                pending = tasks
-                while pending:
-                    ready, pending = ray.wait(pending, num_returns=1)
-                    train_idx, val_idx, proba, pipe, train_dur, model_name, fold_number = ray.get(
-                        ready[0]
-                    )
+                model_groups = self._process_training_tasks(tasks, repetition, fit_start_time)
 
-                    pipe_size_mb = len(pipe) / (1024 * 1024)
-                    pipe = pickle.loads(pipe)
-                    self._timestep_print(
-                        f"Trained {model_name} in {train_dur:.4f}s for f-{fold_number}/r-{repetition}, size: {pipe_size_mb:.2f}MB",
-                        fit_start_time,
-                    )
-
-                    level = 0 if model_name in self.feature_models + self.series_models else 1
-
-                    predictions = self.add_probabilities0(
-                        proba, val_idx, pipe.classes_, model_name, level, repetition
-                    )
-                    self.predictions.extend(predictions)
-
-                    model_group.append(pipe)
-
-                self.trained_models_.append((model_name, model_group))
+                for model_name, model_group in model_groups.items():
+                    self.trained_models_.append((model_name, model_group))
 
                 # get updated Xt
                 Xt = self.get_Xt()
@@ -743,7 +702,7 @@ class StackerV4Ray(BaseClassifier):
         self.best_model = "probability-ridgecv"
 
         self._print_ray_memory_summary(fit_start_time)
-        del X, rX, rXt, tasks, pending, ready, r_columns, ry, y
+        del X, rX, rXt, tasks, r_columns, ry, y
         gc.collect()
         global_gc()
         self._print_ray_memory_summary(fit_start_time)
@@ -827,8 +786,8 @@ class StackerV4Ray(BaseClassifier):
         # Ensure Ray is initialized before prediction
         self._ensure_ray_initialized(predict_start_time)
         return_dict = {}
-        Xt = self.compute_features(X)
-        self._timestep_print("Computed features for prediction", predict_start_time)
+        Xt = self.compute_features(X, predict_start_time)
+        self._timestep_print("Computed all features for prediction", predict_start_time)
         predictions = []
 
         rX = ray.put(X)
@@ -842,10 +801,11 @@ class StackerV4Ray(BaseClassifier):
                 continue
 
             for model in model_group:
-                if model_name in self.series_models:
-                    tasks.append(predict_proba.remote(model, rX, None, model_name=model_name))
-                else:
-                    tasks.append(predict_proba.remote(model, rXt, r_columns, model_name=model_name))
+                # Select data source based on model type
+                data_X = rX if model_name in self.series_models else rXt
+                columns = None if model_name in self.series_models else r_columns
+
+                tasks.append(predict_proba.remote(model, data_X, columns, model_name=model_name))
 
         pending = tasks
         while pending:
@@ -870,11 +830,15 @@ class StackerV4Ray(BaseClassifier):
                 continue
 
             for model in model_group:
+                # Select data source based on model type
                 if model_name in self.series_models:
-                    tasks.append(predict_proba.remote(model, rX, None, model_name=model_name))
+                    data_X = rX
+                    columns = None
                 else:
-                    r_columns = ray.put(Xt_.columns)
-                    tasks.append(predict_proba.remote(model, rXt, r_columns, model_name=model_name))
+                    data_X = rXt
+                    columns = ray.put(Xt_.columns)
+
+                tasks.append(predict_proba.remote(model, data_X, columns, model_name=model_name))
 
             pending = tasks
             while pending:
@@ -896,7 +860,7 @@ class StackerV4Ray(BaseClassifier):
             agg_probs = df.select(prob_columns)
             return_dict[model_name] = agg_probs.to_numpy()
 
-        del rX, rXt, r_columns, tasks, pending, ready
+        del rX, rXt, r_columns, tasks
         gc.collect()
         global_gc()
         self._print_ray_memory_summary(predict_start_time)
@@ -918,12 +882,7 @@ class StackerV4Ray(BaseClassifier):
         transform = self.get_next_feature_transformer(feature_type=feature_type)
         transform.fit(X)
         X_t = transform.transform(X)
-        params = transform.get_params()
-        if "n_jobs" in params:
-            del params["n_jobs"]
-        param_strs = [f"{k}={v}" for k, v in params.items()]
-        param_str = ";".join(param_strs)
-        transform_id = f"{transform.__class__.__name__.lower()};{param_str}"
+        transform_id = self._get_transform_id(transform)
         schema = ["feature|" + transform_id + ";index=" + str(i) for i in range(X_t.shape[1])]
         feature_df = pl.DataFrame(X_t, schema=schema)
         self.feature_transformers.append(transform)
@@ -932,16 +891,20 @@ class StackerV4Ray(BaseClassifier):
         else:
             self.features = pl.concat([self.features, feature_df], how="horizontal")
 
-    def compute_features(self, X: np.ndarray):
+    def compute_features(self, X: np.ndarray, start_time):
         feature_dfs = []
         for transform in self.feature_transformers:
+            transform_start = perf_counter()
             X_t = transform.transform(X)
-            params = transform.get_params()
-            if "n_jobs" in params:
-                del params["n_jobs"]
-            param_strs = [f"{k}={v}" for k, v in params.items()]
-            param_str = ";".join(param_strs)
-            transform_id = f"{transform.__class__.__name__.lower()};{param_str}"
+            transform_duration = perf_counter() - transform_start
+
+            transform_id = self._get_transform_id(transform)
+
+            self._timestep_print(
+                f"Computed {transform.__class__.__name__} features in {transform_duration:.2f}s",
+                start_time
+            )
+
             schema = ["feature|" + transform_id + ";index=" + str(i) for i in range(X_t.shape[1])]
             feature_df = pl.DataFrame(X_t, schema=schema)
             feature_dfs.append(feature_df)
