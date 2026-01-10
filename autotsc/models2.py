@@ -7,6 +7,7 @@ import numpy as np
 import polars as pl
 import ray
 from aeon.classification.base import BaseClassifier
+from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.classification.dictionary_based import WEASEL_V2, ContractableBOSS
 from aeon.classification.interval_based import RSTSF, DrCIFClassifier
 from aeon.transformations.collection.convolution_based import MultiRocket
@@ -217,6 +218,9 @@ class StackerV4Ray(BaseClassifier):
         self.ray_config = ray_config or {}
         self.auto_shutdown_ray = auto_shutdown_ray
         self._ray_initialized_by_us = False
+
+        # Fallback model for when folds don't have all classes
+        self._fallback_model = None
 
     def _ensure_ray_initialized(self, start_time=None):
         """Initialize Ray if not already running. Uses current Python environment."""
@@ -512,6 +516,21 @@ class StackerV4Ray(BaseClassifier):
         )
         self._timestep_print(f"Ray memory summary: {summary}", start_time)
 
+    def _train_fallback_model(self, X, y, fit_start_time):
+        """Train fallback MultiRocketHydraClassifier model."""
+        self._timestep_print(
+            "Training fallback MultiRocketHydraClassifier model...",
+            fit_start_time,
+        )
+        self._fallback_model = MultiRocketHydraClassifier(
+            n_jobs=self.n_jobs, random_state=self.random_state
+        )
+        self._fallback_model.fit(X, y)
+        self._timestep_print(
+            "Fallback MultiRocketHydraClassifier trained successfully", fit_start_time
+        )
+        self.best_model = "fallback"
+
     def _feature_calc(self, X, fit_start_time):
         multirocket_start_time = perf_counter()
         self.add_features(feature_type="multirocket", X=X)
@@ -533,6 +552,22 @@ class StackerV4Ray(BaseClassifier):
     def _fit(self, X, y):
         fit_start_time = perf_counter()
         self._timestep_print("Starting fitting", fit_start_time)
+
+        # Check if each class has at least 2 samples (required for k-fold CV)
+        unique_classes, class_counts = np.unique(y, return_counts=True)
+        self._timestep_print(
+            f"Class distribution: {dict(zip(unique_classes, class_counts))}", fit_start_time
+        )
+
+        min_class_count = np.min(class_counts)
+        if min_class_count < 2:
+            self._timestep_print(
+                f"At least one class has only {min_class_count} sample(s). K-fold CV not possible. Using fallback.",
+                fit_start_time,
+            )
+            self._train_fallback_model(X, y, fit_start_time)
+            return
+
         # Ensure Ray is initialized before starting
         self._ensure_ray_initialized(fit_start_time)
 
@@ -564,25 +599,6 @@ class StackerV4Ray(BaseClassifier):
             r_columns = ray.put(Xt.columns)
             current_splits = generate_folds(
                 X, y, n_splits=self.k_folds, n_repetitions=1, random_state=self._get_feature_seed()
-            )
-
-            all_classes = np.unique(y)
-            self._timestep_print(
-                f"Total classes: {len(all_classes)}, classes: {all_classes}", fit_start_time
-            )
-
-            all_folds_valid = True
-            for fold_idx, (train_idx, val_idx) in enumerate(current_splits):
-                train_classes = np.unique(y[train_idx])
-                if len(train_classes) != len(all_classes):
-                    all_folds_valid = False
-                    self._timestep_print(
-                        f"Fold {fold_idx}: Train n_classes={len(train_classes)}",
-                        fit_start_time,
-                    )
-
-            assert all_folds_valid, (
-                "Not all folds have all classes in training set. Some folds are missing classes."
             )
 
             self._print_ray_memory_summary(fit_start_time)
@@ -871,9 +887,13 @@ class StackerV4Ray(BaseClassifier):
         return return_dict
 
     def _predict_proba(self, X):
+        if self._fallback_model is not None:
+            return self._fallback_model.predict_proba(X)
         return self.predict_proba_per_model(X)[self.best_model]
 
     def _predict(self, X):
+        if self._fallback_model is not None:
+            return self._fallback_model.predict(X)
         probas = self._predict_proba(X)
         predicted_indices = np.argmax(probas, axis=1)
         return self.classes_[predicted_indices]

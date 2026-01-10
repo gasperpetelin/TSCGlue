@@ -1768,6 +1768,8 @@ def get_model(model_name, random_state):
         return QUANTClassifier(random_state=random_state)
     elif model_name == "rdst":
         return RDSTClassifier(n_jobs=-1, random_state=random_state)
+    elif model_name == "rstsf":
+        return RSTSF(random_state=random_state, n_jobs=-1)
     elif model_name == "mixed":
         return Stacker(random_state=random_state, n_repetitions=3)
     elif model_name == "mixed-v2":
@@ -1778,6 +1780,10 @@ def get_model(model_name, random_state):
         return StackerV4(random_state=random_state, n_repetitions=3)
     elif model_name == "mixed-v4-ray":
         return StackerV4Ray(random_state=random_state, n_repetitions=3, auto_shutdown_ray=False)
+    elif model_name == "mixed-v4-ray-r-1":
+        return StackerV4Ray(random_state=random_state, n_repetitions=1, auto_shutdown_ray=False)
+    elif model_name == "mixed-v4-ray-r-5":
+        return StackerV4Ray(random_state=random_state, n_repetitions=5, auto_shutdown_ray=False)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
@@ -1790,9 +1796,9 @@ if __name__ == "__main__":
 
     datasets = univariate
     model_names = [
-        "mixed-v4-ray"
-    ]  # , 'mixed-v4', 'mixed-v3', 'mr-hydra', 'quant', 'rdst', 'mixed']
-    runs = [100, 200, 300, 400, 500]
+        "rstsf", "mixed-v4-ray" , 'mr-hydra', 'quant', 'rdst', "mixed-v4-ray-r-1", "mixed-v4-ray-r-5"
+    ]
+    runs = [100, 200, 300, 400, 500, 600, 700]
 
     triplets = list(product(datasets, model_names, runs))
     random.shuffle(triplets)
