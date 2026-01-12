@@ -76,6 +76,8 @@ class MultiScaler(BaseEstimator, TransformerMixin):
     Applies different scalers to different feature groups.
     Features not in any group are ignored.
 
+    Only accepts NumPy arrays with feature names.
+
     Parameters
     ----------
     scalers : dict
@@ -89,21 +91,40 @@ class MultiScaler(BaseEstimator, TransformerMixin):
         self.scalers = scalers
         self.verbose = verbose
 
-    def fit(self, X, y=None):
+    def fit(self, X, y=None, feature_names=None):
+        """
+        Fit the scalers.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Input data as NumPy array
+        y : array-like, optional
+            Target values (ignored)
+        feature_names : list of str
+            Column names corresponding to X columns
+        """
+        assert isinstance(X, np.ndarray), f"X must be a NumPy array, got {type(X)}"
+        assert feature_names is not None, "feature_names must be provided"
+
         self.scalers_ = {}
+        self.feature_indices_ = {}
         self.feature_groups_ = {}
 
-        # Group columns by prefix
+        # Group columns by prefix and store column indices
         for prefix, scaler in self.scalers.items():
-            cols = [col for col in X.columns if col.startswith(prefix)]
-            if cols:
-                self.feature_groups_[prefix] = cols
+            col_indices = [i for i, col in enumerate(feature_names) if col.startswith(prefix)]
+            col_names = [feature_names[i] for i in col_indices]
+
+            if col_indices:
+                self.feature_groups_[prefix] = col_names
+                self.feature_indices_[prefix] = col_indices
                 self.scalers_[prefix] = scaler
-                self.scalers_[prefix].fit(X.select(cols).to_numpy())
+                self.scalers_[prefix].fit(X[:, col_indices])
 
                 if self.verbose:
                     print(
-                        f"[MultiScaler] {len(cols)} '{prefix}' features -> {scaler.__class__.__name__}"
+                        f"[MultiScaler] {len(col_indices)} '{prefix}' features -> {scaler.__class__.__name__}"
                     )
 
         # Store output column order
@@ -112,7 +133,7 @@ class MultiScaler(BaseEstimator, TransformerMixin):
         ]
 
         if self.verbose:
-            total_input = len(X.columns)
+            total_input = len(feature_names)
             total_output = len(self.output_cols_)
             ignored = total_input - total_output
             print(
@@ -121,12 +142,24 @@ class MultiScaler(BaseEstimator, TransformerMixin):
 
         return self
 
-    def transform(self, X):
+    def transform(self, X, feature_names=None):
+        """
+        Transform the data.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Input data as NumPy array
+        feature_names : list of str, optional
+            Not used, kept for compatibility
+        """
+        assert isinstance(X, np.ndarray), f"X must be a NumPy array, got {type(X)}"
+
         parts = []
         for prefix in self.scalers_.keys():
-            if prefix in self.feature_groups_:
-                cols = self.feature_groups_[prefix]
-                scaled = self.scalers_[prefix].transform(X.select(cols).to_numpy())
+            if prefix in self.feature_indices_:
+                col_indices = self.feature_indices_[prefix]
+                scaled = self.scalers_[prefix].transform(X[:, col_indices])
                 parts.append(scaled)
 
         return np.hstack(parts) if parts else np.empty((len(X), 0))
@@ -158,23 +191,23 @@ class RidgeClassifierCVIndicator(RidgeClassifierCV):
 
 @ray.remote(num_cpus=1)
 def train_predict(train_idx, val_idx, model_name, X, y, pipe, columns, fold_number):
-    if columns is not None:
-        X = pl.DataFrame(X, schema=columns)
-    # print('START')
+    # X is already NumPy array - no Polars conversion needed
     start_train = perf_counter()
-    pipe.fit(X[train_idx], y[train_idx])
+    if columns is not None:
+        # Pass feature_names to pipeline (MultiScaler will receive it)
+        pipe.fit(X[train_idx], y[train_idx], multiscaler__feature_names=columns)
+    else:
+        pipe.fit(X[train_idx], y[train_idx])
     proba = pipe.predict_proba(X[val_idx])
     end_train = perf_counter()
     train_dur = end_train - start_train
-    # print('END')
     return train_idx, val_idx, proba, pickle.dumps(pipe), train_dur, model_name, fold_number
 
 
 @ray.remote(num_cpus=1)
 def predict_proba(pipe, X, columns, model_name):
+    # X is already NumPy array - no Polars conversion needed
     start_train = perf_counter()
-    if columns is not None:
-        X = pl.DataFrame(X, schema=columns)
     prob = pipe.predict_proba(X)
     end_train = perf_counter()
     train_dur = end_train - start_train
@@ -191,6 +224,7 @@ class StackerV4Ray(BaseClassifier):
         ray_config=None,
         auto_shutdown_ray=True,
         n_jobs=-1,
+        dtype="float32",
     ):
         super().__init__()
         self.n_repetitions = n_repetitions
@@ -198,6 +232,12 @@ class StackerV4Ray(BaseClassifier):
         self.random_state = random_state
         self.cv_splits = None
         self.n_jobs = n_jobs
+        self.dtype = dtype
+
+        # Validate dtype
+        valid_dtypes = ["float64", "float32", "float16"]
+        if dtype not in valid_dtypes:
+            raise ValueError(f"dtype must be one of {valid_dtypes}, got {dtype}")
 
         self.feature_seed = np.random.default_rng(random_state)
         self.feature_transformers = []
@@ -505,6 +545,16 @@ class StackerV4Ray(BaseClassifier):
         elapsed_time = perf_counter() - start_time
         print(f"[{elapsed_time:.2f}s] {message}")
 
+    def _calculate_oof_accuracy(self, model_name: str, y: np.ndarray) -> float:
+        """Calculate out-of-fold accuracy for a given model"""
+        Xt = self.get_Xt()
+        prob_columns = [col for col in Xt.columns if model_name in col]
+        agg_probs = Xt.select(prob_columns)
+        oof_probas = agg_probs.to_numpy()
+        oof_pred_indices = np.argmax(oof_probas, axis=1)
+        oof_preds = self.classes_[oof_pred_indices]
+        return accuracy_score(y, oof_preds)
+
     def _print_ray_memory_summary(self, start_time: float):
         from ray._private.internal_api import memory_summary
 
@@ -632,18 +682,12 @@ class StackerV4Ray(BaseClassifier):
             for model_name, model_group in model_groups.items():
                 self.trained_models_.append((model_name, model_group))
 
-            Xt = self.get_Xt()
             for model_name in self.feature_models + self.series_models:
-                prob_columns = [col for col in Xt.columns if model_name in col]
-                agg_probs = Xt.select(prob_columns)
-                oof_probas = agg_probs.to_numpy()
-                oof_pred_indices = np.argmax(oof_probas, axis=1)
-                oof_preds = self.classes_[oof_pred_indices]
-                oof_acc = accuracy_score(y, oof_preds)
+                oof_acc = self._calculate_oof_accuracy(model_name, y)
                 self._timestep_print(f"OOF acc for model {model_name}: {oof_acc}", fit_start_time)
 
             self._print_ray_memory_summary(fit_start_time)
-            del rXt, tasks, r_columns
+            del Xt, rXt, tasks, r_columns  # Free Xt along with Ray references
             gc.collect()
             global_gc()
             self._print_ray_memory_summary(fit_start_time)
@@ -651,6 +695,8 @@ class StackerV4Ray(BaseClassifier):
             Xt = self.get_Xt()
             rXt = ray.put(Xt.to_numpy())
             r_columns = ray.put(Xt.columns)
+            del Xt  # Free immediately after putting in Ray
+            gc.collect()
 
             for model_name in self.stacking_models:
                 model_group = []
@@ -683,15 +729,8 @@ class StackerV4Ray(BaseClassifier):
                 for model_name, model_group in model_groups.items():
                     self.trained_models_.append((model_name, model_group))
 
-                # get updated Xt
-                Xt = self.get_Xt()
-                prob_columns = [col for col in Xt.columns if model_name in col]
-                agg_probs = Xt.select(prob_columns)
-                oof_probas = agg_probs.to_numpy()
-                oof_pred_indices = np.argmax(oof_probas, axis=1)
-                oof_preds = self.classes_[oof_pred_indices]
-                oof_acc = accuracy_score(y, oof_preds)
-
+                # Calculate OOF accuracy
+                oof_acc = self._calculate_oof_accuracy(model_name, y)
                 self._timestep_print(f"OOF acc for model {model_name}: {oof_acc}", fit_start_time)
 
             for model_name in self.oof_models:
@@ -902,6 +941,13 @@ class StackerV4Ray(BaseClassifier):
         transform = self.get_next_feature_transformer(feature_type=feature_type)
         transform.fit(X)
         X_t = transform.transform(X)
+
+        # Convert to NumPy if it's a PyTorch tensor
+        if hasattr(X_t, 'cpu'):
+            X_t = X_t.cpu().numpy()
+
+        # Cast to specified dtype
+        X_t = X_t.astype(self.dtype)
         transform_id = self._get_transform_id(transform)
         schema = ["feature|" + transform_id + ";index=" + str(i) for i in range(X_t.shape[1])]
         feature_df = pl.DataFrame(X_t, schema=schema)
@@ -916,6 +962,13 @@ class StackerV4Ray(BaseClassifier):
         for transform in self.feature_transformers:
             transform_start = perf_counter()
             X_t = transform.transform(X)
+
+            # Convert to NumPy if it's a PyTorch tensor
+            if hasattr(X_t, 'cpu'):
+                X_t = X_t.cpu().numpy()
+
+            # Cast to specified dtype
+            X_t = X_t.astype(self.dtype)
             transform_duration = perf_counter() - transform_start
 
             transform_id = self._get_transform_id(transform)

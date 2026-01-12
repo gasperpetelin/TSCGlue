@@ -1796,58 +1796,56 @@ if __name__ == "__main__":
 
     datasets = univariate
     model_names = [
-        "rstsf", "mixed-v4-ray" , 'mr-hydra', 'quant', 'rdst', "mixed-v4-ray-r-1", "mixed-v4-ray-r-5"
+        "rstsf", "mixed-v4-ray" , 'mr-hydra', 'quant', 'rdst', "mixed-v4-ray-r-1"
     ]
     runs = [100, 200, 300, 400, 500, 600, 700]
 
     triplets = list(product(datasets, model_names, runs))
     random.shuffle(triplets)
 
-    # Initialize Ray once at the start
-    if not ray.is_initialized():
-        ray.init(num_cpus=os.cpu_count(), ignore_reinit_error=True)
-        print(f"Ray initialized with {os.cpu_count()} CPUs")
 
-    try:
-        for dataset, model_name, run in tqdm(triplets):
+    for dataset, model_name, run in tqdm(triplets):
+        try:
+            stats = {
+                "dataset": dataset,
+                "model": model_name,
+                "run": run,
+            }
+
+            hash_val = (
+                pl.DataFrame([stats]).hash_rows(seed=42, seed_1=1, seed_2=2, seed_3=3).item()
+            )
+            file = f"{write_dir}/{hash_val}.parquet"
+
+            # Check if file exists in S3
             try:
-                print(f"Running {dataset} with model {model_name} run {run}")
+                pl.read_parquet(file)
+                print(f"Skipping: Dataset={dataset}, Run={run}, Model={model_name}")
+                continue
+            except:
+                print(f"Processing: Dataset={dataset}, Run={run}, Model={model_name}")
 
-                stats = {
-                    "dataset": dataset,
-                    "model": model_name,
-                    "run": run,
-                }
+            X_train, y_train, X_test, y_test = utils.load_dataset(dataset)
 
-                hash_val = (
-                    pl.DataFrame([stats]).hash_rows(seed=42, seed_1=1, seed_2=2, seed_3=3).item()
-                )
-                file = f"{write_dir}/{hash_val}.parquet"
+            if not ray.is_initialized():
+                ray.init(num_cpus=os.cpu_count(), ignore_reinit_error=True)
+                print(f"Ray initialized with {os.cpu_count()} CPUs")
+            print(f"Running {dataset} with model {model_name} run {run}")
 
-                # Check if file exists in S3
-                try:
-                    pl.read_parquet(file)
-                    print(f"Skipping: Dataset={dataset}, Run={run}, Model={model_name}")
-                    continue
-                except:
-                    print(f"Processing: Dataset={dataset}, Run={run}, Model={model_name}")
+            # Ray is initialized at the script level, model should not manage it
+            model = get_model(model_name, random_state=run)
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
+            acc = accuracy_score(y_test, preds)
 
-                X_train, y_train, X_test, y_test = utils.load_dataset(dataset)
+            stats["test_accuracy"] = acc
 
-                # Ray is initialized at the script level, model should not manage it
-                model = get_model(model_name, random_state=run)
-                model.fit(X_train, y_train)
-                preds = model.predict(X_test)
-                acc = accuracy_score(y_test, preds)
-
-                stats["test_accuracy"] = acc
-
-                df_stat = pl.DataFrame([stats])
-                df_stat.write_parquet(file)
-            except Exception as e:
-                print(f"Error processing Dataset={dataset}, Run={run}, Model={model_name}: {e}")
-    finally:
-        # Shutdown Ray at the end
-        if ray.is_initialized():
-            print("Shutting down Ray cluster")
-            ray.shutdown()
+            df_stat = pl.DataFrame([stats])
+            df_stat.write_parquet(file)
+        except Exception as e:
+            print(f"Error processing Dataset={dataset}, Run={run}, Model={model_name}: {e}")            
+        finally:
+            # Shutdown Ray at the end
+            if ray.is_initialized():
+                print("Shutting down Ray cluster")
+                ray.shutdown()
