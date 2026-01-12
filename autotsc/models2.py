@@ -545,6 +545,15 @@ class StackerV4Ray(BaseClassifier):
         elapsed_time = perf_counter() - start_time
         print(f"[{elapsed_time:.2f}s] {message}")
 
+    def _print_xt_size(self, Xt, context: str, start_time: float):
+        """Print the size of Xt DataFrame"""
+        if Xt is not None:
+            memory_gb = Xt.estimated_size("gb")
+            self._timestep_print(
+                f"Xt size ({context}): {memory_gb:.3f} GB, shape: {Xt.shape}",
+                start_time
+            )
+
     def _calculate_oof_accuracy(self, model_name: str, y: np.ndarray) -> float:
         """Calculate out-of-fold accuracy for a given model"""
         Xt = self.get_Xt()
@@ -645,6 +654,7 @@ class StackerV4Ray(BaseClassifier):
             self._feature_calc(X, fit_start_time)
 
             Xt = self.get_Xt()
+            self._print_xt_size(Xt, "after features", fit_start_time)
             rXt = ray.put(Xt.to_numpy())
             r_columns = ray.put(Xt.columns)
             current_splits = generate_folds(
@@ -693,6 +703,7 @@ class StackerV4Ray(BaseClassifier):
             self._print_ray_memory_summary(fit_start_time)
 
             Xt = self.get_Xt()
+            self._print_xt_size(Xt, "before stacking", fit_start_time)
             rXt = ray.put(Xt.to_numpy())
             r_columns = ray.put(Xt.columns)
             del Xt  # Free immediately after putting in Ray
