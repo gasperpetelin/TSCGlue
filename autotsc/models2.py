@@ -381,7 +381,6 @@ class StackerV4Ray(BaseClassifier):
         return model_groups
 
     def get_next_feature_transformer(self, feature_type: str):
-
         # implement python switch
         seed = self._get_feature_seed()
         match feature_type:
@@ -550,8 +549,7 @@ class StackerV4Ray(BaseClassifier):
         if Xt is not None:
             memory_gb = Xt.estimated_size("gb")
             self._timestep_print(
-                f"Xt size ({context}): {memory_gb:.3f} GB, shape: {Xt.shape}",
-                start_time
+                f"Xt size ({context}): {memory_gb:.3f} GB, shape: {Xt.shape}", start_time
             )
 
     def _calculate_oof_accuracy(self, model_name: str, y: np.ndarray) -> float:
@@ -954,7 +952,7 @@ class StackerV4Ray(BaseClassifier):
         X_t = transform.transform(X)
 
         # Convert to NumPy if it's a PyTorch tensor
-        if hasattr(X_t, 'cpu'):
+        if hasattr(X_t, "cpu"):
             X_t = X_t.cpu().numpy()
 
         # Cast to specified dtype
@@ -975,7 +973,7 @@ class StackerV4Ray(BaseClassifier):
             X_t = transform.transform(X)
 
             # Convert to NumPy if it's a PyTorch tensor
-            if hasattr(X_t, 'cpu'):
+            if hasattr(X_t, "cpu"):
                 X_t = X_t.cpu().numpy()
 
             # Cast to specified dtype
@@ -986,7 +984,7 @@ class StackerV4Ray(BaseClassifier):
 
             self._timestep_print(
                 f"Computed {transform.__class__.__name__} features in {transform_duration:.2f}s",
-                start_time
+                start_time,
             )
 
             schema = ["feature|" + transform_id + ";index=" + str(i) for i in range(X_t.shape[1])]

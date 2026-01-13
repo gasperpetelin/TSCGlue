@@ -1,0 +1,110 @@
+import os
+
+os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
+from urllib.parse import urlparse
+
+import boto3
+import polars as pl
+from aeon.classification.convolution_based import MultiRocketHydraClassifier
+from aeon.classification.interval_based import RSTSF, QUANTClassifier
+from aeon.classification.shapelet_based import RDSTClassifier
+from aeon.datasets.tsc_datasets import univariate
+from aeon.transformations.collection.feature_based import Catch22
+from botocore.exceptions import ClientError
+from sklearn.metrics import accuracy_score
+from tqdm import tqdm
+
+from autotsc import utils
+from autotsc.models import StackerV4
+
+
+def s3_file_exists(s3_uri: str) -> bool:
+    s3 = boto3.client("s3")
+    parsed = urlparse(s3_uri)
+    bucket = parsed.netloc
+    key = parsed.path.lstrip("/")
+
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "404":
+            return False
+        raise  # propagate other errors (e.g., permission, throttling)
+
+
+def get_model(model_name, random_state):
+    if model_name == "mr-hydra":
+        return MultiRocketHydraClassifier(n_jobs=-1, random_state=random_state)
+    elif model_name == "quant":
+        return QUANTClassifier(random_state=random_state)
+    elif model_name == "rdst":
+        return RDSTClassifier(n_jobs=-1, random_state=random_state)
+    elif model_name == "rstsf":
+        return RSTSF(random_state=random_state, n_jobs=-1)
+    elif model_name == "stacker-v4-r3":
+        return StackerV4(random_state=random_state, n_repetitions=3)
+    elif model_name == "stacker-v4-r1":
+        return StackerV4(random_state=random_state, n_repetitions=1)
+    elif model_name == "catch22":
+        return Catch22(n_jobs=-1)
+    else:
+        raise ValueError(f"Unknown model name: {model_name}")
+
+
+if __name__ == "__main__":
+    import random
+    from itertools import product
+
+    write_dir = "s3://tsc-glue/performance"
+
+    datasets = univariate
+    model_names = ["rstsf", "mr-hydra", "quant", "rdst", "stacker-v4-r3", "stacker-v4-r1"]
+    runs = [100, 200, 300, 400, 500]
+
+    triplets = list(product(datasets, model_names, runs))
+    random.shuffle(triplets)
+
+    for dataset, model_name, run in tqdm(triplets):
+        try:
+            stats = {
+                "dataset": dataset,
+                "model": model_name,
+                "run": run,
+                "resampled": False,
+            }
+
+            hash_val = pl.DataFrame([stats]).hash_rows(seed=42, seed_1=1, seed_2=2, seed_3=3).item()
+            file = f"{write_dir}/{hash_val}.parquet"
+
+            # Check if file exists in S3
+            if s3_file_exists(file):
+                print(f"Skipping: Dataset={dataset}, Run={run}, Model={model_name}")
+                continue
+            else:
+                print(f"Processing: Dataset={dataset}, Run={run}, Model={model_name}")
+
+            X_train, y_train, X_test, y_test = utils.load_dataset(dataset)
+
+            # if not ray.is_initialized():
+            #    ray.init(num_cpus=os.cpu_count(), ignore_reinit_error=True)
+            #    print(f"Ray initialized with {os.cpu_count()} CPUs")
+            print(f"Running {dataset} with model {model_name} run {run}")
+
+            # Ray is initialized at the script level, model should not manage it
+            model = get_model(model_name, random_state=run)
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
+            acc = accuracy_score(y_test, preds)
+
+            stats["test_accuracy"] = acc
+
+            df_stat = pl.DataFrame([stats])
+            df_stat.write_parquet(file)
+        except Exception as e:
+            print(f"Error processing Dataset={dataset}, Run={run}, Model={model_name}: {e}")
+        # finally:
+        #    # Shutdown Ray at the end
+        #    if ray.is_initialized():
+        #        print("Shutting down Ray cluster")
+        #        ray.shutdown()

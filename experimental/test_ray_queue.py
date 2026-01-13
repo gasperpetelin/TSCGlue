@@ -3,9 +3,11 @@ Example of Ray queue pattern for distributed model training.
 This reduces overhead by having n workers process k models (k >> n).
 With streaming results: collect trained models while workers are still running.
 """
-import ray
+
 import time
+
 import numpy as np
+import ray
 from ray.util.queue import Queue
 from sklearn.ensemble import RandomForestRegressor
 
@@ -47,9 +49,9 @@ def train_worker(model_queue: Queue, result_queue: Queue, X_train, y_train, work
 
 def approach_queue_streaming(models_dict, X_train, y_train, n_workers=3):
     """Using Ray Queue with streaming results"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Ray Queue Pattern with Streaming Results")
-    print("="*60)
+    print("=" * 60)
 
     start_time = time.time()
 
@@ -94,7 +96,7 @@ def approach_queue_streaming(models_dict, X_train, y_train, n_workers=3):
                 trained_models[model_name] = model_or_id
                 print(f"Received {model_name}. Total collected: {len(trained_models)}/{k}")
 
-        except Exception as e:
+        except Exception:
             # Timeout or queue empty, check if workers are still running
             pass
 
@@ -116,9 +118,9 @@ def train_single_model(model_name, model, X_train, y_train):
 
 def approach_traditional(models_dict, X_train, y_train):
     """Traditional one-task-per-model (for comparison)"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Traditional (one task per model)")
-    print("="*60)
+    print("=" * 60)
 
     start_time = time.time()
 
@@ -128,8 +130,7 @@ def approach_traditional(models_dict, X_train, y_train):
 
     # Create one task per model
     futures = [
-        train_single_model.remote(name, model, X_ref, y_ref)
-        for name, model in models_dict.items()
+        train_single_model.remote(name, model, X_ref, y_ref) for name, model in models_dict.items()
     ]
 
     # Collect results
@@ -174,14 +175,14 @@ def main():
     }
     trained_2 = approach_traditional(models_dict_copy, X_train, y_train)
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("SUMMARY")
-    print("="*60)
-    print(f"Queue pattern with streaming results:")
+    print("=" * 60)
+    print("Queue pattern with streaming results:")
     print(f"- Fewer Ray tasks created ({n_workers} vs {k})")
-    print(f"- Data passed to object store only once")
-    print(f"- Workers process multiple models sequentially")
-    print(f"- Results available immediately as each model finishes")
+    print("- Data passed to object store only once")
+    print("- Workers process multiple models sequentially")
+    print("- Results available immediately as each model finishes")
 
     # Shutdown Ray
     ray.shutdown()
