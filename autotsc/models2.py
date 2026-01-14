@@ -24,8 +24,87 @@ from sklearn.metrics import accuracy_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from threadpoolctl import threadpool_limits
-
+import numpy as np
+from aeon.transformations.collection import (
+    ARCoefficientTransformer,
+    PeriodogramTransformer,
+)
+from aeon.utils.numba.general import first_order_differences_3d
+from sklearn.preprocessing import FunctionTransformer
 from autotsc import utils
+from aeon.transformations.collection.interval_based import RandomIntervals
+
+
+class RSTSFUnsupervisedTransformer:
+    def __init__(self, n_intervals=2500, random_state=None, n_jobs=1):
+        self.n_intervals = n_intervals
+        self.random_state = random_state
+        self.n_jobs = n_jobs
+
+    def fit(self, X, y=None):
+        lags = int(12 * (X.shape[2] / 100.0) ** 0.25)
+
+        self._series_transformers = [
+            FunctionTransformer(func=first_order_differences_3d, validate=False),
+            PeriodogramTransformer(),
+            ARCoefficientTransformer(order=lags, replace_nan=True),
+        ]
+
+        transforms = [X] + [t.fit_transform(X) for t in self._series_transformers]
+
+        self._transformers = []
+        for t in transforms:
+            ri = RandomIntervals(
+                n_intervals=self.n_intervals,
+                random_state=self.random_state,
+                n_jobs=self.n_jobs,
+                dilation=[1, 2, 4],
+            )
+            ri.fit(t)
+            self._transformers.append(ri)
+
+        return self
+
+    def transform(self, X):
+        transforms = [X] + [t.transform(X) for t in self._series_transformers]
+        return np.hstack([self._transformers[i].transform(t) for i, t in enumerate(transforms)])
+
+    def fit_transform(self, X, y=None):
+        return self.fit(X).transform(X)
+
+class RSTSFUnsupervisedClassifier(BaseClassifier):
+    def __init__(self, n_intervals=1000, random_state=None, n_jobs=-1, n_estimators=500):
+        super().__init__()
+        self.n_intervals = n_intervals
+        self.random_state = random_state
+        self.n_jobs = n_jobs
+        self.n_estimators = n_estimators
+
+    def _fit(self, X, y):
+        self.pipeline_ = make_pipeline(
+            RSTSFUnsupervisedTransformer(
+                n_intervals=self.n_intervals,
+                random_state=self.random_state,
+                n_jobs=self.n_jobs,
+            ),
+            ExtraTreesClassifier(
+                n_estimators=self.n_estimators,
+                criterion="entropy",
+                class_weight="balanced",
+                max_features="sqrt",
+                random_state=self.random_state,
+                n_jobs=self.n_jobs,
+            )
+        )
+        self.pipeline_.fit(X, y)
+        return self
+
+    def _predict_proba(self, X):
+        return self.pipeline_.predict_proba(X)
+    
+    def _predict(self, X):
+        return self.pipeline_.predict(X)
+
 
 
 class SparseScaler:

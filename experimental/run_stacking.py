@@ -1,15 +1,18 @@
 import os
 
+from autotsc.models2 import RSTSFUnsupervisedClassifier
+
 os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 from urllib.parse import urlparse
 
 import boto3
 import polars as pl
 from aeon.classification.convolution_based import MultiRocketHydraClassifier
+from aeon.classification.feature_based import Catch22Classifier
+from aeon.classification.hybrid import HIVECOTEV2
 from aeon.classification.interval_based import RSTSF, QUANTClassifier
 from aeon.classification.shapelet_based import RDSTClassifier
 from aeon.datasets.tsc_datasets import univariate
-from aeon.transformations.collection.feature_based import Catch22
 from botocore.exceptions import ClientError
 from sklearn.metrics import accuracy_score
 from tqdm import tqdm
@@ -42,12 +45,16 @@ def get_model(model_name, random_state):
         return RDSTClassifier(n_jobs=-1, random_state=random_state)
     elif model_name == "rstsf":
         return RSTSF(random_state=random_state, n_jobs=-1)
+    elif model_name == "hivecotev2":
+        return HIVECOTEV2(random_state=random_state, n_jobs=-1)
     elif model_name == "stacker-v4-r3":
         return StackerV4(random_state=random_state, n_repetitions=3)
     elif model_name == "stacker-v4-r1":
         return StackerV4(random_state=random_state, n_repetitions=1)
     elif model_name == "catch22":
-        return Catch22(n_jobs=-1)
+        return Catch22Classifier(n_jobs=-1)
+    elif model_name == "u-rstsf":
+        return RSTSFUnsupervisedClassifier(n_jobs=-1, random_state=random_state)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
@@ -59,7 +66,7 @@ if __name__ == "__main__":
     write_dir = "s3://tsc-glue/performance"
 
     datasets = univariate
-    model_names = ["rstsf", "mr-hydra", "quant", "rdst", "stacker-v4-r3", "stacker-v4-r1"]
+    model_names = ["rstsf", "mr-hydra", "quant", "rdst", "catch22", "u-rstsf", "stacker-v4-r1", "hivecotev2"]#"hivecotev2",  "stacker-v4-r3", ]
     runs = [100, 200, 300, 400, 500]
 
     triplets = list(product(datasets, model_names, runs))
