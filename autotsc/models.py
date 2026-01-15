@@ -72,7 +72,7 @@ class StackerV4(BaseClassifier):
             case _:
                 raise ValueError(f"Unknown feature transformer type: {feature_type}")
 
-    def get_model(self, name, seed=None):
+    def get_model(self, name, seed=None, n_jobs=1):
         if name == "multirockethydra-ridgecv":
             pipe = make_pipeline(
                 MultiScaler(
@@ -99,13 +99,13 @@ class StackerV4(BaseClassifier):
             )
             return pipe
         elif name == "rstsf":
-            return RSTSF(random_state=seed, n_jobs=-1, n_estimators=100)
+            return RSTSF(random_state=seed, n_jobs=n_jobs, n_estimators=100)
         elif name == "drcif":
-            return DrCIFClassifier(random_state=seed, n_jobs=-1, time_limit_in_minutes=2)
+            return DrCIFClassifier(random_state=seed, n_jobs=n_jobs, time_limit_in_minutes=2)
         elif name == "weasel-v2":
-            return WEASEL_V2(random_state=seed, n_jobs=-1)
+            return WEASEL_V2(random_state=seed, n_jobs=n_jobs)
         elif name == "contractable-boss":
-            return ContractableBOSS(random_state=seed, n_jobs=-1, time_limit_in_minutes=0.1)
+            return ContractableBOSS(random_state=seed, n_jobs=n_jobs, time_limit_in_minutes=0.1)
         elif name == "quant-etc":
             pipe = make_pipeline(
                 MultiScaler(
@@ -119,7 +119,7 @@ class StackerV4(BaseClassifier):
                     max_features=0.1,
                     criterion="entropy",
                     random_state=seed,
-                    n_jobs=-1,
+                    n_jobs=n_jobs,
                 ),
             )
             return pipe
@@ -159,7 +159,7 @@ class StackerV4(BaseClassifier):
                     max_features=0.1,
                     criterion="entropy",
                     random_state=seed,
-                    n_jobs=-1,
+                    n_jobs=n_jobs,
                 ),
             )
             return pipe
@@ -187,7 +187,7 @@ class StackerV4(BaseClassifier):
                     # max_features=0.3,
                     # criterion="entropy",
                     random_state=seed,
-                    n_jobs=-1,
+                    n_jobs=n_jobs,
                     bootstrap=True,
                 ),
             )
@@ -211,7 +211,7 @@ class StackerV4(BaseClassifier):
                     },
                     verbose=False,
                 ),
-                RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=-1),
+                RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=n_jobs),
             )
             return pipe
         else:
