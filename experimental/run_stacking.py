@@ -15,7 +15,6 @@ from aeon.classification.shapelet_based import RDSTClassifier
 from aeon.datasets.tsc_datasets import univariate
 from botocore.exceptions import ClientError
 from sklearn.metrics import accuracy_score
-from tqdm import tqdm
 
 from autotsc import utils
 from autotsc.models import StackerV4
@@ -72,7 +71,8 @@ if __name__ == "__main__":
     triplets = list(product(datasets, model_names, runs))
     random.shuffle(triplets)
 
-    for dataset, model_name, run in tqdm(triplets):
+    n = len(triplets)
+    for k, (dataset, model_name, run) in enumerate(triplets, 1):
         try:
             stats = {
                 "dataset": dataset,
@@ -86,10 +86,10 @@ if __name__ == "__main__":
 
             # Check if file exists in S3
             if s3_file_exists(file):
-                print(f"Skipping: Dataset={dataset}, Run={run}, Model={model_name}")
+                print(f"[{k}/{n}] Skipping: Dataset={dataset}, Run={run}, Model={model_name}")
                 continue
             else:
-                print(f"Processing: Dataset={dataset}, Run={run}, Model={model_name}")
+                print(f"[{k}/{n}] Processing: Dataset={dataset}, Run={run}, Model={model_name}")
 
             X_train, y_train, X_test, y_test = utils.load_dataset(dataset)
 
