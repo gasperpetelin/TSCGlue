@@ -12,11 +12,13 @@ from aeon.classification.feature_based import Catch22Classifier
 from aeon.classification.hybrid import HIVECOTEV2
 from aeon.classification.interval_based import RSTSF, QUANTClassifier
 from aeon.classification.shapelet_based import RDSTClassifier
+from aeon.pipeline import make_pipeline as aeon_make_pipeline
+from aeon.transformations.collection import Normalizer
 from aeon.datasets.tsc_datasets import univariate
 from botocore.exceptions import ClientError
 from sklearn.metrics import accuracy_score
 
-from autotsc import utils
+from autotsc import transformers, utils
 from autotsc.models import StackerV4
 
 
@@ -37,23 +39,56 @@ def s3_file_exists(s3_uri: str) -> bool:
 
 def get_model(model_name, random_state):
     if model_name == "mr-hydra":
-        return MultiRocketHydraClassifier(n_jobs=-1, random_state=random_state)
+        return MultiRocketHydraClassifier(n_jobs=16, random_state=random_state)
     elif model_name == "quant":
         return QUANTClassifier(random_state=random_state)
     elif model_name == "rdst":
-        return RDSTClassifier(n_jobs=-1, random_state=random_state)
+        return RDSTClassifier(n_jobs=16, random_state=random_state)
     elif model_name == "rstsf":
-        return RSTSF(random_state=random_state, n_jobs=-1)
+        return RSTSF(random_state=random_state, n_jobs=16)
     elif model_name == "hivecotev2":
-        return HIVECOTEV2(random_state=random_state, n_jobs=-1)
+        return HIVECOTEV2(random_state=random_state, n_jobs=16, verbose=10)
     elif model_name == "stacker-v4-r3":
         return StackerV4(random_state=random_state, n_repetitions=3)
     elif model_name == "stacker-v4-r1":
         return StackerV4(random_state=random_state, n_repetitions=1)
     elif model_name == "catch22":
-        return Catch22Classifier(n_jobs=-1)
+        return Catch22Classifier(n_jobs=16)
     elif model_name == "u-rstsf":
-        return RSTSFUnsupervisedClassifier(n_jobs=-1, random_state=random_state)
+        return RSTSFUnsupervisedClassifier(n_jobs=16, random_state=random_state)
+    elif model_name == "cumsum-mr-hydra":
+        return aeon_make_pipeline(
+            transformers.CumSum(), MultiRocketHydraClassifier(n_jobs=16, random_state=random_state)
+        )
+    elif model_name == "scale-mr-hydra":
+        return aeon_make_pipeline(
+            Normalizer(), MultiRocketHydraClassifier(n_jobs=16, random_state=random_state)
+        )
+    elif model_name == "polar-angle-mr-hydra":
+        return aeon_make_pipeline(
+            transformers.PolarCoordinates(mode="angle"),
+            MultiRocketHydraClassifier(n_jobs=16, random_state=random_state),
+        )
+    elif model_name == "polar-magnitude-mr-hydra":
+        return aeon_make_pipeline(
+            transformers.PolarCoordinates(mode="magnitude"),
+            MultiRocketHydraClassifier(n_jobs=16, random_state=random_state),
+        )
+    elif model_name == "rank-mr-hydra":
+        return aeon_make_pipeline(
+            transformers.RankTransform(),
+            MultiRocketHydraClassifier(n_jobs=16, random_state=random_state),
+        )
+    elif model_name == "difference-mr-hydra":
+        return aeon_make_pipeline(
+            transformers.Difference(),
+            MultiRocketHydraClassifier(n_jobs=16, random_state=random_state),
+        )
+    elif model_name == "downsample-mr-hydra":
+        return aeon_make_pipeline(
+            transformers.DownsampleTransformer(proportion=0.5),
+            MultiRocketHydraClassifier(n_jobs=16, random_state=random_state),
+        )
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
@@ -65,7 +100,11 @@ if __name__ == "__main__":
     write_dir = "s3://tsc-glue/performance"
 
     datasets = univariate
-    model_names = ["rstsf", "mr-hydra", "quant", "rdst", "catch22", "u-rstsf", "stacker-v4-r1", "hivecotev2"]#"hivecotev2",  "stacker-v4-r3", ]
+    model_names = [
+        "rstsf", "mr-hydra", "quant", "rdst", "catch22", "u-rstsf", "stacker-v4-r1", "hivecotev2",
+        "cumsum-mr-hydra", "scale-mr-hydra", "polar-angle-mr-hydra", "polar-magnitude-mr-hydra",
+        "rank-mr-hydra", "difference-mr-hydra", "downsample-mr-hydra",
+    ]
     runs = [100, 200, 300, 400, 500]
 
     triplets = list(product(datasets, model_names, runs))
@@ -93,9 +132,6 @@ if __name__ == "__main__":
 
             X_train, y_train, X_test, y_test = utils.load_dataset(dataset)
 
-            # if not ray.is_initialized():
-            #    ray.init(num_cpus=os.cpu_count(), ignore_reinit_error=True)
-            #    print(f"Ray initialized with {os.cpu_count()} CPUs")
             print(f"Running {dataset} with model {model_name} run {run}")
 
             # Ray is initialized at the script level, model should not manage it
@@ -110,8 +146,3 @@ if __name__ == "__main__":
             df_stat.write_parquet(file)
         except Exception as e:
             print(f"Error processing Dataset={dataset}, Run={run}, Model={model_name}: {e}")
-        # finally:
-        #    # Shutdown Ray at the end
-        #    if ray.is_initialized():
-        #        print("Shutting down Ray cluster")
-        #        ray.shutdown()
