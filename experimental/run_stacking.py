@@ -10,7 +10,7 @@ import polars as pl
 from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.classification.feature_based import Catch22Classifier
 from aeon.classification.hybrid import HIVECOTEV2
-from aeon.classification.interval_based import RSTSF, QUANTClassifier
+from aeon.classification.interval_based import RSTSF, QUANTClassifier, DrCIFClassifier
 from aeon.classification.shapelet_based import RDSTClassifier
 from aeon.pipeline import make_pipeline as aeon_make_pipeline
 from aeon.transformations.collection import Normalizer
@@ -54,6 +54,8 @@ def get_model(model_name, random_state):
         return StackerV4(random_state=random_state, n_repetitions=1)
     elif model_name == "catch22":
         return Catch22Classifier(n_jobs=16)
+    elif model_name == "drcif":
+        return DrCIFClassifier(n_jobs=16, random_state=random_state, n_estimators=20)
     elif model_name == "u-rstsf":
         return RSTSFUnsupervisedClassifier(n_jobs=16, random_state=random_state)
     elif model_name == "cumsum-mr-hydra":
@@ -87,6 +89,7 @@ def get_model(model_name, random_state):
     elif model_name == "downsample-mr-hydra":
         return aeon_make_pipeline(
             transformers.DownsampleTransformer(proportion=0.5),
+            transformers.PadToLengthTransformer(target_length=10),
             MultiRocketHydraClassifier(n_jobs=16, random_state=random_state),
         )
     else:
@@ -101,7 +104,7 @@ if __name__ == "__main__":
 
     datasets = univariate
     model_names = [
-        "rstsf", "mr-hydra", "quant", "rdst", "catch22", "u-rstsf", "stacker-v4-r1", "hivecotev2",
+        "rstsf", "mr-hydra", "quant", "rdst", "catch22", "drcif", "u-rstsf", "stacker-v4-r1", # "hivecotev2",
         "cumsum-mr-hydra", "scale-mr-hydra", "polar-angle-mr-hydra", "polar-magnitude-mr-hydra",
         "rank-mr-hydra", "difference-mr-hydra", "downsample-mr-hydra",
     ]

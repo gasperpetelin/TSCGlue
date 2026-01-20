@@ -59,6 +59,43 @@ class Difference(BaseCollectionTransformer):
 from aeon.transformations.collection.base import BaseCollectionTransformer
 from scipy.interpolate import interp1d
 
+class PadToLengthTransformer(BaseCollectionTransformer):
+    _tags = {
+        "X_inner_type": ["numpy3D"],
+        "capability:multivariate": True,
+        "capability:unequal_length": True,
+        "fit_is_empty": True,
+    }
+
+    def __init__(self, target_length: int):
+        self.target_length = target_length
+        super().__init__()
+
+    def _transform(self, X, y=None):
+        self._check_parameters()
+
+        # X shape: (n_series, n_channels, n_timesteps)
+        n, c, t = X.shape
+
+        if t == self.target_length:
+            return X
+
+        if t > self.target_length:
+            # truncate
+            return X[:, :, : self.target_length]
+
+        # pad by extending last value
+        pad_len = self.target_length - t
+
+        # last value along time axis
+        last_val = X[:, :, -1:]                 # shape (n, c, 1)
+        pad = np.repeat(last_val, pad_len, axis=2)
+
+        return np.concatenate([X, pad], axis=2)
+
+    def _check_parameters(self):
+        if not isinstance(self.target_length, int) or self.target_length <= 0:
+            raise ValueError("target_length must be a positive integer")
 
 class DownsampleTransformer(BaseCollectionTransformer):
     _tags = {
@@ -183,10 +220,11 @@ class RankTransform(BaseCollectionTransformer):
         "fit_is_empty": True,
     }
 
-    def __init__(self, method="average", normalize=True):
+    def __init__(self, method="average", normalize=True, epsilon=1e-8):
         super().__init__()
         self.method = method
         self.normalize = normalize
+        self.epsilon = epsilon
 
     def _transform(self, X, y=None):
         """
@@ -207,7 +245,7 @@ class RankTransform(BaseCollectionTransformer):
                 ranks = rankdata(X[i, c], method=self.method)
 
                 if self.normalize:
-                    ranks = (ranks - ranks.min()) / (ranks.max() - ranks.min())  # scale to [0, 1]
+                    ranks = (ranks - ranks.min()) / ((ranks.max() - ranks.min())+self.epsilon)  # scale to [0, 1]
 
                 Xt[i, c] = ranks
 
