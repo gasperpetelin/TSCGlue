@@ -19,7 +19,7 @@ from botocore.exceptions import ClientError
 from sklearn.metrics import accuracy_score
 
 from autotsc import transformers, utils
-from autotsc.models import StackerV4
+from autotsc.models import StackerV4, FastStackerV4
 
 
 def s3_file_exists(s3_uri: str) -> bool:
@@ -52,6 +52,8 @@ def get_model(model_name, random_state):
         return StackerV4(random_state=random_state, n_repetitions=3)
     elif model_name == "stacker-v4-r1":
         return StackerV4(random_state=random_state, n_repetitions=1)
+    elif model_name == "fast-stacker-v4-r1":
+        return FastStackerV4(random_state=random_state, n_repetitions=1, n_jobs=16)
     elif model_name == "catch22":
         return Catch22Classifier(n_jobs=16)
     elif model_name == "drcif":
@@ -104,7 +106,7 @@ if __name__ == "__main__":
 
     datasets = univariate
     model_names = [
-        "rstsf", "mr-hydra", "quant", "rdst", "catch22", "drcif", "u-rstsf", "stacker-v4-r1", # "hivecotev2",
+        "rstsf", "mr-hydra", "quant", "rdst", "catch22", "drcif", "u-rstsf", "stacker-v4-r1", "fast-stacker-v4-r1", # "hivecotev2",
         "cumsum-mr-hydra", "scale-mr-hydra", "polar-angle-mr-hydra", "polar-magnitude-mr-hydra",
         "rank-mr-hydra", "difference-mr-hydra", "downsample-mr-hydra",
     ]

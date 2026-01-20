@@ -1001,8 +1001,6 @@ class FastStackerV4(BaseClassifier):
         return proba, model.classes_, predict_dur
 
     def predict_proba_per_model(self, X):
-        from sklearn.utils.parallel import Parallel, delayed
-
         predict_start_time = perf_counter()
         print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction")
 
@@ -1024,21 +1022,83 @@ class FastStackerV4(BaseClassifier):
         print(f"[{perf_counter() - predict_start_time:.4f}s] Data added to ray storage")
 
         predictions = []
-        for model_name, model_group in self.trained_models_:
-            Xt_ = self.combine_features_and_predictions(Xt, predictions)
+        run_queue = Queue()
+        result_queue = Queue()
+        tasks = []
 
-            results = Parallel(n_jobs=-1, prefer="threads")(
-                delayed(self._predict_one_model)(model, model_name, X, Xt_) for model in model_group
+        # Step 1: Predict with all first-level models (feature_models + series_models) in parallel
+        first_level_models = [(model_name, model_group) for model_name, model_group in self.trained_models_
+                              if model_name in self.feature_models + self.series_models]
+
+        model_count = 0
+        for model_name, model_group in first_level_models:
+            use_series = model_name in self.series_models
+            for model in model_group:
+                run_queue.put((model_name, pickle.dumps(model), use_series))
+                model_count += 1
+
+        for _ in range(self.n_jobs):
+            run_queue.put(None)
+
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Starting RAY prediction with {self.n_jobs} workers for {model_count} first-level models")
+
+        for i in range(self.n_jobs):
+            tasks.append(predict_worker.remote(i, run_queue, result_queue, rX, rXt, rXt_columns))
+
+        # Collect all first-level predictions
+        for _ in range(model_count):
+            worker_id, proba, classes_, predict_dur, model_name = result_queue.get()
+            print(
+                f"[{perf_counter() - predict_start_time:.4f}s] Predicted {model_name} on worker-{worker_id} in {predict_dur:.4f}s"
             )
-            for proba, classes_, predict_dur in results:
-                print(
-                    f"[{perf_counter() - predict_start_time:.4f}s] Predicted probabilities with {model_name} in {predict_dur:.4f}s"
-                )
 
-                level = 0 if model_name in self.feature_models + self.series_models else 1
+            level = 0
+            pred_list = self.add_probabilities(proba, classes_, model_name, level)
+            predictions.extend(pred_list)
 
-                pred_list = self.add_probabilities(proba, classes_, model_name, level)
-                predictions.extend(pred_list)
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Completed all first-level model predictions")
+        ray.get(tasks)
+        
+        # Step 2: Now handle stacking models (second-level)
+        # Update Xt with first-level predictions and put back in Ray
+        Xt = self.combine_features_and_predictions(Xt, predictions)
+        rXt = ray.put(Xt.to_numpy())
+        rXt_columns = ray.put(Xt.columns)
+
+        stacking_models = [(model_name, model_group) for model_name, model_group in self.trained_models_
+                           if model_name in self.stacking_models]
+
+        run_queue = Queue()
+        result_queue = Queue()
+        tasks = []
+
+        model_count = 0
+        for model_name, model_group in stacking_models:
+            use_series = model_name in self.series_models
+            for model in model_group:
+                run_queue.put((model_name, pickle.dumps(model), use_series))
+                model_count += 1
+
+        for _ in range(self.n_jobs):
+            run_queue.put(None)
+
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Starting RAY prediction with {self.n_jobs} workers for {model_count} stacking models")
+
+        for i in range(self.n_jobs):
+            tasks.append(predict_worker.remote(i, run_queue, result_queue, rX, rXt, rXt_columns))
+
+        # Collect all stacking predictions
+        for _ in range(model_count):
+            worker_id, proba, classes_, predict_dur, model_name = result_queue.get()
+            print(
+                f"[{perf_counter() - predict_start_time:.4f}s] Predicted {model_name} on worker-{worker_id} in {predict_dur:.4f}s"
+            )
+
+            level = 1
+            pred_list = self.add_probabilities(proba, classes_, model_name, level)
+            predictions.extend(pred_list)
+
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Completed all stacking model predictions")
 
         df = self.combine_features_and_predictions(Xt, predictions)
         for model_name, _ in self.trained_models_:
