@@ -5,6 +5,11 @@ os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 import numpy as np
 import polars as pl
 import ray
+from multiprocessing import Process, Queue as MPQueue, Manager
+from multiprocessing.shared_memory import SharedMemory
+from concurrent.futures import ProcessPoolExecutor
+from time import perf_counter
+from joblib import Parallel, delayed, dump, load
 from aeon.classification.base import BaseClassifier
 from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.classification.dictionary_based import WEASEL_V2, ContractableBOSS
@@ -318,7 +323,8 @@ class StackerV4(BaseClassifier):
 
                 Xt = self.get_Xt()
                 for fold_number, (train_idx, val_idx) in enumerate(current_splits):
-                    pipe = self.get_model(model_name)
+                    model_seed = self._get_feature_seed()
+                    pipe = self.get_model(model_name, seed=model_seed)
 
                     start_train = perf_counter()
                     if model_name in self.series_models:
@@ -674,10 +680,10 @@ def train_predict(worker_id, run_queue, result_queue, X, Xt, y, X_columns):
         if run_params is None:
             break
 
-        fold_number, model_name, use_Xt, train_idx, val_idx = run_params
-        pipe = get_model(model_name)
+        fold_number, model_name, use_Xt, train_idx, val_idx, model_seed = run_params
+        pipe = get_model(model_name, seed=model_seed)
         start_train = perf_counter()
-        
+
         if use_Xt:
             pipe.fit(Xt[train_idx], y[train_idx])
             proba = pipe.predict_proba(Xt[val_idx])
@@ -717,13 +723,16 @@ def predict_worker(worker_id, run_queue, result_queue, X, Xt, Xt_columns):
 
 class FastStackerV4(BaseClassifier):
     """Copy of StackerV4 for parallelization experiments."""
-    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1,
+                 isolated_ray=True, ray_port=None):
         super().__init__()
         self.n_repetitions = n_repetitions
         self.k_folds = k_folds
         self.random_state = random_state
         self.cv_splits = None
         self.n_jobs = n_jobs
+        self.isolated_ray = isolated_ray
+        self.ray_port = ray_port
 
         self.feature_seed = np.random.default_rng(random_state)
         self.feature_transformers = []
@@ -733,6 +742,42 @@ class FastStackerV4(BaseClassifier):
         self.time_limit_in_seconds = time_limit_in_seconds
 
         self.last_repetition = False
+
+    def _get_available_port(self):
+        """Find a random available port in range 60000-65535."""
+        import socket
+        import random
+        for _ in range(100):
+            port = random.randint(60000, 65535)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(('', port))
+                    return port
+                except OSError:
+                    continue
+        raise RuntimeError("Could not find an available port in range 60000-65535")
+
+    def _init_ray(self):
+        """Initialize Ray, optionally as an isolated instance with unique temp dir."""
+        if self.isolated_ray:
+            # Start a completely separate Ray cluster with unique temp directory
+            # This allows multiple FastStackerV4 instances to run in parallel
+            if self.ray_port is None:
+                self.ray_port = self._get_available_port()
+            temp_dir = f"/tmp/ray_isolated_{self.ray_port}"
+            print(f"Starting isolated Ray on port {self.ray_port} with temp_dir={temp_dir}")
+            ray.init(
+                num_cpus=self.n_jobs,
+                ignore_reinit_error=False,
+                include_dashboard=False,
+                _temp_dir=temp_dir,
+            )
+        else:
+            print("Starting shared Ray instance")
+            ray.init(
+                num_cpus=self.n_jobs,
+                ignore_reinit_error=True,
+            )
 
     def _get_feature_seed(self):
         return int(self.feature_seed.integers(0, 2**31 - 1, dtype=np.int32))
@@ -774,11 +819,7 @@ class FastStackerV4(BaseClassifier):
             f"[{perf_counter() - fit_start_time:.4f}s] Computed QUANT features in {quant_durration:.4f}s"
         )
 
-        default_config = {
-            "num_cpus": self.n_jobs,
-            "ignore_reinit_error": True,
-        }
-        ray.init(**default_config)
+        self._init_ray()
 
         for repetition in range(self.n_repetitions):
             print(f"[{perf_counter() - fit_start_time:.4f}s] Starting repetition {repetition}")
@@ -825,12 +866,13 @@ class FastStackerV4(BaseClassifier):
             for model_name in self.feature_models + self.series_models:
                 for fold_number, (train_idx, val_idx) in enumerate(current_splits):
                     use_Xt = model_name not in self.series_models
-                    run_queue.put((fold_number, model_name, use_Xt, train_idx, val_idx))
+                    model_seed = self._get_feature_seed()
+                    run_queue.put((fold_number, model_name, use_Xt, train_idx, val_idx, model_seed))
                     model_count += 1
-                
+
             for _ in range(self.n_jobs):
                 run_queue.put(None)
-            
+
             print(f"[{perf_counter() - fit_start_time:.4f}s] Starting RAY training with {self.n_jobs} workers for {model_count} models")
 
             for i in range(self.n_jobs):
@@ -896,7 +938,8 @@ class FastStackerV4(BaseClassifier):
                 tasks = []
                 for fold_number, (train_idx, val_idx) in enumerate(current_splits):
                     use_Xt = model_name not in self.series_models
-                    run_queue.put((fold_number, model_name, use_Xt, train_idx, val_idx))
+                    model_seed = self._get_feature_seed()
+                    run_queue.put((fold_number, model_name, use_Xt, train_idx, val_idx, model_seed))
                 for _ in range(self.n_jobs):
                     run_queue.put(None)
 
@@ -1004,12 +1047,7 @@ class FastStackerV4(BaseClassifier):
         predict_start_time = perf_counter()
         print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction")
 
-        # Initialize Ray
-        default_config = {
-            "num_cpus": self.n_jobs,
-            "ignore_reinit_error": True,
-        }
-        ray.init(**default_config)
+        self._init_ray()
 
         return_dict = {}
         Xt = self.compute_features(X)
@@ -1088,6 +1126,473 @@ class FastStackerV4(BaseClassifier):
             tasks.append(predict_worker.remote(i, run_queue, result_queue, rX, rXt, rXt_columns))
 
         # Collect all stacking predictions
+        for _ in range(model_count):
+            worker_id, proba, classes_, predict_dur, model_name = result_queue.get()
+            print(
+                f"[{perf_counter() - predict_start_time:.4f}s] Predicted {model_name} on worker-{worker_id} in {predict_dur:.4f}s"
+            )
+
+            level = 1
+            pred_list = self.add_probabilities(proba, classes_, model_name, level)
+            predictions.extend(pred_list)
+
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Completed all stacking model predictions")
+
+        df = self.combine_features_and_predictions(Xt, predictions)
+        for model_name, _ in self.trained_models_:
+            prob_columns = [col for col in df.columns if model_name in col]
+            agg_probs = df.select(prob_columns)
+            return_dict[model_name] = agg_probs.to_numpy()
+
+        ray.shutdown()
+
+        return return_dict
+
+    def _predict_proba(self, X):
+        return self.predict_proba_per_model(X)[self.best_model]
+
+    def _predict(self, X):
+        probas = self._predict_proba(X)
+        predicted_indices = np.argmax(probas, axis=1)
+        return self.classes_[predicted_indices]
+
+    def add_features(self, feature_type: str, X: np.ndarray):
+        transform = self.get_next_feature_transformer(feature_type=feature_type)
+        transform.fit(X)
+        X_t = transform.transform(X)
+        params = transform.get_params()
+        if "n_jobs" in params:
+            del params["n_jobs"]
+        param_strs = [f"{k}={v}" for k, v in params.items()]
+        param_str = ";".join(param_strs)
+        transform_id = f"{transform.__class__.__name__.lower()};{param_str}"
+        schema = ["feature|" + transform_id + ";index=" + str(i) for i in range(X_t.shape[1])]
+        feature_df = pl.DataFrame(X_t, schema=schema)
+        self.feature_transformers.append(transform)
+        if self.features is None:
+            self.features = feature_df
+        else:
+            self.features = pl.concat([self.features, feature_df], how="horizontal")
+
+    def compute_features(self, X: np.ndarray):
+        feature_dfs = []
+        for transform in self.feature_transformers:
+            X_t = transform.transform(X)
+            params = transform.get_params()
+            if "n_jobs" in params:
+                del params["n_jobs"]
+            param_strs = [f"{k}={v}" for k, v in params.items()]
+            param_str = ";".join(param_strs)
+            transform_id = f"{transform.__class__.__name__.lower()};{param_str}"
+            schema = ["feature|" + transform_id + ";index=" + str(i) for i in range(X_t.shape[1])]
+            feature_df = pl.DataFrame(X_t, schema=schema)
+            feature_dfs.append(feature_df)
+        return pl.concat(feature_dfs, how="horizontal")
+
+    def get_Xt(self) -> pl.DataFrame:
+        return self.combine_features_and_predictions(self.features, self.predictions)
+
+
+class FastStackerV5(BaseClassifier):
+    """Like FastStackerV4 but only trains stacking model once after all repetitions complete."""
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1,
+                 isolated_ray=True, ray_port=None):
+        super().__init__()
+        self.n_repetitions = n_repetitions
+        self.k_folds = k_folds
+        self.random_state = random_state
+        self.cv_splits = None
+        self.n_jobs = n_jobs
+        self.isolated_ray = isolated_ray
+        self.ray_port = ray_port
+
+        self.feature_seed = np.random.default_rng(random_state)
+        self.feature_transformers = []
+        self.features = None
+        self.predictions = None
+        self.trained_models_ = None
+        self.time_limit_in_seconds = time_limit_in_seconds
+
+    def _get_available_port(self):
+        """Find a random available port in range 60000-65535."""
+        import socket
+        import random
+        for _ in range(100):
+            port = random.randint(60000, 65535)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(('', port))
+                    return port
+                except OSError:
+                    continue
+        raise RuntimeError("Could not find an available port in range 60000-65535")
+
+    def _init_ray(self):
+        """Initialize Ray, optionally as an isolated instance with unique temp dir."""
+        if self.isolated_ray:
+            if self.ray_port is None:
+                self.ray_port = self._get_available_port()
+            temp_dir = f"/tmp/ray_isolated_{self.ray_port}"
+            print(f"Starting isolated Ray on port {self.ray_port} with temp_dir={temp_dir}")
+            ray.init(
+                num_cpus=self.n_jobs,
+                ignore_reinit_error=False,
+                include_dashboard=False,
+                _temp_dir=temp_dir,
+            )
+        else:
+            print("Starting shared Ray instance")
+            ray.init(
+                num_cpus=self.n_jobs,
+                ignore_reinit_error=True,
+            )
+
+    def _get_feature_seed(self):
+        return int(self.feature_seed.integers(0, 2**31 - 1, dtype=np.int32))
+
+    def get_next_feature_transformer(self, feature_type: str):
+        seed = self._get_feature_seed()
+        match feature_type:
+            case "multirocket":
+                return MultiRocket(n_jobs=-1, random_state=seed)
+            case "rdst":
+                return RandomDilatedShapeletTransform(n_jobs=-1, random_state=seed)
+            case "quant":
+                return QUANTTransformer()
+            case "hydra":
+                return HydraTransformer(n_jobs=-1, random_state=seed)
+            case _:
+                raise ValueError(f"Unknown feature transformer type: {feature_type}")
+
+    def _fit(self, X, y):
+        fit_start_time = perf_counter()
+
+        self.predictions = []
+        self.trained_models_ = []
+
+        self.feature_models = ["multirockethydra-ridgecv", "quant-etc", "rdst-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+        self.stacking_models = ["probability-ridgecv"]
+
+        if self.cv_splits is None:
+            self.cv_splits = []
+        print(f"[{perf_counter() - fit_start_time:.4f}s] Starting fitting")
+
+        quant_start_time = perf_counter()
+        self.add_features(feature_type="quant", X=X)
+        quant_durration = perf_counter() - quant_start_time
+        print(
+            f"[{perf_counter() - fit_start_time:.4f}s] Computed QUANT features in {quant_durration:.4f}s"
+        )
+
+        self._init_ray()
+
+        # Accumulate all splits across repetitions for stacking
+        all_splits = []
+
+        for repetition in range(self.n_repetitions):
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Starting repetition {repetition}")
+
+            multirocket_start_time = perf_counter()
+            self.add_features(feature_type="multirocket", X=X)
+            multirocket_durration = perf_counter() - multirocket_start_time
+            print(
+                f"[{perf_counter() - fit_start_time:.4f}s] Computed MultiRocket features in {multirocket_durration:.4f}s"
+            )
+
+            hydra_start_time = perf_counter()
+            self.add_features(feature_type="hydra", X=X)
+            hydra_durration = perf_counter() - hydra_start_time
+            print(
+                f"[{perf_counter() - fit_start_time:.4f}s] Computed Hydra features in {hydra_durration:.4f}s"
+            )
+
+            rdst_start_time = perf_counter()
+            self.add_features(feature_type="rdst", X=X)
+            rdst_durration = perf_counter() - rdst_start_time
+            print(
+                f"[{perf_counter() - fit_start_time:.4f}s] Computed RDST features in {rdst_durration:.4f}s"
+            )
+
+            current_splits = generate_folds(
+                X, y, n_splits=self.k_folds, n_repetitions=1, random_state=self._get_feature_seed()
+            )
+            all_splits.extend(current_splits)
+
+            rX = ray.put(X)
+            ry = ray.put(y)
+            run_queue = Queue()
+            result_queue = Queue()
+
+            Xt = self.get_Xt()
+            rXt = ray.put(Xt.to_numpy())
+            rXt_columns = ray.put(Xt.columns)
+            tasks = []
+
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Data added to ray storage")
+
+            model_count = 0
+            for model_name in self.feature_models + self.series_models:
+                for fold_number, (train_idx, val_idx) in enumerate(current_splits):
+                    use_Xt = model_name not in self.series_models
+                    model_seed = self._get_feature_seed()
+                    run_queue.put((fold_number, model_name, use_Xt, train_idx, val_idx, model_seed))
+                    model_count += 1
+
+            for _ in range(self.n_jobs):
+                run_queue.put(None)
+
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Starting RAY training with {self.n_jobs} workers for {model_count} models")
+
+            for i in range(self.n_jobs):
+                tasks.append(train_predict.remote(i, run_queue, result_queue, rX, rXt, ry, rXt_columns))
+
+            model_groups = {}
+            for _ in range(model_count):
+                worker_id, train_idx, val_idx, proba, pickle_pipe, train_dur, model_name, fold_number = result_queue.get()
+                print(
+                    f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name} on {worker_id} in {train_dur:.4f}s for f-{fold_number}/r-{repetition}"
+                )
+                pipe = pickle.loads(pickle_pipe)
+
+                level = 0 if model_name in self.feature_models + self.series_models else 1
+                for idx, p in zip(val_idx, proba):
+                    for scls, prob in zip(pipe.classes_, p):
+                        d = {
+                            "index": idx,
+                            "model": model_name,
+                            "repetition": repetition,
+                            "level": level,
+                            "class": scls.item(),
+                            "probability": prob.item(),
+                        }
+                        self.predictions.append(d)
+
+                if model_name not in model_groups:
+                    model_groups[model_name] = []
+                model_groups[model_name].append(pipe)
+
+                if len(model_groups[model_name]) == self.k_folds:
+                    print(
+                        f"[{perf_counter() - fit_start_time:.4f}s] Completed training for model {model_name}"
+                    )
+
+                    self.trained_models_.append((model_name, model_groups[model_name]))
+
+                    del model_groups[model_name]
+
+                    Xt = self.get_Xt()
+                    prob_columns = [col for col in Xt.columns if model_name in col]
+                    agg_probs = Xt.select(prob_columns)
+                    oof_probas = agg_probs.to_numpy()
+                    oof_pred_indices = np.argmax(oof_probas, axis=1)
+                    oof_preds = self.classes_[oof_pred_indices]
+                    oof_acc = accuracy_score(y, oof_preds)
+
+                    print(
+                        f"[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name}: {oof_acc}"
+                    )
+
+            ray.get(tasks)
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Completed repetition {repetition}")
+
+        # Train stacking models only once after all repetitions
+        print(f"[{perf_counter() - fit_start_time:.4f}s] Starting stacking model training (single pass)")
+
+        Xt = self.get_Xt()
+        rX = ray.put(X)
+        ry = ray.put(y)
+        rXt = ray.put(Xt.to_numpy())
+        rXt_columns = ray.put(Xt.columns)
+        run_queue = Queue()
+        result_queue = Queue()
+
+        for model_name in self.stacking_models:
+            model_group = []
+
+            tasks = []
+            for fold_number, (train_idx, val_idx) in enumerate(all_splits):
+                use_Xt = model_name not in self.series_models
+                model_seed = self._get_feature_seed()
+                run_queue.put((fold_number, model_name, use_Xt, train_idx, val_idx, model_seed))
+            for _ in range(self.n_jobs):
+                run_queue.put(None)
+
+            for i in range(self.n_jobs):
+                tasks.append(train_predict.remote(i, run_queue, result_queue, rX, rXt, ry, rXt_columns))
+
+            for _ in range(len(all_splits)):
+                worker_id, train_idx, val_idx, proba, pickle_pipe, train_dur, model_name, fold_number = result_queue.get()
+                pipe = pickle.loads(pickle_pipe)
+
+                print(
+                    f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name} on {worker_id} in {train_dur:.4f}s for f-{fold_number}"
+                )
+
+                level = 1
+
+                for idx, p in zip(val_idx, proba):
+                    for scls, prob in zip(pipe.classes_, p):
+                        d = {
+                            "index": idx,
+                            "model": model_name,
+                            "repetition": 0,
+                            "level": level,
+                            "class": scls.item(),
+                            "probability": prob.item(),
+                        }
+                        self.predictions.append(d)
+                model_group.append(pipe)
+
+            self.trained_models_.append((model_name, model_group))
+            ray.get(tasks)
+
+            Xt = self.get_Xt()
+            prob_columns = [col for col in Xt.columns if model_name in col]
+            agg_probs = Xt.select(prob_columns)
+            oof_probas = agg_probs.to_numpy()
+            oof_pred_indices = np.argmax(oof_probas, axis=1)
+            oof_preds = self.classes_[oof_pred_indices]
+            oof_acc = accuracy_score(y, oof_preds)
+
+            print(
+                f"[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name}: {oof_acc}"
+            )
+
+        print(f"[{perf_counter() - fit_start_time:.4f}s] Completed all repetitions and stacking")
+        self.best_model = "probability-ridgecv"
+        ray.shutdown()
+
+    def combine_features_and_predictions(self, features, predictions):
+        if len(predictions) == 0:
+            return features
+        df = (
+            pl.DataFrame(predictions)
+            .pivot(
+                values="probability",
+                index="index",
+                on=["level", "model", "class"],
+                aggregate_function="mean",
+            )
+            .sort("index")
+        )
+        rename_dict = {}
+        for c in df.columns[1:]:
+            t = tuple([v.replace("{", "").replace("}", "").replace('"', "") for v in c.split(",")])
+            level, model_name, prob_class = t
+            rename_dict[c] = f"probability|model{level}_{model_name}_class_{prob_class}"
+
+        df = df.rename(rename_dict)
+
+        return (
+            features.with_row_index("index")
+            .join(df, on="index", how="full")
+            .sort("index")
+            .drop("index", "index_right")
+        )
+
+    def add_probabilities(self, probas, classes, model_name, level):
+        predictions = []
+        for idx, p in enumerate(probas):
+            for scls, prob in zip(classes, p):
+                d = {
+                    "index": idx,
+                    "model": model_name,
+                    "level": level,
+                    "class": scls.item(),
+                    "probability": prob.item(),
+                }
+                predictions.append(d)
+        return predictions
+
+    def _predict_one_model(self, model, model_name, X, Xt_):
+        start_predict = perf_counter()
+        if model_name in self.series_models:
+            proba = model.predict_proba(X)
+        else:
+            proba = model.predict_proba(Xt_)
+        end_predict = perf_counter()
+        predict_dur = end_predict - start_predict
+        return proba, model.classes_, predict_dur
+
+    def predict_proba_per_model(self, X):
+        predict_start_time = perf_counter()
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction")
+
+        self._init_ray()
+
+        return_dict = {}
+        Xt = self.compute_features(X)
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Computed features for prediction")
+
+        rX = ray.put(X)
+        rXt = ray.put(Xt.to_numpy())
+        rXt_columns = ray.put(Xt.columns)
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Data added to ray storage")
+
+        predictions = []
+        run_queue = Queue()
+        result_queue = Queue()
+        tasks = []
+
+        first_level_models = [(model_name, model_group) for model_name, model_group in self.trained_models_
+                              if model_name in self.feature_models + self.series_models]
+
+        model_count = 0
+        for model_name, model_group in first_level_models:
+            use_series = model_name in self.series_models
+            for model in model_group:
+                run_queue.put((model_name, pickle.dumps(model), use_series))
+                model_count += 1
+
+        for _ in range(self.n_jobs):
+            run_queue.put(None)
+
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Starting RAY prediction with {self.n_jobs} workers for {model_count} first-level models")
+
+        for i in range(self.n_jobs):
+            tasks.append(predict_worker.remote(i, run_queue, result_queue, rX, rXt, rXt_columns))
+
+        for _ in range(model_count):
+            worker_id, proba, classes_, predict_dur, model_name = result_queue.get()
+            print(
+                f"[{perf_counter() - predict_start_time:.4f}s] Predicted {model_name} on worker-{worker_id} in {predict_dur:.4f}s"
+            )
+
+            level = 0
+            pred_list = self.add_probabilities(proba, classes_, model_name, level)
+            predictions.extend(pred_list)
+
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Completed all first-level model predictions")
+        ray.get(tasks)
+
+        Xt = self.combine_features_and_predictions(Xt, predictions)
+        rXt = ray.put(Xt.to_numpy())
+        rXt_columns = ray.put(Xt.columns)
+
+        stacking_models = [(model_name, model_group) for model_name, model_group in self.trained_models_
+                           if model_name in self.stacking_models]
+
+        run_queue = Queue()
+        result_queue = Queue()
+        tasks = []
+
+        model_count = 0
+        for model_name, model_group in stacking_models:
+            use_series = model_name in self.series_models
+            for model in model_group:
+                run_queue.put((model_name, pickle.dumps(model), use_series))
+                model_count += 1
+
+        for _ in range(self.n_jobs):
+            run_queue.put(None)
+
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Starting RAY prediction with {self.n_jobs} workers for {model_count} stacking models")
+
+        for i in range(self.n_jobs):
+            tasks.append(predict_worker.remote(i, run_queue, result_queue, rX, rXt, rXt_columns))
+
         for _ in range(model_count):
             worker_id, proba, classes_, predict_dur, model_name = result_queue.get()
             print(

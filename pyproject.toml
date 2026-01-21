@@ -17,7 +17,8 @@ dependencies = [
     "tsfresh",
     "ray",
     "catboost",
-    "imblearn"
+    "imblearn",
+    "click"
 ]
 
 [project.optional-dependencies]

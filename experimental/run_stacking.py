@@ -6,6 +6,7 @@ os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 from urllib.parse import urlparse
 
 import boto3
+import click
 import polars as pl
 from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.classification.feature_based import Catch22Classifier
@@ -19,7 +20,7 @@ from botocore.exceptions import ClientError
 from sklearn.metrics import accuracy_score
 
 from autotsc import transformers, utils
-from autotsc.models import StackerV4, FastStackerV4
+from autotsc.models import StackerV4, FastStackerV4, FastStackerV5
 
 
 def s3_file_exists(s3_uri: str) -> bool:
@@ -54,6 +55,10 @@ def get_model(model_name, random_state):
         return StackerV4(random_state=random_state, n_repetitions=1)
     elif model_name == "fast-stacker-v4-r1":
         return FastStackerV4(random_state=random_state, n_repetitions=1, n_jobs=16)
+    elif model_name == "fast-stacker-v5-r1":
+        return FastStackerV5(random_state=random_state, n_repetitions=1, n_jobs=16)
+    elif model_name == "fast-stacker-v5-r3":
+        return FastStackerV5(random_state=random_state, n_repetitions=3, n_jobs=16)
     elif model_name == "catch22":
         return Catch22Classifier(n_jobs=16)
     elif model_name == "drcif":
@@ -98,18 +103,50 @@ def get_model(model_name, random_state):
         raise ValueError(f"Unknown model name: {model_name}")
 
 
-if __name__ == "__main__":
+# Define all available models
+ALL_MODELS = [
+    "rstsf", "mr-hydra", "quant", "rdst", "catch22", "drcif", "u-rstsf",
+    "stacker-v4-r1", "fast-stacker-v4-r1", "fast-stacker-v5-r1", "fast-stacker-v5-r3", "hivecotev2",
+    "cumsum-mr-hydra", "scale-mr-hydra", "polar-angle-mr-hydra", "polar-magnitude-mr-hydra",
+    "rank-mr-hydra", "difference-mr-hydra", "downsample-mr-hydra",
+]
+#ALL_MODELS = [
+#    "fast-stacker-v4-r1"
+#]
+
+
+@click.command()
+@click.option("-m", "--models", multiple=True, help="Models to run (can be specified multiple times)")
+@click.option("-l", "--list-models", is_flag=True, help="List all available models and exit")
+def main(models, list_models):
+    """Run stacking experiments on TSC datasets."""
     import random
     from itertools import product
 
-    write_dir = "s3://tsc-glue/performance"
+    # Handle --list-models flag
+    if list_models:
+        click.echo("Available models:")
+        for model in ALL_MODELS:
+            click.echo(f"  - {model}")
+        return
 
+    # Determine which models to run
+    if models:
+        # Validate specified models
+        invalid_models = [m for m in models if m not in ALL_MODELS]
+        if invalid_models:
+            click.echo(f"Error: Unknown models: {', '.join(invalid_models)}", err=True)
+            click.echo("Use -l to list available models", err=True)
+            raise click.Abort()
+        model_names = list(models)
+        click.echo(f"Running models: {', '.join(model_names)}")
+    else:
+        # Run all models except hivecotev2 by default
+        model_names = [m for m in ALL_MODELS if m != "hivecotev2"]
+        click.echo(f"Running all models (excluding hivecotev2)")
+
+    write_dir = "s3://tsc-glue/performance"
     datasets = univariate
-    model_names = [
-        "rstsf", "mr-hydra", "quant", "rdst", "catch22", "drcif", "u-rstsf", "stacker-v4-r1", "fast-stacker-v4-r1", # "hivecotev2",
-        "cumsum-mr-hydra", "scale-mr-hydra", "polar-angle-mr-hydra", "polar-magnitude-mr-hydra",
-        "rank-mr-hydra", "difference-mr-hydra", "downsample-mr-hydra",
-    ]
     runs = [100, 200, 300, 400, 500]
 
     triplets = list(product(datasets, model_names, runs))
@@ -151,3 +188,7 @@ if __name__ == "__main__":
             df_stat.write_parquet(file)
         except Exception as e:
             print(f"Error processing Dataset={dataset}, Run={run}, Model={model_name}: {e}")
+
+
+if __name__ == "__main__":
+    main()
