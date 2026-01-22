@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 
@@ -764,13 +765,22 @@ class FastStackerV4(BaseClassifier):
             # This allows multiple FastStackerV4 instances to run in parallel
             if self.ray_port is None:
                 self.ray_port = self._get_available_port()
-            temp_dir = f"./autotsc/ray_{self.ray_port}"
-            print(f"Starting isolated Ray on port {self.ray_port} with temp_dir={temp_dir}")
+            ray_tmp = os.path.expanduser(f"~/ray/p_{self.ray_port}")
+            ray_spill = os.path.expanduser(f"~/ray/s_{self.ray_port}")
+            os.makedirs(ray_tmp, exist_ok=True)
+            os.makedirs(ray_spill, exist_ok=True)
+            print(f"Starting isolated Ray on port {self.ray_port} with temp_dir={ray_tmp}")
             ray.init(
                 num_cpus=self.n_jobs,
                 ignore_reinit_error=False,
                 include_dashboard=False,
-                _temp_dir=temp_dir,
+                _temp_dir=ray_tmp,
+                _system_config={
+                    "object_spilling_config": json.dumps({
+                        "type": "filesystem",
+                        "params": {"directory_path": ray_spill}
+                    })
+                },
             )
         else:
             print("Starting shared Ray instance")
@@ -1232,13 +1242,22 @@ class FastStackerV5(BaseClassifier):
         if self.isolated_ray:
             if self.ray_port is None:
                 self.ray_port = self._get_available_port()
-            temp_dir = f"./autotsc/ray_{self.ray_port}"
-            print(f"Starting isolated Ray on port {self.ray_port} with temp_dir={temp_dir}")
+            ray_tmp = os.path.expanduser(f"~/ray/p_{self.ray_port}")
+            ray_spill = os.path.expanduser(f"~/ray/s_{self.ray_port}")
+            os.makedirs(ray_tmp, exist_ok=True)
+            os.makedirs(ray_spill, exist_ok=True)
+            print(f"Starting isolated Ray on port {self.ray_port} with temp_dir={ray_tmp}")
             ray.init(
                 num_cpus=self.n_jobs,
                 ignore_reinit_error=False,
                 include_dashboard=False,
-                _temp_dir=temp_dir,
+                _temp_dir=ray_tmp,
+                _system_config={
+                    "object_spilling_config": json.dumps({
+                        "type": "filesystem",
+                        "params": {"directory_path": ray_spill}
+                    })
+                },
             )
         else:
             print("Starting shared Ray instance")
