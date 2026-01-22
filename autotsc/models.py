@@ -779,7 +779,8 @@ class FastStackerV4(BaseClassifier):
                     "object_spilling_config": json.dumps({
                         "type": "filesystem",
                         "params": {"directory_path": ray_spill}
-                    })
+                    }),
+                    "memory_monitor_refresh_ms": 0,
                 },
             )
         else:
@@ -1256,7 +1257,8 @@ class FastStackerV5(BaseClassifier):
                     "object_spilling_config": json.dumps({
                         "type": "filesystem",
                         "params": {"directory_path": ray_spill}
-                    })
+                    }),
+                    "memory_monitor_refresh_ms": 0,
                 },
             )
         else:
