@@ -18,6 +18,7 @@ from aeon.transformations.collection import Normalizer
 from aeon.datasets.tsc_datasets import univariate
 from botocore.exceptions import ClientError
 from sklearn.metrics import accuracy_score
+from catboost import CatBoostClassifier
 
 from autotsc import transformers, utils
 from autotsc.models import StackerV4, FastStackerV4, FastStackerV5, LokyStackerV5
@@ -43,6 +44,12 @@ def get_model(model_name, random_state):
         return MultiRocketHydraClassifier(n_jobs=16, random_state=random_state)
     elif model_name == "quant":
         return QUANTClassifier(random_state=random_state)
+    elif model_name == "quant-catboost":
+        cat = CatBoostClassifier(
+            random_seed=random_state,
+            verbose=True,
+        )
+        return QUANTClassifier(estimator=cat, random_state=random_state)
     elif model_name == "rdst":
         return RDSTClassifier(n_jobs=16, random_state=random_state)
     elif model_name == "rstsf":
@@ -105,16 +112,12 @@ def get_model(model_name, random_state):
         raise ValueError(f"Unknown model name: {model_name}")
 
 
-# Define all available models
 ALL_MODELS = [
     "rstsf", "mr-hydra", "quant", "rdst", "catch22", "drcif", "u-rstsf",
     "stacker-v4-r1", "loky-stacker-v5-r1", "hivecotev2",
     "cumsum-mr-hydra", "scale-mr-hydra", "polar-angle-mr-hydra", "polar-magnitude-mr-hydra",
-    "rank-mr-hydra", "difference-mr-hydra", "downsample-mr-hydra",
+    "rank-mr-hydra", "difference-mr-hydra", "downsample-mr-hydra", "quant-catboost"
 ]
-#ALL_MODELS = [
-#    "fast-stacker-v4-r1"
-#]
 
 
 @click.command()
@@ -144,8 +147,8 @@ def main(models, list_models):
         click.echo(f"Running models: {', '.join(model_names)}")
     else:
         # Run all models except hivecotev2 by default
-        model_names = [m for m in ALL_MODELS if m != "hivecotev2"]
-        click.echo(f"Running all models (excluding hivecotev2)")
+        model_names = ALL_MODELS
+        click.echo(f"Running all models")
 
     write_dir = "s3://tsc-glue/performance"
     datasets = univariate

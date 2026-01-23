@@ -4,10 +4,12 @@ from aeon.classification.interval_based import QUANTClassifier
 from sklearn.metrics import accuracy_score
 from catboost import CatBoostClassifier
 
-SEED = 42
+SEED = 43
 np.random.seed(SEED)
 
 dataset = 'FaceAll'
+dataset = 'RefrigerationDevices'
+dataset = 'EthanolLevel'
 X_train, y_train = load_classification(dataset, split="train")
 X_test, y_test = load_classification(dataset, split="test")
 
