@@ -1,6 +1,6 @@
 """Tests for AutoTSC models."""
 
-from autotsc.models import StackerV4
+from autotsc.models import LokyStackerV5
 from sklearn.metrics import accuracy_score
 from autotsc import utils
 
@@ -9,7 +9,7 @@ def test_model_accuracy_on_arrowhead():
     """Test model can achieve reasonable accuracy on ArrowHead dataset."""
     X_train, y_train, X_test, y_test = utils.load_dataset("ArrowHead")
 
-    model = StackerV4(random_state=270, n_repetitions=1, k_folds=10, time_limit_in_seconds=None)
+    model = LokyStackerV5(random_state=270, n_repetitions=1, k_folds=10, time_limit_in_seconds=None)
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)

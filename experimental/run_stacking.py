@@ -108,8 +108,7 @@ def get_model(model_name, random_state):
 # Define all available models
 ALL_MODELS = [
     "rstsf", "mr-hydra", "quant", "rdst", "catch22", "drcif", "u-rstsf",
-    "stacker-v4-r1", "fast-stacker-v4-r1", "fast-stacker-v5-r1", "fast-stacker-v5-r3",
-    "loky-stacker-v5-r1", "hivecotev2",
+    "stacker-v4-r1", "loky-stacker-v5-r1", "hivecotev2",
     "cumsum-mr-hydra", "scale-mr-hydra", "polar-angle-mr-hydra", "polar-magnitude-mr-hydra",
     "rank-mr-hydra", "difference-mr-hydra", "downsample-mr-hydra",
 ]
