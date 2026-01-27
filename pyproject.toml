@@ -21,7 +21,7 @@ dependencies = [
     "catboost",
     "imblearn",
     "click",
-    "loky"
+    "pyarrow"
 ]
 
 [project.optional-dependencies]

@@ -16,6 +16,7 @@ from aeon.classification.shapelet_based import RDSTClassifier
 from aeon.pipeline import make_pipeline as aeon_make_pipeline
 from aeon.transformations.collection import Normalizer
 from aeon.datasets.tsc_datasets import univariate
+from aeon.benchmarking.resampling import stratified_resample_data
 from botocore.exceptions import ClientError
 from sklearn.metrics import accuracy_score
 from catboost import CatBoostClassifier
@@ -48,6 +49,7 @@ def get_model(model_name, random_state):
         cat = CatBoostClassifier(
             random_seed=random_state,
             verbose=True,
+            thread_count=16,
         )
         return QUANTClassifier(estimator=cat, random_state=random_state)
     elif model_name == "rdst":
@@ -67,7 +69,7 @@ def get_model(model_name, random_state):
     elif model_name == "fast-stacker-v5-r3":
         return FastStackerV5(random_state=random_state, n_repetitions=3, n_jobs=16)
     elif model_name == "loky-stacker-v5-r1":
-        return LokyStackerV5(random_state=random_state, n_repetitions=1, n_jobs=16)
+        return LokyStackerV5(random_state=random_state, n_repetitions=1, n_jobs=8)
     elif model_name == "catch22":
         return Catch22Classifier(n_jobs=16)
     elif model_name == "drcif":
@@ -121,12 +123,17 @@ ALL_MODELS = [
 
 
 @click.command()
-@click.option("-m", "--models", multiple=True, help="Models to run (can be specified multiple times)")
+@click.option("-m", "--models", multiple=True, help="Models to run (can be specified multiple times or comma-separated)")
+@click.option("-d", "--datasets", "dataset_names", multiple=True, help="Datasets to run (can be specified multiple times or comma-separated)")
+@click.option("-r", "--resample", type=int, default=None, help="Resample data: 1=yes, 0=no, unset=both")
 @click.option("-l", "--list-models", is_flag=True, help="List all available models and exit")
-def main(models, list_models):
+@click.option("--list-datasets", is_flag=True, help="List all available datasets and exit")
+def main(models, dataset_names, resample, list_models, list_datasets):
     """Run stacking experiments on TSC datasets."""
     import random
     from itertools import product
+
+    all_datasets = list(univariate)
 
     # Handle --list-models flag
     if list_models:
@@ -135,36 +142,71 @@ def main(models, list_models):
             click.echo(f"  - {model}")
         return
 
+    # Handle --list-datasets flag
+    if list_datasets:
+        click.echo("Available datasets:")
+        for ds in all_datasets:
+            click.echo(f"  - {ds}")
+        return
+
     # Determine which models to run
     if models:
+        # Support both multiple -m flags and comma-separated values
+        model_list = []
+        for m in models:
+            model_list.extend([x.strip() for x in m.split(",")])
         # Validate specified models
-        invalid_models = [m for m in models if m not in ALL_MODELS]
+        invalid_models = [m for m in model_list if m not in ALL_MODELS]
         if invalid_models:
             click.echo(f"Error: Unknown models: {', '.join(invalid_models)}", err=True)
             click.echo("Use -l to list available models", err=True)
             raise click.Abort()
-        model_names = list(models)
+        model_names = model_list
         click.echo(f"Running models: {', '.join(model_names)}")
     else:
-        # Run all models except hivecotev2 by default
         model_names = ALL_MODELS
         click.echo(f"Running all models")
 
+    # Determine which datasets to run
+    if dataset_names:
+        # Support both multiple -d flags and comma-separated values
+        dataset_list = []
+        for d in dataset_names:
+            dataset_list.extend([x.strip() for x in d.split(",")])
+        # Validate specified datasets
+        invalid_datasets = [d for d in dataset_list if d not in all_datasets]
+        if invalid_datasets:
+            click.echo(f"Error: Unknown datasets: {', '.join(invalid_datasets)}", err=True)
+            click.echo("Use --list-datasets to list available datasets", err=True)
+            raise click.Abort()
+        datasets = dataset_list
+        click.echo(f"Running datasets: {', '.join(datasets)}")
+    else:
+        datasets = all_datasets
+        click.echo(f"Running all datasets")
+
+    # Determine resample options
+    if resample is None:
+        resample_options = [False, True]
+        click.echo("Running both resampled and non-resampled")
+    else:
+        resample_options = [bool(resample)]
+        click.echo(f"Running {'resampled' if resample else 'non-resampled'} only")
+
     write_dir = "s3://tsc-glue/performance"
-    datasets = univariate
     runs = [100, 200, 300, 400, 500]
 
-    triplets = list(product(datasets, model_names, runs))
-    random.shuffle(triplets)
+    combos = list(product(datasets, model_names, runs, resample_options))
+    random.shuffle(combos)
 
-    n = len(triplets)
-    for k, (dataset, model_name, run) in enumerate(triplets, 1):
+    n = len(combos)
+    for k, (dataset, model_name, run, resampled) in enumerate(combos, 1):
         try:
             stats = {
                 "dataset": dataset,
                 "model": model_name,
                 "run": run,
-                "resampled": False,
+                "resampled": resampled,
             }
 
             hash_val = pl.DataFrame([stats]).hash_rows(seed=42, seed_1=1, seed_2=2, seed_3=3).item()
@@ -172,16 +214,20 @@ def main(models, list_models):
 
             # Check if file exists in S3
             if s3_file_exists(file):
-                print(f"[{k}/{n}] Skipping: Dataset={dataset}, Run={run}, Model={model_name}")
+                print(f"[{k}/{n}] Skipping: Dataset={dataset}, Run={run}, Model={model_name}, Resampled={resampled}")
                 continue
             else:
-                print(f"[{k}/{n}] Processing: Dataset={dataset}, Run={run}, Model={model_name}")
+                print(f"[{k}/{n}] Processing: Dataset={dataset}, Run={run}, Model={model_name}, Resampled={resampled}")
 
             X_train, y_train, X_test, y_test = utils.load_dataset(dataset)
 
-            print(f"Running {dataset} with model {model_name} run {run}")
+            if resampled:
+                X_train, y_train, X_test, y_test = stratified_resample_data(
+                    X_train, y_train, X_test, y_test, random_state=run
+                )
 
-            # Ray is initialized at the script level, model should not manage it
+            print(f"Running {dataset} with model {model_name} run {run} resampled={resampled}")
+
             model = get_model(model_name, random_state=run)
             model.fit(X_train, y_train)
             preds = model.predict(X_test)
@@ -192,7 +238,7 @@ def main(models, list_models):
             df_stat = pl.DataFrame([stats])
             df_stat.write_parquet(file)
         except Exception as e:
-            print(f"Error processing Dataset={dataset}, Run={run}, Model={model_name}: {e}")
+            print(f"Error processing Dataset={dataset}, Run={run}, Model={model_name}, Resampled={resampled}: {e}")
 
 
 if __name__ == "__main__":
