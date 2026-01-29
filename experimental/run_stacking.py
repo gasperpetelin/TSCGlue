@@ -5,10 +5,16 @@ from autotsc.models2 import RSTSFUnsupervisedClassifier
 os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 from urllib.parse import urlparse
 
+import numpy as np
 import boto3
 import click
 import polars as pl
 from aeon.classification.convolution_based import MultiRocketHydraClassifier
+from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
+from sklearn.linear_model import RidgeClassifierCV, SGDClassifier
+from sklearn.pipeline import Pipeline
+
+from autotsc.gpu_models import MRHydraClassifier
 from aeon.classification.feature_based import Catch22Classifier
 from aeon.classification.hybrid import HIVECOTEV2
 from aeon.classification.interval_based import RSTSF, QUANTClassifier, DrCIFClassifier
@@ -22,7 +28,7 @@ from sklearn.metrics import accuracy_score
 from catboost import CatBoostClassifier
 
 from autotsc import transformers, utils
-from autotsc.models import StackerV4, FastStackerV4, FastStackerV5, LokyStackerV5
+from autotsc.models import StackerV4, LokyStackerV5
 
 
 def s3_file_exists(s3_uri: str) -> bool:
@@ -58,18 +64,14 @@ def get_model(model_name, random_state):
         return RSTSF(random_state=random_state, n_jobs=16)
     elif model_name == "hivecotev2":
         return HIVECOTEV2(random_state=random_state, n_jobs=16, verbose=10)
-    elif model_name == "stacker-v4-r3":
-        return StackerV4(random_state=random_state, n_repetitions=3)
-    elif model_name == "stacker-v4-r1":
-        return StackerV4(random_state=random_state, n_repetitions=1)
-    elif model_name == "fast-stacker-v4-r1":
-        return FastStackerV4(random_state=random_state, n_repetitions=1, n_jobs=16)
-    elif model_name == "fast-stacker-v5-r1":
-        return FastStackerV5(random_state=random_state, n_repetitions=1, n_jobs=16)
-    elif model_name == "fast-stacker-v5-r3":
-        return FastStackerV5(random_state=random_state, n_repetitions=3, n_jobs=16)
+    #elif model_name == "stacker-v4-r3":
+    #    return StackerV4(random_state=random_state, n_repetitions=3)
+    #elif model_name == "stacker-v4-r1":
+    #    return StackerV4(random_state=random_state, n_repetitions=1)
     elif model_name == "loky-stacker-v5-r1":
         return LokyStackerV5(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v5-r3":
+        return LokyStackerV5(random_state=random_state, n_repetitions=3, n_jobs=8)
     elif model_name == "catch22":
         return Catch22Classifier(n_jobs=16)
     elif model_name == "drcif":
@@ -110,15 +112,42 @@ def get_model(model_name, random_state):
             transformers.PadToLengthTransformer(target_length=10),
             MultiRocketHydraClassifier(n_jobs=16, random_state=random_state),
         )
+    elif model_name == "mr-hydra-baseline":
+        return MRHydraClassifier(n_jobs=16, random_state=random_state)
+    elif model_name == "mr-hydra-sgd":
+        e = SGDClassifier(
+            loss="hinge",
+            alpha=1e-4,
+            max_iter=200,
+            tol=1e-4,
+            learning_rate="optimal",
+            early_stopping=False,
+            n_iter_no_change=10,
+            average=True,
+            random_state=random_state,
+            verbose=0,
+        )
+        return MRHydraClassifier(estimator=e, n_jobs=16, random_state=random_state)
+    elif model_name.startswith("mr-hydra-kbest-"):
+        k = int(model_name.split("-")[-1])
+        e = Pipeline([
+            ("var", VarianceThreshold()),
+            ("select", SelectKBest(f_classif, k=k)),
+            ("clf", RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))),
+        ])
+        return MRHydraClassifier(estimator=e, n_jobs=16, random_state=random_state)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
 
 ALL_MODELS = [
     "rstsf", "mr-hydra", "quant", "rdst", "catch22", "drcif", "u-rstsf",
-    "stacker-v4-r1", "loky-stacker-v5-r1", "hivecotev2",
+    "loky-stacker-v5-r1", "hivecotev2", # "loky-stacker-v5-r3"
     "cumsum-mr-hydra", "scale-mr-hydra", "polar-angle-mr-hydra", "polar-magnitude-mr-hydra",
-    "rank-mr-hydra", "difference-mr-hydra", "downsample-mr-hydra", "quant-catboost"
+    "rank-mr-hydra", "difference-mr-hydra", "downsample-mr-hydra",
+    "mr-hydra-baseline", "mr-hydra-sgd",
+    "mr-hydra-kbest-1000", "mr-hydra-kbest-3000", "mr-hydra-kbest-5000",
+    "mr-hydra-kbest-10000", "mr-hydra-kbest-30000", #"quant-catboost" "stacker-v4-r1",
 ]
 
 
