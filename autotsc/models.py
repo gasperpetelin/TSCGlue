@@ -55,14 +55,6 @@ def load_mmap_data(X_path: str, Xt_path: str, y_path: str) -> tuple[np.ndarray, 
     return X, Xt, y
 
 
-@ray.remote(num_cpus=1)
-def ray_run_predict_proba(model, X):
-    start_time = perf_counter()
-    proba = model.predict_proba(X)
-    pred_time = perf_counter() - start_time
-    return proba, pred_time
-
-
 class StackerV4(BaseClassifier):
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None):
         super().__init__()
@@ -205,14 +197,12 @@ class StackerV4(BaseClassifier):
             pipe = make_pipeline(
                 MultiScaler(
                     scalers={
-                        "proba_": StandardScaler(),
+                        "probability|model0": NoScaler(),
                     },
                     verbose=False,
                 ),
                 ExtraTreesClassifier(
                     n_estimators=500,
-                    # max_features=0.3,
-                    # criterion="entropy",
                     random_state=seed,
                     n_jobs=n_jobs,
                     bootstrap=True,
@@ -541,6 +531,18 @@ def get_model(name, seed=None, n_jobs=1):
             RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 10)),
         )
         return pipe
+    elif name == "multirockethydra-p-ridgecv":
+        pipe = make_pipeline(
+            MultiScaler(
+                scalers={
+                    "feature|hydra": SparseScaler(),
+                    "feature|multirocket": StandardScaler(),
+                },
+                verbose=False,
+            ),
+            RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10)),
+        )
+        return pipe
     elif name == "all-ridgecv":
         pipe = make_pipeline(
             MultiScaler(
@@ -577,6 +579,17 @@ def get_model(name, seed=None, n_jobs=1):
                 random_state=seed,
                 n_jobs=n_jobs,
             ),
+        )
+        return pipe
+    elif name == "rdst-p-ridgecv":
+        pipe = make_pipeline(
+            MultiScaler(
+                scalers={
+                    "feature|randomdilatedshapelet": StandardScaler(),
+                },
+                verbose=False,
+            ),
+            RidgeClassifierCVDecisionProba(alphas=np.logspace(-4, 4, 20)),
         )
         return pipe
     elif name == "rdst-ridgecv":
@@ -634,17 +647,15 @@ def get_model(name, seed=None, n_jobs=1):
         pipe = make_pipeline(
             MultiScaler(
                 scalers={
-                    "proba_": StandardScaler(),
+                    "probability|model0": NoScaler(),
                 },
                 verbose=False,
             ),
             ExtraTreesClassifier(
-                n_estimators=500,
-                # max_features=0.3,
-                # criterion="entropy",
+                n_estimators=1000,
                 random_state=seed,
                 n_jobs=n_jobs,
-                bootstrap=True,
+                #bootstrap=True,
             ),
         )
         return pipe
@@ -663,7 +674,7 @@ def get_model(name, seed=None, n_jobs=1):
         pipe = make_pipeline(
             MultiScaler(
                 scalers={
-                    "proba_": StandardScaler(),
+                    "probability|model0": NoScaler(),
                 },
                 verbose=False,
             ),
@@ -673,6 +684,50 @@ def get_model(name, seed=None, n_jobs=1):
     else:
         raise ValueError(f"Unknown model name: {name}")
 
+
+def get_model_v6(name, seed=None, n_jobs=1):
+    """Returns (DictMultiScaler, classifier) for feature/stacking models, or (None, pipe) for series models."""
+    if name == "multirockethydra-ridgecv":
+        scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
+        clf = RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 10))
+        return scaler, clf
+    elif name == "multirockethydra-p-ridgecv":
+        scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
+        clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10))
+        return scaler, clf
+    elif name == "quant-etc":
+        scaler = DictMultiScaler(scalers={"quant": NoScaler()})
+        clf = ExtraTreesClassifier(
+            n_estimators=200, max_features=0.1, criterion="entropy",
+            random_state=seed, n_jobs=n_jobs,
+        )
+        return scaler, clf
+    elif name == "rdst-ridgecv":
+        scaler = DictMultiScaler(scalers={"rdst": StandardScaler()})
+        clf = RidgeClassifierCVIndicator(alphas=np.logspace(-4, 4, 20))
+        return scaler, clf
+    elif name == "rdst-p-ridgecv":
+        scaler = DictMultiScaler(scalers={"rdst": StandardScaler()})
+        clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-4, 4, 20))
+        return scaler, clf
+    elif name == "probability-ridgecv":
+        scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
+        clf = RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 20))
+        return scaler, clf
+    elif name == "probability-et":
+        scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
+        clf = ExtraTreesClassifier(
+            n_estimators=1000, random_state=seed, n_jobs=n_jobs,
+        )
+        return scaler, clf
+    elif name == "probability-rf":
+        scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
+        clf = RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=n_jobs)
+        return scaler, clf
+    elif name == "rstsf":
+        return None, RSTSF(random_state=seed, n_jobs=n_jobs, n_estimators=100)
+    else:
+        raise ValueError(f"Unknown model name: {name}")
 
 
 # Global worker data - loaded once per worker process via initializer
@@ -685,20 +740,20 @@ def _init_worker_train(X_path, Xt_path, Xt_columns_path, y_path):
     global _loky_worker_data
     import os
     pid = os.getpid()
-    print(f"[Worker {pid}] Train init starting...", flush=True)
-    print(f"[Worker {pid}] Loading X...", flush=True)
+    #print(f"[Worker {pid}] Train init starting...", flush=True)
+    #print(f"[Worker {pid}] Loading X...", flush=True)
     X = np.load(X_path, mmap_mode='r')
-    print(f"[Worker {pid}] Loading Xt...", flush=True)
+    #print(f"[Worker {pid}] Loading Xt...", flush=True)
     Xt_np = np.load(Xt_path, mmap_mode='r')
-    print(f"[Worker {pid}] Loading Xt_columns...", flush=True)
+    #print(f"[Worker {pid}] Loading Xt_columns...", flush=True)
     with open(Xt_columns_path, 'rb') as f:
         Xt_columns = pickle.load(f)
-    print(f"[Worker {pid}] Creating DataFrame ({len(Xt_columns)} cols)...", flush=True)
+    #print(f"[Worker {pid}] Creating DataFrame ({len(Xt_columns)} cols)...", flush=True)
     Xt = pl.DataFrame(Xt_np, schema=Xt_columns)
-    print(f"[Worker {pid}] Loading y...", flush=True)
+    #print(f"[Worker {pid}] Loading y...", flush=True)
     y = np.load(y_path, mmap_mode='r')
     _loky_worker_data = (X, Xt, y)
-    print(f"[Worker {pid}] Train init done. X={X.shape}, Xt={Xt.shape}, y={y.shape}", flush=True)
+    #print(f"[Worker {pid}] Train init done. X={X.shape}, Xt={Xt.shape}, y={y.shape}", flush=True)
 
 
 def _init_worker_predict(X_path, Xt_path, Xt_columns_path):
@@ -706,18 +761,18 @@ def _init_worker_predict(X_path, Xt_path, Xt_columns_path):
     global _loky_worker_data
     import os
     pid = os.getpid()
-    print(f"[Worker {pid}] Predict init starting...", flush=True)
-    print(f"[Worker {pid}] Loading X...", flush=True)
+    #print(f"[Worker {pid}] Predict init starting...", flush=True)
+    #print(f"[Worker {pid}] Loading X...", flush=True)
     X = np.load(X_path, mmap_mode='r')
-    print(f"[Worker {pid}] Loading Xt...", flush=True)
+    #print(f"[Worker {pid}] Loading Xt...", flush=True)
     Xt_np = np.load(Xt_path, mmap_mode='r')
-    print(f"[Worker {pid}] Loading Xt_columns...", flush=True)
+    #print(f"[Worker {pid}] Loading Xt_columns...", flush=True)
     with open(Xt_columns_path, 'rb') as f:
         Xt_columns = pickle.load(f)
-    print(f"[Worker {pid}] Creating DataFrame ({len(Xt_columns)} cols)...", flush=True)
+    #print(f"[Worker {pid}] Creating DataFrame ({len(Xt_columns)} cols)...", flush=True)
     Xt = pl.DataFrame(Xt_np, schema=Xt_columns)
     _loky_worker_data = (X, Xt, None)
-    print(f"[Worker {pid}] Predict init done. X={X.shape}, Xt={Xt.shape}", flush=True)
+    #print(f"[Worker {pid}] Predict init done. X={X.shape}, Xt={Xt.shape}", flush=True)
 
 
 def _train_one_model(fold_number, model_name, use_Xt, train_idx, val_idx, model_seed):
@@ -725,25 +780,25 @@ def _train_one_model(fold_number, model_name, use_Xt, train_idx, val_idx, model_
     global _loky_worker_data
     import os
     pid = os.getpid()
-    print(f"[Worker {pid}] Task start: {model_name} fold {fold_number}", flush=True)
+    #print(f"[Worker {pid}] Task start: {model_name} fold {fold_number}", flush=True)
     X, Xt, y = _loky_worker_data
 
-    print(f"[Worker {pid}] Getting model {model_name}...", flush=True)
+    #print(f"[Worker {pid}] Getting model {model_name}...", flush=True)
     pipe = get_model(model_name, seed=model_seed)
     start_train = perf_counter()
 
-    print(f"[Worker {pid}] Fitting {model_name}...", flush=True)
+    #print(f"[Worker {pid}] Fitting {model_name}...", flush=True)
     if use_Xt:
         pipe.fit(Xt[train_idx], y[train_idx])
-        print(f"[Worker {pid}] Predicting {model_name}...", flush=True)
+        #print(f"[Worker {pid}] Predicting {model_name}...", flush=True)
         proba = pipe.predict_proba(Xt[val_idx])
     else:
         pipe.fit(X[train_idx], y[train_idx])
-        print(f"[Worker {pid}] Predicting {model_name}...", flush=True)
+        #print(f"[Worker {pid}] Predicting {model_name}...", flush=True)
         proba = pipe.predict_proba(X[val_idx])
 
     train_dur = perf_counter() - start_train
-    print(f"[Worker {pid}] Task done: {model_name} fold {fold_number} in {train_dur:.2f}s", flush=True)
+    #print(f"[Worker {pid}] Task done: {model_name} fold {fold_number} in {train_dur:.2f}s", flush=True)
     return (train_idx, val_idx, proba, pickle.dumps(pipe), train_dur, model_name, fold_number)
 
 
@@ -752,22 +807,76 @@ def _predict_one_model(model_name, pickle_pipe, use_series):
     global _loky_worker_data
     import os
     pid = os.getpid()
-    print(f"[Worker {pid}] Predict task start: {model_name}", flush=True)
+    #print(f"[Worker {pid}] Predict task start: {model_name}", flush=True)
     X, Xt, _ = _loky_worker_data
 
-    print(f"[Worker {pid}] Unpickling model...", flush=True)
+    #print(f"[Worker {pid}] Unpickling model...", flush=True)
     pipe = pickle.loads(pickle_pipe)
     start_predict = perf_counter()
 
-    print(f"[Worker {pid}] Running predict_proba...", flush=True)
+    #print(f"[Worker {pid}] Running predict_proba...", flush=True)
     if use_series:
         proba = pipe.predict_proba(X)
     else:
         proba = pipe.predict_proba(Xt)
 
     predict_dur = perf_counter() - start_predict
-    print(f"[Worker {pid}] Predict task done: {model_name} in {predict_dur:.2f}s", flush=True)
+    #print(f"[Worker {pid}] Predict task done: {model_name} in {predict_dur:.2f}s", flush=True)
     return (proba, pipe.classes_, predict_dur, model_name)
+
+
+def _load_feature_dict(feature_manifest):
+    """Load feature arrays from mmap files and concatenate per type."""
+    feature_dict = {}
+    for feat_type, paths in feature_manifest.items():
+        arrays = [np.load(p, mmap_mode='r') for p in paths]
+        feature_dict[feat_type] = np.hstack(arrays) if len(arrays) > 1 else arrays[0]
+    return feature_dict
+
+
+def _train_one_model_v6(fold_number, model_name, is_series, train_idx, val_idx, model_seed,
+                         X_path, y_path, feature_manifest):
+    """Training function for V6 - loads mmap data per task, no global state."""
+    X = np.load(X_path, mmap_mode='r')
+    y = np.load(y_path, mmap_mode='r')
+    feature_dict = _load_feature_dict(feature_manifest)
+
+    scaler, clf = get_model_v6(model_name, seed=model_seed)
+    start_train = perf_counter()
+
+    if is_series:
+        clf.fit(X[train_idx], y[train_idx])
+        proba = clf.predict_proba(X[val_idx])
+        pickled = pickle.dumps((None, clf))
+    else:
+        train_dict = {k: v[train_idx] for k, v in feature_dict.items()}
+        val_dict = {k: v[val_idx] for k, v in feature_dict.items()}
+        X_train = scaler.fit_transform(train_dict)
+        X_val = scaler.transform(val_dict)
+        clf.fit(X_train, y[train_idx])
+        proba = clf.predict_proba(X_val)
+        pickled = pickle.dumps((scaler, clf))
+
+    train_dur = perf_counter() - start_train
+    return (train_idx, val_idx, proba, pickled, train_dur, model_name, fold_number)
+
+
+def _predict_one_model_v6(model_name, pickled_model, is_series, X_path, feature_manifest):
+    """Prediction function for V6 - loads mmap data per task, no global state."""
+    X = np.load(X_path, mmap_mode='r')
+    feature_dict = _load_feature_dict(feature_manifest)
+
+    scaler, clf = pickle.loads(pickled_model)
+    start_predict = perf_counter()
+
+    if is_series:
+        proba = clf.predict_proba(X)
+    else:
+        X_scaled = scaler.transform(feature_dict)
+        proba = clf.predict_proba(X_scaled)
+
+    predict_dur = perf_counter() - start_predict
+    return (proba, clf.classes_, predict_dur, model_name)
 
 
 class LokyStackerV5(BaseClassifier):
@@ -789,6 +898,13 @@ class LokyStackerV5(BaseClassifier):
 
         self._tmpdir = None
         self.fallback_model = None
+
+        self.feature_models = ["multirockethydra-ridgecv", "quant-etc", "rdst-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+        self.stacking_models = ["probability-ridgecv"]
+        self.best_model = "probability-ridgecv"
+
 
     def _save_mmap_data(self, X, Xt, y):
         """Save data to mmap files for workers. Xt is saved as numpy array + columns."""
@@ -826,11 +942,6 @@ class LokyStackerV5(BaseClassifier):
 
         self.predictions = []
         self.trained_models_ = []
-
-        self.feature_models = ["multirockethydra-ridgecv", "quant-etc", "rdst-ridgecv"]
-        self.series_models = ["rstsf"]
-        self.oof_models = []
-        self.stacking_models = ["probability-ridgecv"]
 
         if self.cv_splits is None:
             self.cv_splits = []
@@ -1056,7 +1167,6 @@ class LokyStackerV5(BaseClassifier):
                 )
 
             print(f"[{perf_counter() - fit_start_time:.4f}s] Completed all repetitions and stacking")
-            self.best_model = "probability-ridgecv"
 
         finally:
             # Clean up temp directory
@@ -1292,6 +1402,576 @@ class LokyStackerV5(BaseClassifier):
 
     def get_Xt(self) -> pl.DataFrame:
         return self.combine_features_and_predictions(self.features, self.predictions)
+
+
+class LokyStackerV5SoftET(LokyStackerV5):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
+
+        self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+
+
+        stacking_model = "probability-et"
+        self.stacking_models = [stacking_model]
+        self.best_model = stacking_model
+
+
+class LokyStackerV5SoftRidge(LokyStackerV5):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
+
+        self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+
+
+        stacking_model = "probability-ridgecv"
+        self.stacking_models = [stacking_model]
+        self.best_model = stacking_model
+
+
+class LokyStackerV5SoftRF(LokyStackerV5):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
+
+        self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+
+
+        stacking_model = "probability-rf"
+        self.stacking_models = [stacking_model]
+        self.best_model = stacking_model
+
+
+class LokyStackerV6(LokyStackerV5):
+    """Like LokyStackerV5 but stores features as per-type numpy arrays instead of a single polars DataFrame.
+
+    Workers receive a dict of mmap arrays keyed by feature type, and DictMultiScaler
+    selects which arrays each model needs based on its scalers dict.
+    """
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
+        super().__init__(
+            random_state=random_state, n_repetitions=n_repetitions,
+            k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs,
+        )
+        self.feature_arrays = {}  # dict: str -> list[np.ndarray], per type per repetition
+
+    def add_features(self, feature_type: str, X: np.ndarray):
+        transform = self.get_next_feature_transformer(feature_type=feature_type, n_jobs=self.n_jobs)
+        transform.fit(X)
+        X_t = transform.transform(X)
+        self.feature_transformers.append((feature_type, transform))
+        if feature_type not in self.feature_arrays:
+            self.feature_arrays[feature_type] = []
+        self.feature_arrays[feature_type].append(np.asarray(X_t, dtype=np.float64))
+
+    def _save_feature_arrays(self, X, y):
+        """Save X, y, and per-type per-repetition feature arrays to mmap files.
+
+        Returns (X_path, y_path, feature_manifest) where feature_manifest maps
+        feature type to list of .npy file paths.
+        """
+        X_path = f"{self._tmpdir}/X.npy"
+        y_path = f"{self._tmpdir}/y.npy"
+        np.save(X_path, X)
+        np.save(y_path, y)
+        feature_manifest = {}
+        for feat_type, arrays in self.feature_arrays.items():
+            paths = []
+            for i, arr in enumerate(arrays):
+                path = f"{self._tmpdir}/Xt_{feat_type}_r{i}.npy"
+                np.save(path, arr)
+                paths.append(path)
+            feature_manifest[feat_type] = paths
+        return X_path, y_path, feature_manifest
+
+    def _build_probability_array(self, n_samples):
+        """Build a numpy array from level-0 OOF predictions and save as mmap.
+
+        Returns the probability array (n_samples, n_prob_columns).
+        """
+        level0_preds = [p for p in self.predictions if p["level"] == 0]
+        if len(level0_preds) == 0:
+            return None
+        df = (
+            pl.DataFrame(level0_preds)
+            .pivot(
+                values="probability",
+                index="index",
+                on=["level", "model", "class"],
+                aggregate_function="mean",
+            )
+            .sort("index")
+        )
+        # Sort probability columns for deterministic ordering across training/prediction
+        prob_cols = sorted(c for c in df.columns if c != "index")
+        self._probability_columns = prob_cols
+        prob_array = df.select(prob_cols).to_numpy()
+        return prob_array
+
+    def _compute_oof_accuracy(self, y, model_name):
+        """Compute OOF accuracy for a given model from self.predictions."""
+        model_preds = [p for p in self.predictions if p["model"] == model_name]
+        if len(model_preds) == 0:
+            return 0.0
+        df = (
+            pl.DataFrame(model_preds)
+            .pivot(
+                values="probability",
+                index="index",
+                on=["level", "model", "class"],
+                aggregate_function="mean",
+            )
+            .sort("index")
+        )
+        probas = df.drop("index").to_numpy()
+        pred_indices = np.argmax(probas, axis=1)
+        preds = self.classes_[pred_indices]
+        return accuracy_score(y, preds)
+
+    def _fit(self, X, y):
+        import shutil
+        fit_start_time = perf_counter()
+
+        self.predictions = []
+        self.trained_models_ = []
+        self.feature_arrays = {}
+        self.feature_transformers = []
+
+        if self.cv_splits is None:
+            self.cv_splits = []
+        print(f"[{perf_counter() - fit_start_time:.4f}s] Starting fitting")
+
+        # Check if each class has at least 2 instances for fold training
+        unique, counts = np.unique(y, return_counts=True)
+        if np.any(counts < 2):
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Some classes have fewer than 2 instances, fold training not possible")
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Falling back to MultiRocketHydraClassifier")
+            self.fallback_model = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
+            self.fallback_model.fit(X, y)
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Fallback model trained successfully")
+            return
+
+        quant_start_time = perf_counter()
+        self.add_features(feature_type="quant", X=X)
+        quant_durration = perf_counter() - quant_start_time
+        print(
+            f"[{perf_counter() - fit_start_time:.4f}s] Computed QUANT features in {quant_durration:.4f}s"
+        )
+
+        # Create temp directory for mmap files
+        self._tmpdir = tempfile.mkdtemp(prefix="loky_stacker_v6_")
+        print(f"Starting executor with {self.n_jobs} workers, tmpdir={self._tmpdir}")
+
+        # Accumulate all splits across repetitions for stacking
+        all_splits = []
+
+        try:
+            for repetition in range(self.n_repetitions):
+                print(f"[{perf_counter() - fit_start_time:.4f}s] Starting repetition {repetition}")
+
+                multirocket_start_time = perf_counter()
+                self.add_features(feature_type="multirocket", X=X)
+                multirocket_durration = perf_counter() - multirocket_start_time
+                print(
+                    f"[{perf_counter() - fit_start_time:.4f}s] Computed MultiRocket features in {multirocket_durration:.4f}s"
+                )
+
+                hydra_start_time = perf_counter()
+                self.add_features(feature_type="hydra", X=X)
+                hydra_durration = perf_counter() - hydra_start_time
+                print(
+                    f"[{perf_counter() - fit_start_time:.4f}s] Computed Hydra features in {hydra_durration:.4f}s"
+                )
+
+                rdst_start_time = perf_counter()
+                self.add_features(feature_type="rdst", X=X)
+                rdst_durration = perf_counter() - rdst_start_time
+                print(
+                    f"[{perf_counter() - fit_start_time:.4f}s] Computed RDST features in {rdst_durration:.4f}s"
+                )
+
+                current_splits = generate_folds(
+                    X, y, n_splits=self.k_folds, n_repetitions=1, random_state=self._get_feature_seed()
+                )
+                all_splits.extend(current_splits)
+
+                X_path, y_path, feature_manifest = self._save_feature_arrays(X, y)
+                self.feature_arrays = {}
+                print(f"[{perf_counter() - fit_start_time:.4f}s] Feature arrays saved to mmap files")
+
+                # Build list of tasks for this repetition
+                tasks = []
+                for model_name in self.feature_models + self.series_models:
+                    is_series = model_name in self.series_models
+                    for fold_number, (train_idx, val_idx) in enumerate(current_splits):
+                        model_seed = self._get_feature_seed()
+                        tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
+                                      X_path, y_path, feature_manifest))
+
+                n_workers = min(self.n_jobs, len(tasks))
+                print(f"[{perf_counter() - fit_start_time:.4f}s] Starting training with {n_workers} workers for {len(tasks)} models")
+
+                with ProcessPoolExecutor(
+                    max_workers=n_workers,
+                    mp_context=multiprocessing.get_context('spawn'),
+                ) as executor:
+                    futures = {
+                        executor.submit(_train_one_model_v6, *task): task
+                        for task in tasks
+                    }
+
+                    model_groups = {}
+                    for future in as_completed(futures):
+                        task = futures[future]
+                        fold_number, model_name = task[0], task[1]
+                        try:
+                            result = future.result()
+                        except Exception as e:
+                            raise RuntimeError(f"Worker failed during training {model_name} fold {fold_number}: {e}")
+
+                        train_idx, val_idx, proba, pickled_model, train_dur, model_name, fold_number = result
+                        print(
+                            f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name} in {train_dur:.4f}s for f-{fold_number}/r-{repetition}"
+                        )
+                        print(
+                            f"[{perf_counter() - fit_start_time:.4f}s] Pickled model size for {model_name}: {len(pickled_model) / (1024 * 1024):.2f} MB"
+                        )
+                        scaler, clf = pickle.loads(pickled_model)
+
+                        level = 0 if model_name in self.feature_models + self.series_models else 1
+                        for idx, p in zip(val_idx, proba):
+                            for scls, prob in zip(clf.classes_, p):
+                                d = {
+                                    "index": idx,
+                                    "model": model_name,
+                                    "repetition": repetition,
+                                    "level": level,
+                                    "class": scls.item(),
+                                    "probability": prob.item(),
+                                }
+                                self.predictions.append(d)
+
+                        if model_name not in model_groups:
+                            model_groups[model_name] = []
+                        model_groups[model_name].append((scaler, clf))
+
+                        if len(model_groups[model_name]) == self.k_folds:
+                            print(
+                                f"[{perf_counter() - fit_start_time:.4f}s] Completed training for model {model_name}"
+                            )
+
+                            self.trained_models_.append((model_name, model_groups[model_name]))
+                            del model_groups[model_name]
+
+                            oof_acc = self._compute_oof_accuracy(y, model_name)
+                            print(
+                                f"[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name}: {oof_acc}"
+                            )
+
+                print(f"[{perf_counter() - fit_start_time:.4f}s] Completed repetition {repetition}")
+
+            # Train stacking models only once after all repetitions
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Starting stacking model training (single pass)")
+
+            # Build probability array from level-0 predictions
+            prob_array = self._build_probability_array(n_samples=X.shape[0])
+
+            # Check for NaN values
+            if prob_array is None or np.isnan(prob_array).any():
+                print(f"[{perf_counter() - fit_start_time:.4f}s] NaN values detected in probability array, skipping stacking")
+                print(f"[{perf_counter() - fit_start_time:.4f}s] Falling back to MultiRocketHydraClassifier")
+                self.fallback_model = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
+                self.fallback_model.fit(X, y)
+                print(f"[{perf_counter() - fit_start_time:.4f}s] Fallback model trained successfully")
+                return
+
+            # Save probability array and update manifest
+            prob_path = f"{self._tmpdir}/Xt_probabilities.npy"
+            np.save(prob_path, prob_array)
+            stacking_manifest = {"probabilities": [prob_path]}
+
+            X_path, y_path = f"{self._tmpdir}/X.npy", f"{self._tmpdir}/y.npy"
+
+            for model_name in self.stacking_models:
+                tasks = []
+                is_series = model_name in self.series_models
+                for fold_number, (train_idx, val_idx) in enumerate(all_splits):
+                    model_seed = self._get_feature_seed()
+                    tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
+                                  X_path, y_path, stacking_manifest))
+
+                n_workers = min(self.n_jobs, len(tasks))
+                with ProcessPoolExecutor(
+                    max_workers=n_workers,
+                    mp_context=multiprocessing.get_context('spawn'),
+                ) as executor:
+                    futures = {
+                        executor.submit(_train_one_model_v6, *task): task
+                        for task in tasks
+                    }
+
+                    model_group = []
+                    for future in as_completed(futures):
+                        task = futures[future]
+                        fold_number, model_name_task = task[0], task[1]
+                        try:
+                            result = future.result()
+                        except Exception as e:
+                            raise RuntimeError(f"Worker failed during stacking training {model_name_task} fold {fold_number}: {e}")
+
+                        train_idx, val_idx, proba, pickled_model, train_dur, model_name_result, fold_number = result
+                        scaler, clf = pickle.loads(pickled_model)
+
+                        print(
+                            f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number}"
+                        )
+                        print(
+                            f"[{perf_counter() - fit_start_time:.4f}s] Pickled model size for {model_name_result}: {len(pickled_model) / (1024 * 1024):.2f} MB"
+                        )
+
+                        level = 1
+                        for idx, p in zip(val_idx, proba):
+                            for scls, prob in zip(clf.classes_, p):
+                                d = {
+                                    "index": idx,
+                                    "model": model_name_result,
+                                    "repetition": 0,
+                                    "level": level,
+                                    "class": scls.item(),
+                                    "probability": prob.item(),
+                                }
+                                self.predictions.append(d)
+                        model_group.append((scaler, clf))
+
+                self.trained_models_.append((model_name, model_group))
+
+                oof_acc = self._compute_oof_accuracy(y, model_name)
+                print(
+                    f"[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name}: {oof_acc}"
+                )
+
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Completed all repetitions and stacking")
+
+        finally:
+            # Clean up temp directory
+            if self._tmpdir and os.path.exists(self._tmpdir):
+                shutil.rmtree(self._tmpdir)
+                self._tmpdir = None
+            print("Executor shutdown complete")
+
+    def compute_features(self, X: np.ndarray) -> dict[str, np.ndarray]:
+        """Compute features for prediction, returning a dict of numpy arrays keyed by feature type."""
+        feature_dict = {}
+        for feature_type, transform in self.feature_transformers:
+            X_t = transform.transform(X)
+            if feature_type not in feature_dict:
+                feature_dict[feature_type] = []
+            feature_dict[feature_type].append(X_t)
+        return {k: np.hstack(v) if len(v) > 1 else v[0] for k, v in feature_dict.items()}
+
+    def predict_proba_per_model(self, X):
+        import shutil
+        predict_start_time = perf_counter()
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction")
+
+        # Create temp directory for mmap files
+        self._tmpdir = tempfile.mkdtemp(prefix="loky_stacker_v6_pred_")
+        print(f"Starting executor with {self.n_jobs} workers, tmpdir={self._tmpdir}")
+
+        try:
+            feature_dict = self.compute_features(X)
+            print(f"[{perf_counter() - predict_start_time:.4f}s] Computed features for prediction")
+
+            # Save feature arrays to mmap
+            X_path = f"{self._tmpdir}/X.npy"
+            np.save(X_path, X)
+            feature_manifest = {}
+            for feat_type, arr in feature_dict.items():
+                path = f"{self._tmpdir}/Xt_{feat_type}.npy"
+                np.save(path, arr)
+                feature_manifest[feat_type] = [path]
+            print(f"[{perf_counter() - predict_start_time:.4f}s] Feature arrays saved to mmap files")
+
+            predictions = []
+
+            first_level_models = [(model_name, model_group) for model_name, model_group in self.trained_models_
+                                  if model_name in self.feature_models + self.series_models]
+
+            # Build tasks for first-level models
+            tasks = []
+            for model_name, model_group in reversed(first_level_models):
+                is_series = model_name in self.series_models
+                for scaler, clf in model_group:
+                    tasks.append((model_name, pickle.dumps((scaler, clf)), is_series,
+                                  X_path, feature_manifest))
+
+            n_workers = min(self.n_jobs, len(tasks))
+            print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction with {n_workers} workers for {len(tasks)} first-level models")
+
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                mp_context=multiprocessing.get_context('spawn'),
+            ) as executor:
+                futures = {
+                    executor.submit(_predict_one_model_v6, *task): task
+                    for task in tasks
+                }
+
+                for future in as_completed(futures):
+                    task = futures[future]
+                    model_name_task = task[0]
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        raise RuntimeError(f"Worker failed during prediction {model_name_task}: {e}")
+
+                    proba, classes_, predict_dur, model_name = result
+                    print(
+                        f"[{perf_counter() - predict_start_time:.4f}s] Predicted {model_name} in {predict_dur:.4f}s"
+                    )
+
+                    level = 0
+                    pred_list = self.add_probabilities(proba, classes_, model_name, level)
+                    predictions.extend(pred_list)
+
+            print(f"[{perf_counter() - predict_start_time:.4f}s] Completed all first-level model predictions")
+
+            # Build probability array from level-0 predictions for stacking
+            if self._tmpdir and os.path.exists(self._tmpdir):
+                shutil.rmtree(self._tmpdir)
+            self._tmpdir = tempfile.mkdtemp(prefix="loky_stacker_v6_pred_stack_")
+
+            # Pivot level-0 predictions into probability array
+            df = (
+                pl.DataFrame(predictions)
+                .pivot(
+                    values="probability",
+                    index="index",
+                    on=["level", "model", "class"],
+                    aggregate_function="mean",
+                )
+                .sort("index")
+            )
+            # Use same sorted column order as training to ensure scaler alignment
+            prob_cols = sorted(c for c in df.columns if c != "index")
+            prob_array = df.select(prob_cols).to_numpy()
+
+            X_path = f"{self._tmpdir}/X.npy"
+            np.save(X_path, X)
+            prob_path = f"{self._tmpdir}/Xt_probabilities.npy"
+            np.save(prob_path, prob_array)
+            stacking_manifest = {"probabilities": [prob_path]}
+
+            stacking_models = [(model_name, model_group) for model_name, model_group in self.trained_models_
+                               if model_name in self.stacking_models]
+
+            # Build tasks for stacking models
+            tasks = []
+            for model_name, model_group in reversed(stacking_models):
+                is_series = model_name in self.series_models
+                for scaler, clf in model_group:
+                    tasks.append((model_name, pickle.dumps((scaler, clf)), is_series,
+                                  X_path, stacking_manifest))
+
+            n_workers = min(self.n_jobs, len(tasks))
+            print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction with {n_workers} workers for {len(tasks)} stacking models")
+
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                mp_context=multiprocessing.get_context('spawn'),
+            ) as executor:
+                futures = {
+                    executor.submit(_predict_one_model_v6, *task): task
+                    for task in tasks
+                }
+
+                for future in as_completed(futures):
+                    task = futures[future]
+                    model_name_task = task[0]
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        raise RuntimeError(f"Worker failed during stacking prediction {model_name_task}: {e}")
+
+                    proba, classes_, predict_dur, model_name = result
+                    print(
+                        f"[{perf_counter() - predict_start_time:.4f}s] Predicted {model_name} in {predict_dur:.4f}s"
+                    )
+
+                    level = 1
+                    pred_list = self.add_probabilities(proba, classes_, model_name, level)
+                    predictions.extend(pred_list)
+
+            print(f"[{perf_counter() - predict_start_time:.4f}s] Completed all stacking model predictions")
+
+            # Build return dict: average probabilities per model across folds
+            all_preds_df = (
+                pl.DataFrame(predictions)
+                .pivot(
+                    values="probability",
+                    index="index",
+                    on=["level", "model", "class"],
+                    aggregate_function="mean",
+                )
+                .sort("index")
+            )
+            return_dict = {}
+            for model_name, _ in self.trained_models_:
+                prob_columns = sorted(col for col in all_preds_df.columns if model_name in col)
+                agg_probs = all_preds_df.select(prob_columns)
+                return_dict[model_name] = agg_probs.to_numpy()
+
+            return return_dict
+
+        finally:
+            # Clean up temp directory
+            if self._tmpdir and os.path.exists(self._tmpdir):
+                shutil.rmtree(self._tmpdir)
+                self._tmpdir = None
+            print("Executor shutdown complete")
+
+
+class LokyStackerV6SoftET(LokyStackerV6):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
+
+        self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+
+        stacking_model = "probability-et"
+        self.stacking_models = [stacking_model]
+        self.best_model = stacking_model
+
+
+class LokyStackerV6SoftRidge(LokyStackerV6):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
+
+        self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+
+        stacking_model = "probability-ridgecv"
+        self.stacking_models = [stacking_model]
+        self.best_model = stacking_model
+
+
+class LokyStackerV6SoftRF(LokyStackerV6):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
+
+        self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+
+        stacking_model = "probability-rf"
+        self.stacking_models = [stacking_model]
+        self.best_model = stacking_model
 
 
 def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
@@ -1659,6 +2339,39 @@ class MultiScaler(BaseEstimator, TransformerMixin):
         return np.array(self.output_cols_)
 
 
+class DictMultiScaler(BaseEstimator, TransformerMixin):
+    """
+    Like MultiScaler but receives a dict of numpy arrays keyed by feature group name.
+
+    Parameters
+    ----------
+    scalers : dict
+        Maps feature group name to scaler instance.
+        Example: {'hydra': SparseScaler(), 'multirocket': StandardScaler()}
+    """
+
+    def __init__(self, scalers):
+        self.scalers = scalers
+
+    def fit(self, X: dict[str, np.ndarray], y=None):
+        self.scalers_ = {}
+        for key, scaler in self.scalers.items():
+            if key in X:
+                self.scalers_[key] = scaler
+                scaler.fit(X[key])
+        return self
+
+    def transform(self, X: dict[str, np.ndarray]):
+        parts = []
+        for key in self.scalers_:
+            if key in X:
+                parts.append(self.scalers_[key].transform(X[key]))
+        return np.hstack(parts) if parts else np.empty((next(iter(X.values())).shape[0], 0))
+
+    def fit_transform(self, X: dict[str, np.ndarray], y=None):
+        return self.fit(X, y).transform(X)
+
+
 class NoScaler(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
         return self
@@ -1678,3 +2391,19 @@ class RidgeClassifierCVIndicator(RidgeClassifierCV):
     def fit(self, X, y):
         with threadpool_limits(limits=1):
             return super().fit(X, y)
+
+from sklearn.utils.extmath import softmax
+
+class RidgeClassifierCVDecisionProba(RidgeClassifierCV):
+    def fit(self, X, y):
+        with threadpool_limits(limits=1):
+            return super().fit(X, y)
+
+    def predict_proba(self, X):
+        scores = self.decision_function(X)
+
+        # binary case: decision_function returns shape (n_samples,)
+        if scores.ndim == 1:
+            scores = np.vstack([-scores, scores]).T
+
+        return softmax(scores)

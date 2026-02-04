@@ -1,0 +1,232 @@
+import os
+import re
+import random
+from itertools import product
+from urllib.parse import urlparse
+
+import boto3
+import click
+import numpy as np
+import polars as pl
+from botocore.exceptions import ClientError
+from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
+from sklearn.linear_model import RidgeClassifierCV
+from sklearn.metrics import accuracy_score
+from sklearn.pipeline import Pipeline
+
+from autotsc.data_loader import DATA_DIR, load_fold
+from autotsc.gpu_models import MRHydraClassifier
+from autotsc.models import (
+    LokyStackerV5,
+    LokyStackerV5SoftET,
+    LokyStackerV5SoftRidge,
+    LokyStackerV5SoftRF,
+    LokyStackerV6,
+    LokyStackerV6SoftET,
+    LokyStackerV6SoftRidge,
+    LokyStackerV6SoftRF,
+)
+
+
+def s3_file_exists(s3_uri: str) -> bool:
+    s3 = boto3.client("s3")
+    parsed = urlparse(s3_uri)
+    bucket = parsed.netloc
+    key = parsed.path.lstrip("/")
+
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "404":
+            return False
+        raise
+
+
+def optimal_k(n_train, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
+    return int(k_min + (k_max - k_min) / (1 + np.exp(-steepness * (n_train - midpoint))))
+
+
+def get_model(model_name, random_state, n_train=None):
+    if model_name == "loky-stacker-v5-r1":
+        return LokyStackerV5(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v5-r3":
+        return LokyStackerV5(random_state=random_state, n_repetitions=3, n_jobs=8)
+    elif model_name == "loky-stacker-v5-soft-et":
+        return LokyStackerV5SoftET(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v5-soft-ridge":
+        return LokyStackerV5SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v5-soft-rf":
+        return LokyStackerV5SoftRF(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v6":
+        return LokyStackerV6(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v6-soft-et":
+        return LokyStackerV6SoftET(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v6-soft-ridge":
+        return LokyStackerV6SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v6-soft-rf":
+        return LokyStackerV6SoftRF(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "mr-hydra-kbest-auto":
+        if n_train is None:
+            raise ValueError("n_train is required for mr-hydra-kbest-auto")
+        k = optimal_k(n_train)
+        e = Pipeline([
+            ("var", VarianceThreshold()),
+            ("select", SelectKBest(f_classif, k=k)),
+            ("clf", RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))),
+        ])
+        return MRHydraClassifier(estimator=e, n_jobs=16, random_state=random_state)
+    elif model_name.startswith("mr-hydra-kbest-"):
+        k = int(model_name.split("-")[-1])
+        e = Pipeline([
+            ("var", VarianceThreshold()),
+            ("select", SelectKBest(f_classif, k=k)),
+            ("clf", RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))),
+        ])
+        return MRHydraClassifier(estimator=e, n_jobs=16, random_state=random_state)
+    else:
+        raise ValueError(f"Unknown model name: {model_name}")
+
+
+ALL_MODELS = [
+    "loky-stacker-v5-r1",
+    "loky-stacker-v5-soft-et",
+    "loky-stacker-v5-soft-ridge",
+    "loky-stacker-v5-soft-rf",
+    "loky-stacker-v6",
+    "loky-stacker-v6-soft-et",
+    "loky-stacker-v6-soft-ridge",
+    "loky-stacker-v6-soft-rf",
+    "mr-hydra-kbest-5000",
+    "mr-hydra-kbest-10000",
+    "mr-hydra-kbest-30000",
+    "mr-hydra-kbest-auto",
+]
+
+
+def discover_datasets():
+    """Return sorted list of dataset names found in data/."""
+    return sorted(
+        d for d in os.listdir(DATA_DIR)
+        if os.path.isdir(os.path.join(DATA_DIR, d))
+    )
+
+
+def discover_folds(dataset_name: str) -> list[int]:
+    """Return sorted list of fold numbers available for a dataset."""
+    dataset_dir = os.path.join(DATA_DIR, dataset_name)
+    pattern = re.compile(rf"^{re.escape(dataset_name)}(\d+)_TRAIN\.ts$")
+    folds = []
+    for fname in os.listdir(dataset_dir):
+        m = pattern.match(fname)
+        if m:
+            folds.append(int(m.group(1)))
+    return sorted(folds)
+
+
+@click.command()
+@click.option("-m", "--models", multiple=True, help="Models to run (can be specified multiple times or comma-separated)")
+@click.option("-d", "--datasets", "dataset_names", multiple=True, help="Datasets to run (can be specified multiple times or comma-separated)")
+@click.option("-f", "--folds", "fold_spec", default=None, help="Folds to run (comma-separated, e.g. '0,1,2'). Default: all available folds.")
+@click.option("-l", "--list-models", is_flag=True, help="List all available models and exit")
+@click.option("--list-datasets", is_flag=True, help="List all available datasets and exit")
+def main(models, dataset_names, fold_spec, list_models, list_datasets):
+    """Run loky stacking experiments on local fold datasets."""
+    all_datasets = discover_datasets()
+
+    if list_models:
+        click.echo("Available models:")
+        for model in ALL_MODELS:
+            click.echo(f"  - {model}")
+        return
+
+    if list_datasets:
+        click.echo("Available datasets:")
+        for ds in all_datasets:
+            folds = discover_folds(ds)
+            click.echo(f"  - {ds} ({len(folds)} folds)")
+        return
+
+    # Determine which models to run
+    if models:
+        model_list = []
+        for m in models:
+            model_list.extend([x.strip() for x in m.split(",")])
+        invalid_models = [m for m in model_list if m not in ALL_MODELS]
+        if invalid_models:
+            click.echo(f"Error: Unknown models: {', '.join(invalid_models)}", err=True)
+            click.echo("Use -l to list available models", err=True)
+            raise click.Abort()
+        model_names = model_list
+    else:
+        model_names = ALL_MODELS
+    click.echo(f"Running models: {', '.join(model_names)}")
+
+    # Determine which datasets to run
+    if dataset_names:
+        dataset_list = []
+        for d in dataset_names:
+            dataset_list.extend([x.strip() for x in d.split(",")])
+        invalid_datasets = [d for d in dataset_list if d not in all_datasets]
+        if invalid_datasets:
+            click.echo(f"Error: Unknown datasets: {', '.join(invalid_datasets)}", err=True)
+            click.echo("Use --list-datasets to list available datasets", err=True)
+            raise click.Abort()
+        datasets = dataset_list
+    else:
+        datasets = all_datasets
+    click.echo(f"Running datasets: {', '.join(datasets)}")
+
+    # Parse fold spec
+    requested_folds = None
+    if fold_spec is not None:
+        requested_folds = [int(x.strip()) for x in fold_spec.split(",")]
+
+    write_dir = "s3://tsc-glue/performance-benchmarking"
+
+    # Build all (dataset, model, fold) combos
+    combos = []
+    for dataset in datasets:
+        folds = requested_folds if requested_folds is not None else list(range(30))
+        for model_name, fold in product(model_names, folds):
+            combos.append((dataset, model_name, fold))
+
+    random.shuffle(combos)
+
+    n = len(combos)
+    click.echo(f"Total combinations: {n}")
+
+    for k, (dataset, model_name, fold) in enumerate(combos, 1):
+        try:
+            stats = {
+                "dataset": dataset,
+                "model": model_name,
+                "fold": fold,
+            }
+
+            hash_val = pl.DataFrame([stats]).hash_rows(seed=42, seed_1=1, seed_2=2, seed_3=3).item()
+            file = f"{write_dir}/{hash_val}.parquet"
+
+            if s3_file_exists(file):
+                print(f"[{k}/{n}] Skipping: Dataset={dataset}, Fold={fold}, Model={model_name}")
+                continue
+            else:
+                print(f"[{k}/{n}] Processing: Dataset={dataset}, Fold={fold}, Model={model_name}")
+
+            X_train, y_train, X_test, y_test = load_fold(dataset, fold)
+
+            model = get_model(model_name, random_state=fold, n_train=len(X_train))
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
+            acc = accuracy_score(y_test, preds)
+
+            stats["test_accuracy"] = acc
+
+            df_stat = pl.DataFrame([stats])
+            df_stat.write_parquet(file)
+        except Exception as e:
+            print(f"Error processing Dataset={dataset}, Fold={fold}, Model={model_name}: {e}")
+
+
+if __name__ == "__main__":
+    main()

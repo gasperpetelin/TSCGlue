@@ -29,3 +29,7 @@ build/
 
 # uv lock file (library - not needed in git)
 uv.lock
+
+# Data
+data/
+figures/

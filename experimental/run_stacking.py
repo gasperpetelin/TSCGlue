@@ -28,7 +28,7 @@ from sklearn.metrics import accuracy_score
 from catboost import CatBoostClassifier
 
 from autotsc import transformers, utils
-from autotsc.models import StackerV4, LokyStackerV5
+from autotsc.models import StackerV4, LokyStackerV5, LokyStackerV5SoftET, LokyStackerV5SoftRidge, LokyStackerV5SoftRF
 
 
 def s3_file_exists(s3_uri: str) -> bool:
@@ -72,6 +72,12 @@ def get_model(model_name, random_state):
         return LokyStackerV5(random_state=random_state, n_repetitions=1, n_jobs=8)
     elif model_name == "loky-stacker-v5-r3":
         return LokyStackerV5(random_state=random_state, n_repetitions=3, n_jobs=8)
+    elif model_name == "loky-stacker-v5-soft-et":
+        return LokyStackerV5SoftET(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v5-soft-ridge":
+        return LokyStackerV5SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v5-soft-rf":
+        return LokyStackerV5SoftRF(random_state=random_state, n_repetitions=1, n_jobs=8)
     elif model_name == "catch22":
         return Catch22Classifier(n_jobs=16)
     elif model_name == "drcif":
@@ -143,6 +149,7 @@ def get_model(model_name, random_state):
 ALL_MODELS = [
     "rstsf", "mr-hydra", "quant", "rdst", "catch22", "drcif", "u-rstsf",
     "loky-stacker-v5-r1", "hivecotev2", # "loky-stacker-v5-r3"
+    "loky-stacker-v5-soft-et", "loky-stacker-v5-soft-ridge", "loky-stacker-v5-soft-rf",
     "cumsum-mr-hydra", "scale-mr-hydra", "polar-angle-mr-hydra", "polar-magnitude-mr-hydra",
     "rank-mr-hydra", "difference-mr-hydra", "downsample-mr-hydra",
     "mr-hydra-baseline", "mr-hydra-sgd",
