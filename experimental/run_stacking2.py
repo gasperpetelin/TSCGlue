@@ -218,6 +218,8 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets):
             model = get_model(model_name, random_state=fold, n_train=len(X_train))
             model.fit(X_train, y_train)
             preds = model.predict(X_test)
+            if hasattr(model, "cleanup"):
+                model.cleanup()
             acc = accuracy_score(y_test, preds)
 
             stats["test_accuracy"] = acc

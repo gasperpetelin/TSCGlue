@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import uuid
 
 os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 import numpy as np
@@ -835,8 +836,8 @@ def _load_feature_dict(feature_manifest):
 
 
 def _train_one_model_v6(fold_number, model_name, is_series, train_idx, val_idx, model_seed,
-                         X_path, y_path, feature_manifest):
-    """Training function for V6 - loads mmap data per task, no global state."""
+                         X_path, y_path, feature_manifest, save_path):
+    """Training function for V6 - loads mmap data per task, saves model to disk."""
     X = np.load(X_path, mmap_mode='r')
     y = np.load(y_path, mmap_mode='r')
     feature_dict = _load_feature_dict(feature_manifest)
@@ -847,7 +848,8 @@ def _train_one_model_v6(fold_number, model_name, is_series, train_idx, val_idx, 
     if is_series:
         clf.fit(X[train_idx], y[train_idx])
         proba = clf.predict_proba(X[val_idx])
-        pickled = pickle.dumps((None, clf))
+        with open(save_path, 'wb') as f:
+            pickle.dump((None, clf), f)
     else:
         train_dict = {k: v[train_idx] for k, v in feature_dict.items()}
         val_dict = {k: v[val_idx] for k, v in feature_dict.items()}
@@ -855,18 +857,21 @@ def _train_one_model_v6(fold_number, model_name, is_series, train_idx, val_idx, 
         X_val = scaler.transform(val_dict)
         clf.fit(X_train, y[train_idx])
         proba = clf.predict_proba(X_val)
-        pickled = pickle.dumps((scaler, clf))
+        with open(save_path, 'wb') as f:
+            pickle.dump((scaler, clf), f)
 
+    model_size = os.path.getsize(save_path)
     train_dur = perf_counter() - start_train
-    return (train_idx, val_idx, proba, pickled, train_dur, model_name, fold_number)
+    return (train_idx, val_idx, proba, clf.classes_, model_size, train_dur, model_name, fold_number)
 
 
-def _predict_one_model_v6(model_name, pickled_model, is_series, X_path, feature_manifest):
-    """Prediction function for V6 - loads mmap data per task, no global state."""
+def _predict_one_model_v6(model_name, model_path, is_series, X_path, feature_manifest):
+    """Prediction function for V6 - loads model from disk, loads mmap data per task."""
     X = np.load(X_path, mmap_mode='r')
     feature_dict = _load_feature_dict(feature_manifest)
 
-    scaler, clf = pickle.loads(pickled_model)
+    with open(model_path, 'rb') as f:
+        scaler, clf = pickle.load(f)
     start_predict = perf_counter()
 
     if is_series:
@@ -1457,36 +1462,35 @@ class LokyStackerV6(LokyStackerV5):
             random_state=random_state, n_repetitions=n_repetitions,
             k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs,
         )
-        self.feature_arrays = {}  # dict: str -> list[np.ndarray], per type per repetition
+        self._feature_manifest = {}  # dict: str -> list[str], feature type -> list of .npy paths
+        self._run_id = None
+        self._base_dir = None  # ./tscglue/<run_id>
+        self._model_dir = None  # ./tscglue/<run_id>/models
+        self._tmpdir = None  # ./tscglue/<run_id>/features
 
-    def add_features(self, feature_type: str, X: np.ndarray):
+    def calculate_features(self, feature_type: str, X: np.ndarray, repetition: int):
         transform = self.get_next_feature_transformer(feature_type=feature_type, n_jobs=self.n_jobs)
         transform.fit(X)
         X_t = transform.transform(X)
         self.feature_transformers.append((feature_type, transform))
-        if feature_type not in self.feature_arrays:
-            self.feature_arrays[feature_type] = []
-        self.feature_arrays[feature_type].append(np.asarray(X_t, dtype=np.float64))
 
-    def _save_feature_arrays(self, X, y):
-        """Save X, y, and per-type per-repetition feature arrays to mmap files.
+        # Dump directly to disk
+        path = f"{self._tmpdir}/Xt_{feature_type}_r{repetition}.npy"
+        arr = np.asarray(X_t, dtype=np.float64)
+        np.save(path, arr)
 
-        Returns (X_path, y_path, feature_manifest) where feature_manifest maps
-        feature type to list of .npy file paths.
-        """
+        if feature_type not in self._feature_manifest:
+            self._feature_manifest[feature_type] = []
+        self._feature_manifest[feature_type].append(path)
+        return arr.shape, os.path.getsize(path) / (1024 * 1024)
+
+    def _save_Xy(self, X, y):
+        """Save X and y to mmap files. Returns (X_path, y_path)."""
         X_path = f"{self._tmpdir}/X.npy"
         y_path = f"{self._tmpdir}/y.npy"
         np.save(X_path, X)
         np.save(y_path, y)
-        feature_manifest = {}
-        for feat_type, arrays in self.feature_arrays.items():
-            paths = []
-            for i, arr in enumerate(arrays):
-                path = f"{self._tmpdir}/Xt_{feat_type}_r{i}.npy"
-                np.save(path, arr)
-                paths.append(path)
-            feature_manifest[feat_type] = paths
-        return X_path, y_path, feature_manifest
+        return X_path, y_path
 
     def _build_probability_array(self, n_samples):
         """Build a numpy array from level-0 OOF predictions and save as mmap.
@@ -1538,7 +1542,7 @@ class LokyStackerV6(LokyStackerV5):
 
         self.predictions = []
         self.trained_models_ = []
-        self.feature_arrays = {}
+        self._feature_manifest = {}
         self.feature_transformers = []
 
         if self.cv_splits is None:
@@ -1555,16 +1559,25 @@ class LokyStackerV6(LokyStackerV5):
             print(f"[{perf_counter() - fit_start_time:.4f}s] Fallback model trained successfully")
             return
 
+        # Create run directory: ./tscglue/<run_id>/{models,features}
+        if self._base_dir and os.path.exists(self._base_dir):
+            shutil.rmtree(self._base_dir)
+        self._run_id = uuid.uuid4().hex[:16]
+        self._base_dir = os.path.join(".", "tscglue", self._run_id)
+        self._model_dir = os.path.join(self._base_dir, "models")
+        self._tmpdir = os.path.join(self._base_dir, "features")
+        os.makedirs(self._model_dir, exist_ok=True)
+        os.makedirs(self._tmpdir, exist_ok=True)
+        print(f"Starting executor with {self.n_jobs} workers, run_dir={self._base_dir}")
+
         quant_start_time = perf_counter()
-        self.add_features(feature_type="quant", X=X)
+        shape, size_mb = self.calculate_features(feature_type="quant", X=X, repetition=0)
         quant_durration = perf_counter() - quant_start_time
         print(
-            f"[{perf_counter() - fit_start_time:.4f}s] Computed QUANT features in {quant_durration:.4f}s"
+            f"[{perf_counter() - fit_start_time:.4f}s] Computed QUANT features {shape} ({size_mb:.2f} MB) in {quant_durration:.4f}s"
         )
 
-        # Create temp directory for mmap files
-        self._tmpdir = tempfile.mkdtemp(prefix="loky_stacker_v6_")
-        print(f"Starting executor with {self.n_jobs} workers, tmpdir={self._tmpdir}")
+        X_path, y_path = self._save_Xy(X, y)
 
         # Accumulate all splits across repetitions for stacking
         all_splits = []
@@ -1574,24 +1587,24 @@ class LokyStackerV6(LokyStackerV5):
                 print(f"[{perf_counter() - fit_start_time:.4f}s] Starting repetition {repetition}")
 
                 multirocket_start_time = perf_counter()
-                self.add_features(feature_type="multirocket", X=X)
+                shape, size_mb = self.calculate_features(feature_type="multirocket", X=X, repetition=repetition)
                 multirocket_durration = perf_counter() - multirocket_start_time
                 print(
-                    f"[{perf_counter() - fit_start_time:.4f}s] Computed MultiRocket features in {multirocket_durration:.4f}s"
+                    f"[{perf_counter() - fit_start_time:.4f}s] Computed MultiRocket features {shape} ({size_mb:.2f} MB) in {multirocket_durration:.4f}s"
                 )
 
                 hydra_start_time = perf_counter()
-                self.add_features(feature_type="hydra", X=X)
+                shape, size_mb = self.calculate_features(feature_type="hydra", X=X, repetition=repetition)
                 hydra_durration = perf_counter() - hydra_start_time
                 print(
-                    f"[{perf_counter() - fit_start_time:.4f}s] Computed Hydra features in {hydra_durration:.4f}s"
+                    f"[{perf_counter() - fit_start_time:.4f}s] Computed Hydra features {shape} ({size_mb:.2f} MB) in {hydra_durration:.4f}s"
                 )
 
                 rdst_start_time = perf_counter()
-                self.add_features(feature_type="rdst", X=X)
+                shape, size_mb = self.calculate_features(feature_type="rdst", X=X, repetition=repetition)
                 rdst_durration = perf_counter() - rdst_start_time
                 print(
-                    f"[{perf_counter() - fit_start_time:.4f}s] Computed RDST features in {rdst_durration:.4f}s"
+                    f"[{perf_counter() - fit_start_time:.4f}s] Computed RDST features {shape} ({size_mb:.2f} MB) in {rdst_durration:.4f}s"
                 )
 
                 current_splits = generate_folds(
@@ -1599,9 +1612,7 @@ class LokyStackerV6(LokyStackerV5):
                 )
                 all_splits.extend(current_splits)
 
-                X_path, y_path, feature_manifest = self._save_feature_arrays(X, y)
-                self.feature_arrays = {}
-                print(f"[{perf_counter() - fit_start_time:.4f}s] Feature arrays saved to mmap files")
+                feature_manifest = dict(self._feature_manifest)
 
                 # Build list of tasks for this repetition
                 tasks = []
@@ -1609,8 +1620,9 @@ class LokyStackerV6(LokyStackerV5):
                     is_series = model_name in self.series_models
                     for fold_number, (train_idx, val_idx) in enumerate(current_splits):
                         model_seed = self._get_feature_seed()
+                        save_path = f"{self._model_dir}/{model_name}_r{repetition}_f{fold_number}.pkl"
                         tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
-                                      X_path, y_path, feature_manifest))
+                                      X_path, y_path, feature_manifest, save_path))
 
                 n_workers = min(self.n_jobs, len(tasks))
                 print(f"[{perf_counter() - fit_start_time:.4f}s] Starting training with {n_workers} workers for {len(tasks)} models")
@@ -1628,23 +1640,20 @@ class LokyStackerV6(LokyStackerV5):
                     for future in as_completed(futures):
                         task = futures[future]
                         fold_number, model_name = task[0], task[1]
+                        save_path = task[-1]
                         try:
                             result = future.result()
                         except Exception as e:
                             raise RuntimeError(f"Worker failed during training {model_name} fold {fold_number}: {e}")
 
-                        train_idx, val_idx, proba, pickled_model, train_dur, model_name, fold_number = result
+                        train_idx, val_idx, proba, classes_, model_size, train_dur, model_name, fold_number = result
                         print(
-                            f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name} in {train_dur:.4f}s for f-{fold_number}/r-{repetition}"
+                            f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name} in {train_dur:.4f}s for f-{fold_number}/r-{repetition} ({model_size / (1024 * 1024):.2f} MB)"
                         )
-                        print(
-                            f"[{perf_counter() - fit_start_time:.4f}s] Pickled model size for {model_name}: {len(pickled_model) / (1024 * 1024):.2f} MB"
-                        )
-                        scaler, clf = pickle.loads(pickled_model)
 
                         level = 0 if model_name in self.feature_models + self.series_models else 1
                         for idx, p in zip(val_idx, proba):
-                            for scls, prob in zip(clf.classes_, p):
+                            for scls, prob in zip(classes_, p):
                                 d = {
                                     "index": idx,
                                     "model": model_name,
@@ -1657,7 +1666,7 @@ class LokyStackerV6(LokyStackerV5):
 
                         if model_name not in model_groups:
                             model_groups[model_name] = []
-                        model_groups[model_name].append((scaler, clf))
+                        model_groups[model_name].append(save_path)
 
                         if len(model_groups[model_name]) == self.k_folds:
                             print(
@@ -1701,8 +1710,9 @@ class LokyStackerV6(LokyStackerV5):
                 is_series = model_name in self.series_models
                 for fold_number, (train_idx, val_idx) in enumerate(all_splits):
                     model_seed = self._get_feature_seed()
+                    save_path = f"{self._model_dir}/{model_name}_stacking_f{fold_number}.pkl"
                     tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
-                                  X_path, y_path, stacking_manifest))
+                                  X_path, y_path, stacking_manifest, save_path))
 
                 n_workers = min(self.n_jobs, len(tasks))
                 with ProcessPoolExecutor(
@@ -1718,24 +1728,21 @@ class LokyStackerV6(LokyStackerV5):
                     for future in as_completed(futures):
                         task = futures[future]
                         fold_number, model_name_task = task[0], task[1]
+                        save_path = task[-1]
                         try:
                             result = future.result()
                         except Exception as e:
                             raise RuntimeError(f"Worker failed during stacking training {model_name_task} fold {fold_number}: {e}")
 
-                        train_idx, val_idx, proba, pickled_model, train_dur, model_name_result, fold_number = result
-                        scaler, clf = pickle.loads(pickled_model)
+                        train_idx, val_idx, proba, classes_, model_size, train_dur, model_name_result, fold_number = result
 
                         print(
-                            f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number}"
-                        )
-                        print(
-                            f"[{perf_counter() - fit_start_time:.4f}s] Pickled model size for {model_name_result}: {len(pickled_model) / (1024 * 1024):.2f} MB"
+                            f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number} ({model_size / (1024 * 1024):.2f} MB)"
                         )
 
                         level = 1
                         for idx, p in zip(val_idx, proba):
-                            for scls, prob in zip(clf.classes_, p):
+                            for scls, prob in zip(classes_, p):
                                 d = {
                                     "index": idx,
                                     "model": model_name_result,
@@ -1745,7 +1752,7 @@ class LokyStackerV6(LokyStackerV5):
                                     "probability": prob.item(),
                                 }
                                 self.predictions.append(d)
-                        model_group.append((scaler, clf))
+                        model_group.append(save_path)
 
                 self.trained_models_.append((model_name, model_group))
 
@@ -1778,9 +1785,10 @@ class LokyStackerV6(LokyStackerV5):
         predict_start_time = perf_counter()
         print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction")
 
-        # Create temp directory for mmap files
-        self._tmpdir = tempfile.mkdtemp(prefix="loky_stacker_v6_pred_")
-        print(f"Starting executor with {self.n_jobs} workers, tmpdir={self._tmpdir}")
+        # Create features directory for mmap files
+        self._tmpdir = os.path.join(self._base_dir, "features")
+        os.makedirs(self._tmpdir, exist_ok=True)
+        print(f"Starting executor with {self.n_jobs} workers, run_dir={self._base_dir}")
 
         try:
             feature_dict = self.compute_features(X)
@@ -1803,10 +1811,10 @@ class LokyStackerV6(LokyStackerV5):
 
             # Build tasks for first-level models
             tasks = []
-            for model_name, model_group in reversed(first_level_models):
+            for model_name, model_paths in reversed(first_level_models):
                 is_series = model_name in self.series_models
-                for scaler, clf in model_group:
-                    tasks.append((model_name, pickle.dumps((scaler, clf)), is_series,
+                for model_path in model_paths:
+                    tasks.append((model_name, model_path, is_series,
                                   X_path, feature_manifest))
 
             n_workers = min(self.n_jobs, len(tasks))
@@ -1843,7 +1851,8 @@ class LokyStackerV6(LokyStackerV5):
             # Build probability array from level-0 predictions for stacking
             if self._tmpdir and os.path.exists(self._tmpdir):
                 shutil.rmtree(self._tmpdir)
-            self._tmpdir = tempfile.mkdtemp(prefix="loky_stacker_v6_pred_stack_")
+            self._tmpdir = os.path.join(self._base_dir, "features")
+            os.makedirs(self._tmpdir, exist_ok=True)
 
             # Pivot level-0 predictions into probability array
             df = (
@@ -1871,10 +1880,544 @@ class LokyStackerV6(LokyStackerV5):
 
             # Build tasks for stacking models
             tasks = []
-            for model_name, model_group in reversed(stacking_models):
+            for model_name, model_paths in reversed(stacking_models):
                 is_series = model_name in self.series_models
-                for scaler, clf in model_group:
-                    tasks.append((model_name, pickle.dumps((scaler, clf)), is_series,
+                for model_path in model_paths:
+                    tasks.append((model_name, model_path, is_series,
+                                  X_path, stacking_manifest))
+
+            n_workers = min(self.n_jobs, len(tasks))
+            print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction with {n_workers} workers for {len(tasks)} stacking models")
+
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                mp_context=multiprocessing.get_context('spawn'),
+            ) as executor:
+                futures = {
+                    executor.submit(_predict_one_model_v6, *task): task
+                    for task in tasks
+                }
+
+                for future in as_completed(futures):
+                    task = futures[future]
+                    model_name_task = task[0]
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        raise RuntimeError(f"Worker failed during stacking prediction {model_name_task}: {e}")
+
+                    proba, classes_, predict_dur, model_name = result
+                    print(
+                        f"[{perf_counter() - predict_start_time:.4f}s] Predicted {model_name} in {predict_dur:.4f}s"
+                    )
+
+                    level = 1
+                    pred_list = self.add_probabilities(proba, classes_, model_name, level)
+                    predictions.extend(pred_list)
+
+            print(f"[{perf_counter() - predict_start_time:.4f}s] Completed all stacking model predictions")
+
+            # Build return dict: average probabilities per model across folds
+            all_preds_df = (
+                pl.DataFrame(predictions)
+                .pivot(
+                    values="probability",
+                    index="index",
+                    on=["level", "model", "class"],
+                    aggregate_function="mean",
+                )
+                .sort("index")
+            )
+            return_dict = {}
+            for model_name, _ in self.trained_models_:
+                prob_columns = sorted(col for col in all_preds_df.columns if model_name in col)
+                agg_probs = all_preds_df.select(prob_columns)
+                return_dict[model_name] = agg_probs.to_numpy()
+
+            return return_dict
+
+        finally:
+            # Clean up temp directory
+            if self._tmpdir and os.path.exists(self._tmpdir):
+                shutil.rmtree(self._tmpdir)
+                self._tmpdir = None
+            print("Executor shutdown complete")
+
+    def cleanup(self):
+        """Remove saved models and features from disk."""
+        import shutil
+        if self._base_dir and os.path.exists(self._base_dir):
+            shutil.rmtree(self._base_dir)
+        self._base_dir = None
+        self._model_dir = None
+        self._tmpdir = None
+        self._run_id = None
+
+
+class LokyStackerV6SoftET(LokyStackerV6):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
+
+        self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+
+        stacking_model = "probability-et"
+        self.stacking_models = [stacking_model]
+        self.best_model = stacking_model
+
+
+class LokyStackerV6SoftRidge(LokyStackerV6):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
+
+        self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+
+        stacking_model = "probability-ridgecv"
+        self.stacking_models = [stacking_model]
+        self.best_model = stacking_model
+
+
+class LokyStackerV6SoftRF(LokyStackerV6):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
+
+        self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+
+        stacking_model = "probability-rf"
+        self.stacking_models = [stacking_model]
+        self.best_model = stacking_model
+
+
+class LokyStackerV7(LokyStackerV6):
+    """Like LokyStackerV6 but each repetition uses only its own features (not accumulated),
+    and predictions from different repetitions are concatenated as separate columns
+    instead of being averaged.
+    """
+
+    def calculate_features(self, feature_type: str, X: np.ndarray, repetition: int):
+        transform = self.get_next_feature_transformer(feature_type=feature_type, n_jobs=self.n_jobs)
+        transform.fit(X)
+        X_t = transform.transform(X)
+        self.feature_transformers.append((feature_type, repetition, transform))
+
+        # Dump directly to disk
+        path = f"{self._tmpdir}/Xt_{feature_type}_r{repetition}.npy"
+        arr = np.asarray(X_t, dtype=np.float64)
+        np.save(path, arr)
+
+        return path, arr.shape, os.path.getsize(path) / (1024 * 1024)
+
+    def _build_rep_manifest(self, quant_path, repetition):
+        """Build a feature manifest for a single repetition (quant + that rep's features only)."""
+        manifest = {"quant": [quant_path]}
+        for feat_type in ("multirocket", "hydra", "rdst"):
+            path = f"{self._tmpdir}/Xt_{feat_type}_r{repetition}.npy"
+            manifest[feat_type] = [path]
+        return manifest
+
+    def _build_probability_array(self, n_samples):
+        """Build probability array — no averaging since model names are unique per repetition."""
+        level0_preds = [p for p in self.predictions if p["level"] == 0]
+        if len(level0_preds) == 0:
+            return None
+        df = (
+            pl.DataFrame(level0_preds)
+            .pivot(
+                values="probability",
+                index="index",
+                on=["level", "model", "class"],
+            )
+            .sort("index")
+        )
+        prob_cols = sorted(c for c in df.columns if c != "index")
+        self._probability_columns = prob_cols
+        prob_array = df.select(prob_cols).to_numpy()
+        return prob_array
+
+    def _compute_oof_accuracy(self, y, model_name):
+        """Compute OOF accuracy for a given model (already unique per repetition)."""
+        model_preds = [p for p in self.predictions if p["model"] == model_name]
+        if len(model_preds) == 0:
+            return 0.0
+        df = (
+            pl.DataFrame(model_preds)
+            .pivot(
+                values="probability",
+                index="index",
+                on=["level", "model", "class"],
+            )
+            .sort("index")
+        )
+        probas = df.drop("index").to_numpy()
+        pred_indices = np.argmax(probas, axis=1)
+        preds = self.classes_[pred_indices]
+        return accuracy_score(y, preds)
+
+    def _fit(self, X, y):
+        import shutil
+        fit_start_time = perf_counter()
+
+        self.predictions = []
+        self.trained_models_ = []
+        self.feature_transformers = []
+
+        if self.cv_splits is None:
+            self.cv_splits = []
+        print(f"[{perf_counter() - fit_start_time:.4f}s] Starting fitting")
+
+        # Check if each class has at least 2 instances for fold training
+        unique, counts = np.unique(y, return_counts=True)
+        if np.any(counts < 2):
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Some classes have fewer than 2 instances, fold training not possible")
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Falling back to MultiRocketHydraClassifier")
+            self.fallback_model = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
+            self.fallback_model.fit(X, y)
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Fallback model trained successfully")
+            return
+
+        # Create run directory: ./tscglue/<run_id>/{models,features}
+        if self._base_dir and os.path.exists(self._base_dir):
+            shutil.rmtree(self._base_dir)
+        self._run_id = uuid.uuid4().hex[:16]
+        self._base_dir = os.path.join(".", "tscglue", self._run_id)
+        self._model_dir = os.path.join(self._base_dir, "models")
+        self._tmpdir = os.path.join(self._base_dir, "features")
+        os.makedirs(self._model_dir, exist_ok=True)
+        os.makedirs(self._tmpdir, exist_ok=True)
+        print(f"Starting executor with {self.n_jobs} workers, run_dir={self._base_dir}")
+
+        quant_start_time = perf_counter()
+        quant_path, shape, size_mb = self.calculate_features(feature_type="quant", X=X, repetition=0)
+        quant_durration = perf_counter() - quant_start_time
+        print(
+            f"[{perf_counter() - fit_start_time:.4f}s] Computed QUANT features {shape} ({size_mb:.2f} MB) in {quant_durration:.4f}s"
+        )
+
+        X_path, y_path = self._save_Xy(X, y)
+
+        # Accumulate all splits across repetitions for stacking
+        all_splits = []
+
+        try:
+            for repetition in range(self.n_repetitions):
+                print(f"[{perf_counter() - fit_start_time:.4f}s] Starting repetition {repetition}")
+
+                multirocket_start_time = perf_counter()
+                _, shape, size_mb = self.calculate_features(feature_type="multirocket", X=X, repetition=repetition)
+                multirocket_durration = perf_counter() - multirocket_start_time
+                print(
+                    f"[{perf_counter() - fit_start_time:.4f}s] Computed MultiRocket features {shape} ({size_mb:.2f} MB) in {multirocket_durration:.4f}s"
+                )
+
+                hydra_start_time = perf_counter()
+                _, shape, size_mb = self.calculate_features(feature_type="hydra", X=X, repetition=repetition)
+                hydra_durration = perf_counter() - hydra_start_time
+                print(
+                    f"[{perf_counter() - fit_start_time:.4f}s] Computed Hydra features {shape} ({size_mb:.2f} MB) in {hydra_durration:.4f}s"
+                )
+
+                rdst_start_time = perf_counter()
+                _, shape, size_mb = self.calculate_features(feature_type="rdst", X=X, repetition=repetition)
+                rdst_durration = perf_counter() - rdst_start_time
+                print(
+                    f"[{perf_counter() - fit_start_time:.4f}s] Computed RDST features {shape} ({size_mb:.2f} MB) in {rdst_durration:.4f}s"
+                )
+
+                current_splits = generate_folds(
+                    X, y, n_splits=self.k_folds, n_repetitions=1, random_state=self._get_feature_seed()
+                )
+                all_splits.extend(current_splits)
+
+                # Per-repetition manifest: only this repetition's features + quant
+                feature_manifest = self._build_rep_manifest(quant_path, repetition)
+
+                # Build list of tasks — model names tagged with repetition
+                tasks = []
+                for model_name in self.feature_models + self.series_models:
+                    tagged_name = f"{model_name}_r{repetition}"
+                    is_series = model_name in self.series_models
+                    for fold_number, (train_idx, val_idx) in enumerate(current_splits):
+                        model_seed = self._get_feature_seed()
+                        save_path = f"{self._model_dir}/{tagged_name}_f{fold_number}.pkl"
+                        tasks.append((fold_number, tagged_name, is_series, train_idx, val_idx, model_seed,
+                                      X_path, y_path, feature_manifest, save_path))
+
+                n_workers = min(self.n_jobs, len(tasks))
+                print(f"[{perf_counter() - fit_start_time:.4f}s] Starting training with {n_workers} workers for {len(tasks)} models")
+
+                with ProcessPoolExecutor(
+                    max_workers=n_workers,
+                    mp_context=multiprocessing.get_context('spawn'),
+                ) as executor:
+                    futures = {
+                        executor.submit(_train_one_model_v6, *task): task
+                        for task in tasks
+                    }
+
+                    model_groups = {}
+                    for future in as_completed(futures):
+                        task = futures[future]
+                        fold_number, tagged_name = task[0], task[1]
+                        save_path = task[-1]
+                        try:
+                            result = future.result()
+                        except Exception as e:
+                            raise RuntimeError(f"Worker failed during training {tagged_name} fold {fold_number}: {e}")
+
+                        train_idx, val_idx, proba, classes_, model_size, train_dur, model_name_result, fold_number = result
+                        print(
+                            f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number}/r-{repetition} ({model_size / (1024 * 1024):.2f} MB)"
+                        )
+
+                        level = 0
+                        for idx, p in zip(val_idx, proba):
+                            for scls, prob in zip(classes_, p):
+                                d = {
+                                    "index": idx,
+                                    "model": model_name_result,
+                                    "repetition": repetition,
+                                    "level": level,
+                                    "class": scls.item(),
+                                    "probability": prob.item(),
+                                }
+                                self.predictions.append(d)
+
+                        if model_name_result not in model_groups:
+                            model_groups[model_name_result] = []
+                        model_groups[model_name_result].append(save_path)
+
+                        if len(model_groups[model_name_result]) == self.k_folds:
+                            print(
+                                f"[{perf_counter() - fit_start_time:.4f}s] Completed training for model {model_name_result}"
+                            )
+
+                            self.trained_models_.append((model_name_result, model_groups[model_name_result]))
+                            del model_groups[model_name_result]
+
+                            oof_acc = self._compute_oof_accuracy(y, model_name_result)
+                            print(
+                                f"[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name_result}: {oof_acc}"
+                            )
+
+                print(f"[{perf_counter() - fit_start_time:.4f}s] Completed repetition {repetition}")
+
+            # Train stacking models only once after all repetitions
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Starting stacking model training (single pass)")
+
+            # Build probability array from level-0 predictions (no averaging — model names are unique per rep)
+            prob_array = self._build_probability_array(n_samples=X.shape[0])
+
+            # Check for NaN values
+            if prob_array is None or np.isnan(prob_array).any():
+                print(f"[{perf_counter() - fit_start_time:.4f}s] NaN values detected in probability array, skipping stacking")
+                print(f"[{perf_counter() - fit_start_time:.4f}s] Falling back to MultiRocketHydraClassifier")
+                self.fallback_model = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
+                self.fallback_model.fit(X, y)
+                print(f"[{perf_counter() - fit_start_time:.4f}s] Fallback model trained successfully")
+                return
+
+            # Save probability array and update manifest
+            prob_path = f"{self._tmpdir}/Xt_probabilities.npy"
+            np.save(prob_path, prob_array)
+            stacking_manifest = {"probabilities": [prob_path]}
+
+            X_path, y_path = f"{self._tmpdir}/X.npy", f"{self._tmpdir}/y.npy"
+
+            for model_name in self.stacking_models:
+                tasks = []
+                is_series = model_name in self.series_models
+                for fold_number, (train_idx, val_idx) in enumerate(all_splits):
+                    model_seed = self._get_feature_seed()
+                    save_path = f"{self._model_dir}/{model_name}_stacking_f{fold_number}.pkl"
+                    tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
+                                  X_path, y_path, stacking_manifest, save_path))
+
+                n_workers = min(self.n_jobs, len(tasks))
+                with ProcessPoolExecutor(
+                    max_workers=n_workers,
+                    mp_context=multiprocessing.get_context('spawn'),
+                ) as executor:
+                    futures = {
+                        executor.submit(_train_one_model_v6, *task): task
+                        for task in tasks
+                    }
+
+                    model_group = []
+                    for future in as_completed(futures):
+                        task = futures[future]
+                        fold_number, model_name_task = task[0], task[1]
+                        save_path = task[-1]
+                        try:
+                            result = future.result()
+                        except Exception as e:
+                            raise RuntimeError(f"Worker failed during stacking training {model_name_task} fold {fold_number}: {e}")
+
+                        train_idx, val_idx, proba, classes_, model_size, train_dur, model_name_result, fold_number = result
+
+                        print(
+                            f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number} ({model_size / (1024 * 1024):.2f} MB)"
+                        )
+
+                        level = 1
+                        for idx, p in zip(val_idx, proba):
+                            for scls, prob in zip(classes_, p):
+                                d = {
+                                    "index": idx,
+                                    "model": model_name_result,
+                                    "repetition": 0,
+                                    "level": level,
+                                    "class": scls.item(),
+                                    "probability": prob.item(),
+                                }
+                                self.predictions.append(d)
+                        model_group.append(save_path)
+
+                self.trained_models_.append((model_name, model_group))
+
+                oof_acc = self._compute_oof_accuracy(y, model_name)
+                print(
+                    f"[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name}: {oof_acc}"
+                )
+
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Completed all repetitions and stacking")
+
+        finally:
+            # Clean up temp directory
+            if self._tmpdir and os.path.exists(self._tmpdir):
+                shutil.rmtree(self._tmpdir)
+                self._tmpdir = None
+            print("Executor shutdown complete")
+
+    def compute_features(self, X: np.ndarray) -> dict[int, dict[str, np.ndarray]]:
+        """Compute features for prediction, returning per-repetition feature dicts.
+
+        Returns {repetition: {feature_type: np.ndarray}}.
+        """
+        rep_features = {}
+        for feature_type, repetition, transform in self.feature_transformers:
+            X_t = transform.transform(X)
+            if repetition not in rep_features:
+                rep_features[repetition] = {}
+            rep_features[repetition][feature_type] = X_t
+        return rep_features
+
+    def predict_proba_per_model(self, X):
+        import shutil
+        predict_start_time = perf_counter()
+        print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction")
+
+        # Create features directory for mmap files
+        self._tmpdir = os.path.join(self._base_dir, "features")
+        os.makedirs(self._tmpdir, exist_ok=True)
+        print(f"Starting executor with {self.n_jobs} workers, run_dir={self._base_dir}")
+
+        try:
+            rep_features = self.compute_features(X)
+            print(f"[{perf_counter() - predict_start_time:.4f}s] Computed features for prediction")
+
+            # Save X
+            X_path = f"{self._tmpdir}/X.npy"
+            np.save(X_path, X)
+
+            # Save per-repetition feature manifests
+            rep_manifests = {}
+            for rep, feature_dict in rep_features.items():
+                manifest = {}
+                for feat_type, arr in feature_dict.items():
+                    path = f"{self._tmpdir}/Xt_{feat_type}_r{rep}.npy"
+                    np.save(path, arr)
+                    manifest[feat_type] = [path]
+                rep_manifests[rep] = manifest
+            print(f"[{perf_counter() - predict_start_time:.4f}s] Feature arrays saved to mmap files")
+
+            predictions = []
+
+            # Build tasks: each model is tagged with repetition, use that rep's manifest
+            first_level_models = [(model_name, model_group) for model_name, model_group in self.trained_models_
+                                  if any(model_name.startswith(fm) for fm in self.feature_models + self.series_models)]
+
+            tasks = []
+            for model_name, model_paths in reversed(first_level_models):
+                # Extract repetition from tagged model name (e.g., "quant-ridge_r0" -> 0)
+                rep = int(model_name.rsplit("_r", 1)[1])
+                base_name = model_name.rsplit("_r", 1)[0]
+                is_series = base_name in self.series_models
+                manifest = rep_manifests[rep]
+                for model_path in model_paths:
+                    tasks.append((model_name, model_path, is_series,
+                                  X_path, manifest))
+
+            n_workers = min(self.n_jobs, len(tasks))
+            print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction with {n_workers} workers for {len(tasks)} first-level models")
+
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                mp_context=multiprocessing.get_context('spawn'),
+            ) as executor:
+                futures = {
+                    executor.submit(_predict_one_model_v6, *task): task
+                    for task in tasks
+                }
+
+                for future in as_completed(futures):
+                    task = futures[future]
+                    model_name_task = task[0]
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        raise RuntimeError(f"Worker failed during prediction {model_name_task}: {e}")
+
+                    proba, classes_, predict_dur, model_name = result
+                    print(
+                        f"[{perf_counter() - predict_start_time:.4f}s] Predicted {model_name} in {predict_dur:.4f}s"
+                    )
+
+                    level = 0
+                    pred_list = self.add_probabilities(proba, classes_, model_name, level)
+                    predictions.extend(pred_list)
+
+            print(f"[{perf_counter() - predict_start_time:.4f}s] Completed all first-level model predictions")
+
+            # Build probability array from level-0 predictions for stacking
+            if self._tmpdir and os.path.exists(self._tmpdir):
+                shutil.rmtree(self._tmpdir)
+            self._tmpdir = os.path.join(self._base_dir, "features")
+            os.makedirs(self._tmpdir, exist_ok=True)
+
+            # Pivot level-0 predictions into probability array (no averaging)
+            df = (
+                pl.DataFrame(predictions)
+                .pivot(
+                    values="probability",
+                    index="index",
+                    on=["level", "model", "class"],
+                )
+                .sort("index")
+            )
+            # Use same sorted column order as training to ensure scaler alignment
+            prob_cols = sorted(c for c in df.columns if c != "index")
+            prob_array = df.select(prob_cols).to_numpy()
+
+            X_path = f"{self._tmpdir}/X.npy"
+            np.save(X_path, X)
+            prob_path = f"{self._tmpdir}/Xt_probabilities.npy"
+            np.save(prob_path, prob_array)
+            stacking_manifest = {"probabilities": [prob_path]}
+
+            stacking_models = [(model_name, model_group) for model_name, model_group in self.trained_models_
+                               if model_name in self.stacking_models]
+
+            # Build tasks for stacking models
+            tasks = []
+            for model_name, model_paths in reversed(stacking_models):
+                is_series = model_name in self.series_models
+                for model_path in model_paths:
+                    tasks.append((model_name, model_path, is_series,
                                   X_path, stacking_manifest))
 
             n_workers = min(self.n_jobs, len(tasks))
@@ -1935,7 +2478,7 @@ class LokyStackerV6(LokyStackerV5):
             print("Executor shutdown complete")
 
 
-class LokyStackerV6SoftET(LokyStackerV6):
+class LokyStackerV7SoftET(LokyStackerV7):
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
         super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
 
@@ -1948,7 +2491,7 @@ class LokyStackerV6SoftET(LokyStackerV6):
         self.best_model = stacking_model
 
 
-class LokyStackerV6SoftRidge(LokyStackerV6):
+class LokyStackerV7SoftRidge(LokyStackerV7):
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
         super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
 
@@ -1961,7 +2504,7 @@ class LokyStackerV6SoftRidge(LokyStackerV6):
         self.best_model = stacking_model
 
 
-class LokyStackerV6SoftRF(LokyStackerV6):
+class LokyStackerV7SoftRF(LokyStackerV7):
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
         super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
 
