@@ -2136,7 +2136,7 @@ class LokyStackerV7(LokyStackerV6):
                 # Per-repetition manifest: only this repetition's features + quant
                 feature_manifest = self._build_rep_manifest(quant_path, repetition)
 
-                # Build list of tasks — model names tagged with repetition
+                # Build list of tasks — model names tagged with repetition for save paths
                 tasks = []
                 for model_name in self.feature_models + self.series_models:
                     tagged_name = f"{model_name}_r{repetition}"
@@ -2144,7 +2144,7 @@ class LokyStackerV7(LokyStackerV6):
                     for fold_number, (train_idx, val_idx) in enumerate(current_splits):
                         model_seed = self._get_feature_seed()
                         save_path = f"{self._model_dir}/{tagged_name}_f{fold_number}.pkl"
-                        tasks.append((fold_number, tagged_name, is_series, train_idx, val_idx, model_seed,
+                        tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
                                       X_path, y_path, feature_manifest, save_path))
 
                 n_workers = min(self.n_jobs, len(tasks))
@@ -2162,14 +2162,16 @@ class LokyStackerV7(LokyStackerV6):
                     model_groups = {}
                     for future in as_completed(futures):
                         task = futures[future]
-                        fold_number, tagged_name = task[0], task[1]
+                        fold_number, base_model_name = task[0], task[1]
                         save_path = task[-1]
                         try:
                             result = future.result()
                         except Exception as e:
+                            tagged_name = f"{base_model_name}_r{repetition}"
                             raise RuntimeError(f"Worker failed during training {tagged_name} fold {fold_number}: {e}")
 
                         train_idx, val_idx, proba, classes_, model_size, train_dur, model_name_result, fold_number = result
+                        model_name_result = f"{model_name_result}_r{repetition}"
                         print(
                             f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number}/r-{repetition} ({model_size / (1024 * 1024):.2f} MB)"
                         )
@@ -2389,13 +2391,14 @@ class LokyStackerV7(LokyStackerV6):
             self._tmpdir = os.path.join(self._base_dir, "features")
             os.makedirs(self._tmpdir, exist_ok=True)
 
-            # Pivot level-0 predictions into probability array (no averaging)
+            # Pivot level-0 predictions into probability array (average across folds)
             df = (
                 pl.DataFrame(predictions)
                 .pivot(
                     values="probability",
                     index="index",
                     on=["level", "model", "class"],
+                    aggregate_function="mean",
                 )
                 .sort("index")
             )
