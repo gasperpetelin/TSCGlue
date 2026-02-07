@@ -884,6 +884,63 @@ def _predict_one_model_v6(model_name, model_path, is_series, X_path, feature_man
     return (proba, clf.classes_, predict_dur, model_name)
 
 
+def _load_feature_dict_v7(directory, feature_specs):
+    """Load feature arrays using read_array with (feat_type, repetition) specs."""
+    feature_dict = {}
+    for feat_type, rep in feature_specs.items():
+        feature_dict[feat_type] = read_array(f"Xt_{feat_type}", directory, repetition=rep)
+    return feature_dict
+
+
+def _train_one_model_v7(fold_number, model_name, is_series, train_idx, val_idx, model_seed,
+                         directory, feature_specs, save_path):
+    """Training function for V7 - loads data via read_array, saves model to disk."""
+    X = read_array("X", directory)
+    y = read_array("y", directory)
+    feature_dict = _load_feature_dict_v7(directory, feature_specs)
+
+    scaler, clf = get_model_v6(model_name, seed=model_seed)
+    start_train = perf_counter()
+
+    if is_series:
+        clf.fit(X[train_idx], y[train_idx])
+        proba = clf.predict_proba(X[val_idx])
+        with open(save_path, 'wb') as f:
+            pickle.dump((None, clf), f)
+    else:
+        train_dict = {k: v[train_idx] for k, v in feature_dict.items()}
+        val_dict = {k: v[val_idx] for k, v in feature_dict.items()}
+        X_train = scaler.fit_transform(train_dict)
+        X_val = scaler.transform(val_dict)
+        clf.fit(X_train, y[train_idx])
+        proba = clf.predict_proba(X_val)
+        with open(save_path, 'wb') as f:
+            pickle.dump((scaler, clf), f)
+
+    model_size = os.path.getsize(save_path)
+    train_dur = perf_counter() - start_train
+    return (train_idx, val_idx, proba, clf.classes_, model_size, train_dur, model_name, fold_number)
+
+
+def _predict_one_model_v7(model_name, model_path, is_series, directory, feature_specs):
+    """Prediction function for V7 - loads model from disk, loads data via read_array."""
+    X = read_array("X", directory)
+    feature_dict = _load_feature_dict_v7(directory, feature_specs)
+
+    with open(model_path, 'rb') as f:
+        scaler, clf = pickle.load(f)
+    start_predict = perf_counter()
+
+    if is_series:
+        proba = clf.predict_proba(X)
+    else:
+        X_scaled = scaler.transform(feature_dict)
+        proba = clf.predict_proba(X_scaled)
+
+    predict_dur = perf_counter() - start_predict
+    return (proba, clf.classes_, predict_dur, model_name)
+
+
 class LokyStackerV5(BaseClassifier):
     """Like FastStackerV5 but uses loky instead of Ray for parallelization."""
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
@@ -1485,14 +1542,6 @@ class LokyStackerV6(LokyStackerV5):
         self._feature_manifest[feature_type].append(path)
         return arr.shape, os.path.getsize(path) / (1024 * 1024)
 
-    def _save_Xy(self, X, y):
-        """Save X and y to mmap files. Returns (X_path, y_path)."""
-        X_path = f"{self._tmpdir}/X.npy"
-        y_path = f"{self._tmpdir}/y.npy"
-        np.save(X_path, X)
-        np.save(y_path, y)
-        return X_path, y_path
-
     def _build_probability_array(self, n_samples):
         """Build a numpy array from level-0 OOF predictions and save as mmap.
 
@@ -1578,7 +1627,10 @@ class LokyStackerV6(LokyStackerV5):
             f"[{perf_counter() - fit_start_time:.4f}s] Computed QUANT features {shape} ({size_mb:.2f} MB) in {quant_durration:.4f}s"
         )
 
-        X_path, y_path = self._save_Xy(X, y)
+        X_path = f"{self._tmpdir}/X.npy"
+        y_path = f"{self._tmpdir}/y.npy"
+        np.save(X_path, X)
+        np.save(y_path, y)
 
         # Accumulate all splits across repetitions for stacking
         all_splits = []
@@ -1993,33 +2045,65 @@ class LokyStackerV6SoftRF(LokyStackerV6):
         self.stacking_models = [stacking_model]
         self.best_model = stacking_model
 
+def save_array(X, name, directory, dtype=None, repetition=None):
+    if dtype is not None:
+        X = np.asarray(X, dtype=dtype)
+    suffix = f"_r_{repetition}" if repetition is not None else ""
+    path = f"{directory}/{name}{suffix}.npy"
+    np.save(path, X)
+    size = os.path.getsize(path) / (1024 * 1024)
+    return path, X.shape, size
+
+def read_array(name, directory, repetition=None, mmap_mode="r", allow_pickle=False):
+    suffix = f"_r_{repetition}" if repetition is not None else ""
+    path = f"{directory}/{name}{suffix}.npy"
+    # TODO remove allow_pickle=True once all features/models are numpy arrays
+    return np.load(path, mmap_mode=mmap_mode, allow_pickle=allow_pickle)
+
+def save_model(model, name, directory, repetition, fold):
+    path = f"{directory}/{name}_r_{repetition}_f_{fold}.pkl"
+    with open(path, 'wb') as f:
+        pickle.dump(model, f)
+    size = os.path.getsize(path)
+    return path, size
+
+def read_model(name, directory, repetition, fold):
+    path = f"{directory}/{name}_r_{repetition}_f_{fold}.pkl"
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+
+def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1):
+    match feature_type:
+        case "multirocket":
+            return MultiRocket(n_jobs=n_jobs, random_state=seed)
+        case "rdst":
+            return RandomDilatedShapeletTransform(n_jobs=n_jobs, random_state=seed)
+        case "quant":
+            return QUANTTransformer()
+        case "hydra":
+            return HydraTransformer(n_jobs=n_jobs, random_state=seed)
+        case _:
+            raise ValueError(f"Unknown feature transformer type: {feature_type}")
+
 
 class LokyStackerV7(BaseClassifier):
-    """Like LokyStackerV6 but each repetition uses only its own features (not accumulated),
-    and predictions from different repetitions are concatenated as separate columns
-    instead of being averaged.
-    """
-
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10,
-                 time_limit_in_seconds=None, n_jobs=1, keep_features=False,
-                 hyperparameters=None):
+                 n_jobs=1, keep_features=False,
+                 hyperparameters=None, verbose=0):
         super().__init__()
         self.n_repetitions = n_repetitions
         self.k_folds = k_folds
         self.random_state = random_state
         self.cv_splits = None
         self.n_jobs = n_jobs
+        self.verbose = verbose
 
         self.feature_seed = np.random.default_rng(random_state)
         self.feature_transformers = []
-        self.features = None
-        self.predictions = None
         self.trained_models_ = None
-        self.time_limit_in_seconds = time_limit_in_seconds
 
         self.fallback_model = None
 
-        self._feature_manifest = {}
         self._run_id = None
         self._base_dir = None
         self._model_dir = None
@@ -2037,27 +2121,9 @@ class LokyStackerV7(BaseClassifier):
     def _get_feature_seed(self):
         return int(self.feature_seed.integers(0, 2**31 - 1, dtype=np.int32))
 
-    def get_next_feature_transformer(self, feature_type: str, n_jobs: int = 1):
-        seed = self._get_feature_seed()
-        match feature_type:
-            case "multirocket":
-                return MultiRocket(n_jobs=n_jobs, random_state=seed)
-            case "rdst":
-                return RandomDilatedShapeletTransform(n_jobs=n_jobs, random_state=seed)
-            case "quant":
-                return QUANTTransformer()
-            case "hydra":
-                return HydraTransformer(n_jobs=n_jobs, random_state=seed)
-            case _:
-                raise ValueError(f"Unknown feature transformer type: {feature_type}")
-
-    def _save_Xy(self, X, y):
-        """Save X and y to mmap files. Returns (X_path, y_path)."""
-        X_path = f"{self._tmpdir}/X.npy"
-        y_path = f"{self._tmpdir}/y.npy"
-        np.save(X_path, X)
-        np.save(y_path, y)
-        return X_path, y_path
+    def log(self, message, level):
+        if self.verbose >= level:
+            print(message)
 
     def add_probabilities(self, probas, classes, model_name, level):
         predictions = []
@@ -2096,36 +2162,25 @@ class LokyStackerV7(BaseClassifier):
         self._run_id = None
 
     def calculate_features(self, feature_type: str, X: np.ndarray, repetition: int):
-        transform = self.get_next_feature_transformer(feature_type=feature_type, n_jobs=self.n_jobs)
+        transform = get_feature_transformer(feature_type, seed=self._get_feature_seed(), n_jobs=self.n_jobs)
         transform.fit(X)
         X_t = transform.transform(X)
         self.feature_transformers.append((feature_type, repetition, transform))
 
-        # Dump directly to disk
-        path = f"{self._tmpdir}/Xt_{feature_type}_r{repetition}.npy"
-        arr = np.asarray(X_t, dtype=np.float64)
-        np.save(path, arr)
+        return save_array(X_t, f"Xt_{feature_type}", self._tmpdir, dtype=np.float64, repetition=repetition)
 
-        return path, arr.shape, os.path.getsize(path) / (1024 * 1024)
-
-    def _build_rep_manifest(self, quant_path, repetition):
-        """Build a feature manifest for a single repetition (quant + that rep's features only)."""
-        manifest = {"quant": [quant_path]}
-        for feat_type in ("multirocket", "hydra", "rdst"):
-            path = f"{self._tmpdir}/Xt_{feat_type}_r{repetition}.npy"
-            manifest[feat_type] = [path]
-        return manifest
-
-    def _save_model_predictions(self, model_name, n_samples, level):
-        """Save a model's predictions to disk and remove from memory.
+    def _save_model_predictions(self, predictions, model_name, n_samples, level):
+        """Save a model's predictions to disk and remove from the list.
 
         Saves:
         - {model_name}.npy: (n_samples, n_classes) array with OOF probabilities
         - {model_name}_meta.npy: [level, class_0, class_1, ...] metadata
+
+        Returns the predictions list with this model's entries removed.
         """
-        model_preds = [p for p in self.predictions if p["model"] == model_name]
+        model_preds = [p for p in predictions if p["model"] == model_name]
         if not model_preds:
-            return
+            return predictions
 
         # Get unique classes from predictions
         classes = sorted(set(p["class"] for p in model_preds))
@@ -2138,20 +2193,15 @@ class LokyStackerV7(BaseClassifier):
             prob_array[p["index"], class_to_idx[p["class"]]] = p["probability"]
 
         # Save probabilities and metadata to features directory
-        prob_path = os.path.join(self._tmpdir, f"pred_{model_name}.npy")
-        meta_path = os.path.join(self._tmpdir, f"pred_{model_name}_meta.npy")
-        np.save(prob_path, prob_array)
-        np.save(meta_path, np.array([level] + classes))
+        save_array(prob_array, f"pred_{model_name}", self._tmpdir)
+        save_array(np.array([level] + classes), f"pred_{model_name}_meta", self._tmpdir)
 
-        # Remove from memory
-        self.predictions = [p for p in self.predictions if p["model"] != model_name]
+        return [p for p in predictions if p["model"] != model_name]
 
     def _load_model_predictions(self, model_name):
         """Load a model's predictions from disk. Returns (prob_array, level, classes)."""
-        prob_path = os.path.join(self._tmpdir, f"pred_{model_name}.npy")
-        meta_path = os.path.join(self._tmpdir, f"pred_{model_name}_meta.npy")
-        prob_array = np.load(prob_path)
-        meta = np.load(meta_path, allow_pickle=True)
+        prob_array = read_array(f"pred_{model_name}", self._tmpdir)
+        meta = read_array(f"pred_{model_name}_meta", self._tmpdir, allow_pickle=True, mmap_mode=None)
         level = int(meta[0])
         classes = list(meta[1:])
         return prob_array, level, classes
@@ -2198,11 +2248,13 @@ class LokyStackerV7(BaseClassifier):
         preds = np.array(classes)[pred_indices]
         return accuracy_score(y[valid_indices], preds)
 
+
+
     def _fit(self, X, y):
         import shutil
         fit_start_time = perf_counter()
 
-        self.predictions = []
+        predictions = []
         self.trained_models_ = []
         self.feature_transformers = []
 
@@ -2238,7 +2290,8 @@ class LokyStackerV7(BaseClassifier):
             f"[{perf_counter() - fit_start_time:.4f}s] Computed QUANT features {shape} ({size_mb:.2f} MB) in {quant_durration:.4f}s"
         )
 
-        X_path, y_path = self._save_Xy(X, y)
+        X_path, _, _ = save_array(X, "X", self._tmpdir)
+        y_path, _, _ = save_array(y, "y", self._tmpdir)
 
         # Accumulate all splits across repetitions for stacking
         all_splits = []
@@ -2273,8 +2326,8 @@ class LokyStackerV7(BaseClassifier):
                 )
                 all_splits.extend(current_splits)
 
-                # Per-repetition manifest: only this repetition's features + quant
-                feature_manifest = self._build_rep_manifest(quant_path, repetition)
+                # Per-repetition feature specs
+                feature_specs = {ft: repetition for ft in ("quant", "multirocket", "hydra", "rdst")}
 
                 # Build list of tasks — model names tagged with repetition for save paths
                 tasks = []
@@ -2285,7 +2338,7 @@ class LokyStackerV7(BaseClassifier):
                         model_seed = self._get_feature_seed()
                         save_path = f"{self._model_dir}/{tagged_name}_f{fold_number}.pkl"
                         tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
-                                      X_path, y_path, feature_manifest, save_path))
+                                      self._tmpdir, feature_specs, save_path))
 
                 n_workers = min(self.n_jobs, len(tasks))
                 print(f"[{perf_counter() - fit_start_time:.4f}s] Starting training with {n_workers} workers for {len(tasks)} models")
@@ -2295,7 +2348,7 @@ class LokyStackerV7(BaseClassifier):
                     mp_context=multiprocessing.get_context('spawn'),
                 ) as executor:
                     futures = {
-                        executor.submit(_train_one_model_v6, *task): task
+                        executor.submit(_train_one_model_v7, *task): task
                         for task in tasks
                     }
 
@@ -2327,7 +2380,7 @@ class LokyStackerV7(BaseClassifier):
                                     "class": scls.item(),
                                     "probability": prob.item(),
                                 }
-                                self.predictions.append(d)
+                                predictions.append(d)
 
                         if model_name_result not in model_groups:
                             model_groups[model_name_result] = []
@@ -2342,7 +2395,7 @@ class LokyStackerV7(BaseClassifier):
                             del model_groups[model_name_result]
 
                             # Save OOF predictions to disk and clear from memory
-                            self._save_model_predictions(model_name_result, n_samples=X.shape[0], level=0)
+                            predictions = self._save_model_predictions(predictions, model_name_result, n_samples=X.shape[0], level=0)
 
                             oof_acc = self._compute_oof_accuracy(y, model_name_result)
                             print(
@@ -2366,12 +2419,9 @@ class LokyStackerV7(BaseClassifier):
                 print(f"[{perf_counter() - fit_start_time:.4f}s] Fallback model trained successfully")
                 return
 
-            # Save probability array and update manifest
-            prob_path = f"{self._tmpdir}/Xt_probabilities.npy"
-            np.save(prob_path, prob_array)
-            stacking_manifest = {"probabilities": [prob_path]}
-
-            X_path, y_path = f"{self._tmpdir}/X.npy", f"{self._tmpdir}/y.npy"
+            # Save probability array
+            save_array(prob_array, "Xt_probabilities", self._tmpdir)
+            stacking_specs = {"probabilities": None}
 
             for model_name in self.stacking_models:
                 tasks = []
@@ -2380,7 +2430,7 @@ class LokyStackerV7(BaseClassifier):
                     model_seed = self._get_feature_seed()
                     save_path = f"{self._model_dir}/{model_name}_stacking_f{fold_number}.pkl"
                     tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
-                                  X_path, y_path, stacking_manifest, save_path))
+                                  self._tmpdir, stacking_specs, save_path))
 
                 n_workers = min(self.n_jobs, len(tasks))
                 with ProcessPoolExecutor(
@@ -2388,7 +2438,7 @@ class LokyStackerV7(BaseClassifier):
                     mp_context=multiprocessing.get_context('spawn'),
                 ) as executor:
                     futures = {
-                        executor.submit(_train_one_model_v6, *task): task
+                        executor.submit(_train_one_model_v7, *task): task
                         for task in tasks
                     }
 
@@ -2419,13 +2469,13 @@ class LokyStackerV7(BaseClassifier):
                                     "class": scls.item(),
                                     "probability": prob.item(),
                                 }
-                                self.predictions.append(d)
+                                predictions.append(d)
                         model_group.append(save_path)
 
                 self.trained_models_.append((model_name, model_group))
 
                 # Save stacking model OOF predictions to disk
-                self._save_model_predictions(model_name, n_samples=X.shape[0], level=1)
+                predictions = self._save_model_predictions(predictions, model_name, n_samples=X.shape[0], level=1)
 
                 oof_acc = self._compute_oof_accuracy(y, model_name)
                 print(
@@ -2466,8 +2516,8 @@ class LokyStackerV7(BaseClassifier):
         for f in sorted(os.listdir(d)):
             if f.startswith("pred_") and f.endswith(".npy") and not f.endswith("_meta.npy"):
                 model_name = f[5:-4]
-                prob_array = np.load(os.path.join(d, f))
-                meta = np.load(os.path.join(d, f"pred_{model_name}_meta.npy"), allow_pickle=True)
+                prob_array = read_array(f"pred_{model_name}", d)
+                meta = read_array(f"pred_{model_name}_meta", d, allow_pickle=True, mmap_mode=None)
                 level, classes = int(meta[0]), list(meta[1:])
                 schema = [f"{model_name}|{cls}" for cls in classes]
                 frames.append(pl.DataFrame(prob_array, schema=schema))
@@ -2486,8 +2536,8 @@ class LokyStackerV7(BaseClassifier):
         frames = []
         for f in sorted(os.listdir(d)):
             if f.startswith("Xt_") and f.endswith(".npy") and f != "Xt_probabilities.npy":
-                key = f[3:-4]  # e.g. "quant_r0", "multirocket_r1"
-                arr = np.load(os.path.join(d, f))
+                key = f[3:-4]  # e.g. "quant_r_0", "multirocket_r_1"
+                arr = read_array(f[:-4], d)
                 schema = [f"{key}|{i}" for i in range(arr.shape[1])]
                 frames.append(pl.DataFrame(arr, schema=schema))
         if not frames:
@@ -2521,33 +2571,21 @@ class LokyStackerV7(BaseClassifier):
             rep_features = self.compute_features(X)
             print(f"[{perf_counter() - predict_start_time:.4f}s] Computed features for prediction")
 
-            # Save X
-            X_path = f"{self._tmpdir}/X.npy"
-            np.save(X_path, X)
+            # Save X and per-repetition feature arrays
+            save_array(X, "X", self._tmpdir)
 
-            # Save per-repetition feature manifests
             # Quant is computed once (rep 0) and shared across all repetitions
-            rep_manifests = {}
-            shared_features = {}
+            quant_rep = None
             for rep, feature_dict in rep_features.items():
-                manifest = {}
                 for feat_type, arr in feature_dict.items():
-                    path = f"{self._tmpdir}/Xt_{feat_type}_r{rep}.npy"
-                    np.save(path, arr)
-                    manifest[feat_type] = [path]
+                    save_array(arr, f"Xt_{feat_type}", self._tmpdir, repetition=rep)
                     if feat_type == "quant":
-                        shared_features[feat_type] = [path]
-                rep_manifests[rep] = manifest
-            # Inject shared features (quant) into repetitions that don't have them
-            for rep in rep_manifests:
-                for feat_type, paths in shared_features.items():
-                    if feat_type not in rep_manifests[rep]:
-                        rep_manifests[rep][feat_type] = paths
+                        quant_rep = rep
             print(f"[{perf_counter() - predict_start_time:.4f}s] Feature arrays saved to mmap files")
 
             predictions = []
 
-            # Build tasks: each model is tagged with repetition, use that rep's manifest
+            # Build tasks: each model is tagged with repetition
             first_level_models = [(model_name, model_group) for model_name, model_group in self.trained_models_
                                   if any(model_name.startswith(fm) for fm in self.feature_models + self.series_models)]
 
@@ -2557,10 +2595,11 @@ class LokyStackerV7(BaseClassifier):
                 rep = int(model_name.rsplit("_r", 1)[1])
                 base_name = model_name.rsplit("_r", 1)[0]
                 is_series = base_name in self.series_models
-                manifest = rep_manifests[rep]
+                feature_specs = {ft: rep for ft in ("quant", "multirocket", "hydra", "rdst")}
+                feature_specs["quant"] = quant_rep  # always shared from first rep
                 for model_path in model_paths:
                     tasks.append((model_name, model_path, is_series,
-                                  X_path, manifest))
+                                  self._tmpdir, feature_specs))
 
             n_workers = min(self.n_jobs, len(tasks))
             print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction with {n_workers} workers for {len(tasks)} first-level models")
@@ -2570,7 +2609,7 @@ class LokyStackerV7(BaseClassifier):
                 mp_context=multiprocessing.get_context('spawn'),
             ) as executor:
                 futures = {
-                    executor.submit(_predict_one_model_v6, *task): task
+                    executor.submit(_predict_one_model_v7, *task): task
                     for task in tasks
                 }
 
@@ -2614,11 +2653,9 @@ class LokyStackerV7(BaseClassifier):
             prob_cols = sorted(c for c in df.columns if c != "index")
             prob_array = df.select(prob_cols).to_numpy()
 
-            X_path = f"{self._tmpdir}/X.npy"
-            np.save(X_path, X)
-            prob_path = f"{self._tmpdir}/Xt_probabilities.npy"
-            np.save(prob_path, prob_array)
-            stacking_manifest = {"probabilities": [prob_path]}
+            save_array(X, "X", self._tmpdir)
+            save_array(prob_array, "Xt_probabilities", self._tmpdir)
+            stacking_specs = {"probabilities": None}
 
             stacking_models = [(model_name, model_group) for model_name, model_group in self.trained_models_
                                if model_name in self.stacking_models]
@@ -2629,7 +2666,7 @@ class LokyStackerV7(BaseClassifier):
                 is_series = model_name in self.series_models
                 for model_path in model_paths:
                     tasks.append((model_name, model_path, is_series,
-                                  X_path, stacking_manifest))
+                                  self._tmpdir, stacking_specs))
 
             n_workers = min(self.n_jobs, len(tasks))
             print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction with {n_workers} workers for {len(tasks)} stacking models")
@@ -2639,7 +2676,7 @@ class LokyStackerV7(BaseClassifier):
                 mp_context=multiprocessing.get_context('spawn'),
             ) as executor:
                 futures = {
-                    executor.submit(_predict_one_model_v6, *task): task
+                    executor.submit(_predict_one_model_v7, *task): task
                     for task in tasks
                 }
 
@@ -2690,8 +2727,8 @@ class LokyStackerV7(BaseClassifier):
 
 
 class LokyStackerV7SoftET(LokyStackerV7):
-    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
-        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs)
 
         self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
         self.series_models = ["rstsf"]
@@ -2703,8 +2740,8 @@ class LokyStackerV7SoftET(LokyStackerV7):
 
 
 class LokyStackerV7SoftRidge(LokyStackerV7):
-    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
-        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs)
 
         self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
         self.series_models = ["rstsf"]
@@ -2716,8 +2753,8 @@ class LokyStackerV7SoftRidge(LokyStackerV7):
 
 
 class LokyStackerV7SoftRF(LokyStackerV7):
-    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
-        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs)
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs)
 
         self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
         self.series_models = ["rstsf"]
