@@ -1457,7 +1457,7 @@ class LokyStackerV6(LokyStackerV5):
     Workers receive a dict of mmap arrays keyed by feature type, and DictMultiScaler
     selects which arrays each model needs based on its scalers dict.
     """
-    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, time_limit_in_seconds=None, n_jobs=1, keep_features=False):
         super().__init__(
             random_state=random_state, n_repetitions=n_repetitions,
             k_folds=k_folds, time_limit_in_seconds=time_limit_in_seconds, n_jobs=n_jobs,
@@ -1467,6 +1467,7 @@ class LokyStackerV6(LokyStackerV5):
         self._base_dir = None  # ./tscglue/<run_id>
         self._model_dir = None  # ./tscglue/<run_id>/models
         self._tmpdir = None  # ./tscglue/<run_id>/features
+        self.keep_features = keep_features  # If True, don't delete feature arrays after fit
 
     def calculate_features(self, feature_type: str, X: np.ndarray, repetition: int):
         transform = self.get_next_feature_transformer(feature_type=feature_type, n_jobs=self.n_jobs)
@@ -1764,8 +1765,8 @@ class LokyStackerV6(LokyStackerV5):
             print(f"[{perf_counter() - fit_start_time:.4f}s] Completed all repetitions and stacking")
 
         finally:
-            # Clean up temp directory
-            if self._tmpdir and os.path.exists(self._tmpdir):
+            # Clean up temp directory unless keep_features is set
+            if not self.keep_features and self._tmpdir and os.path.exists(self._tmpdir):
                 shutil.rmtree(self._tmpdir)
                 self._tmpdir = None
             print("Executor shutdown complete")
@@ -1993,11 +1994,106 @@ class LokyStackerV6SoftRF(LokyStackerV6):
         self.best_model = stacking_model
 
 
-class LokyStackerV7(LokyStackerV6):
+class LokyStackerV7(BaseClassifier):
     """Like LokyStackerV6 but each repetition uses only its own features (not accumulated),
     and predictions from different repetitions are concatenated as separate columns
     instead of being averaged.
     """
+
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10,
+                 time_limit_in_seconds=None, n_jobs=1, keep_features=False,
+                 hyperparameters=None):
+        super().__init__()
+        self.n_repetitions = n_repetitions
+        self.k_folds = k_folds
+        self.random_state = random_state
+        self.cv_splits = None
+        self.n_jobs = n_jobs
+
+        self.feature_seed = np.random.default_rng(random_state)
+        self.feature_transformers = []
+        self.features = None
+        self.predictions = None
+        self.trained_models_ = None
+        self.time_limit_in_seconds = time_limit_in_seconds
+
+        self.fallback_model = None
+
+        self._feature_manifest = {}
+        self._run_id = None
+        self._base_dir = None
+        self._model_dir = None
+        self._tmpdir = None
+        self.keep_features = keep_features
+
+        self.feature_models = ["multirockethydra-ridgecv", "quant-etc", "rdst-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+        self.stacking_models = ["probability-ridgecv"]
+        self.best_model = "probability-ridgecv"
+
+        self.hyperparameters = hyperparameters
+
+    def _get_feature_seed(self):
+        return int(self.feature_seed.integers(0, 2**31 - 1, dtype=np.int32))
+
+    def get_next_feature_transformer(self, feature_type: str, n_jobs: int = 1):
+        seed = self._get_feature_seed()
+        match feature_type:
+            case "multirocket":
+                return MultiRocket(n_jobs=n_jobs, random_state=seed)
+            case "rdst":
+                return RandomDilatedShapeletTransform(n_jobs=n_jobs, random_state=seed)
+            case "quant":
+                return QUANTTransformer()
+            case "hydra":
+                return HydraTransformer(n_jobs=n_jobs, random_state=seed)
+            case _:
+                raise ValueError(f"Unknown feature transformer type: {feature_type}")
+
+    def _save_Xy(self, X, y):
+        """Save X and y to mmap files. Returns (X_path, y_path)."""
+        X_path = f"{self._tmpdir}/X.npy"
+        y_path = f"{self._tmpdir}/y.npy"
+        np.save(X_path, X)
+        np.save(y_path, y)
+        return X_path, y_path
+
+    def add_probabilities(self, probas, classes, model_name, level):
+        predictions = []
+        for idx, p in enumerate(probas):
+            for scls, prob in zip(classes, p):
+                d = {
+                    "index": idx,
+                    "model": model_name,
+                    "level": level,
+                    "class": scls.item(),
+                    "probability": prob.item(),
+                }
+                predictions.append(d)
+        return predictions
+
+    def _predict_proba(self, X):
+        if self.fallback_model is not None:
+            return self.fallback_model.predict_proba(X)
+        return self.predict_proba_per_model(X)[self.best_model]
+
+    def _predict(self, X):
+        if self.fallback_model is not None:
+            return self.fallback_model.predict(X)
+        probas = self._predict_proba(X)
+        predicted_indices = np.argmax(probas, axis=1)
+        return self.classes_[predicted_indices]
+
+    def cleanup(self):
+        """Remove saved models and features from disk."""
+        import shutil
+        if self._base_dir and os.path.exists(self._base_dir):
+            shutil.rmtree(self._base_dir)
+        self._base_dir = None
+        self._model_dir = None
+        self._tmpdir = None
+        self._run_id = None
 
     def calculate_features(self, feature_type: str, X: np.ndarray, repetition: int):
         transform = self.get_next_feature_transformer(feature_type=feature_type, n_jobs=self.n_jobs)
@@ -2020,43 +2116,87 @@ class LokyStackerV7(LokyStackerV6):
             manifest[feat_type] = [path]
         return manifest
 
+    def _save_model_predictions(self, model_name, n_samples, level):
+        """Save a model's predictions to disk and remove from memory.
+
+        Saves:
+        - {model_name}.npy: (n_samples, n_classes) array with OOF probabilities
+        - {model_name}_meta.npy: [level, class_0, class_1, ...] metadata
+        """
+        model_preds = [p for p in self.predictions if p["model"] == model_name]
+        if not model_preds:
+            return
+
+        # Get unique classes from predictions
+        classes = sorted(set(p["class"] for p in model_preds))
+        n_classes = len(classes)
+        class_to_idx = {c: i for i, c in enumerate(classes)}
+
+        # Build (n_samples, n_classes) array with NaN for non-OOF indices
+        prob_array = np.full((n_samples, n_classes), np.nan, dtype=np.float64)
+        for p in model_preds:
+            prob_array[p["index"], class_to_idx[p["class"]]] = p["probability"]
+
+        # Save probabilities and metadata to features directory
+        prob_path = os.path.join(self._tmpdir, f"pred_{model_name}.npy")
+        meta_path = os.path.join(self._tmpdir, f"pred_{model_name}_meta.npy")
+        np.save(prob_path, prob_array)
+        np.save(meta_path, np.array([level] + classes))
+
+        # Remove from memory
+        self.predictions = [p for p in self.predictions if p["model"] != model_name]
+
+    def _load_model_predictions(self, model_name):
+        """Load a model's predictions from disk. Returns (prob_array, level, classes)."""
+        prob_path = os.path.join(self._tmpdir, f"pred_{model_name}.npy")
+        meta_path = os.path.join(self._tmpdir, f"pred_{model_name}_meta.npy")
+        prob_array = np.load(prob_path)
+        meta = np.load(meta_path, allow_pickle=True)
+        level = int(meta[0])
+        classes = list(meta[1:])
+        return prob_array, level, classes
+
     def _build_probability_array(self, n_samples):
-        """Build probability array — no averaging since model names are unique per repetition."""
-        level0_preds = [p for p in self.predictions if p["level"] == 0]
-        if len(level0_preds) == 0:
+        """Build probability array from disk — no averaging since model names are unique per repetition."""
+        # Load all level-0 predictions from disk (files starting with pred_ but not _meta)
+        prob_files = [f for f in os.listdir(self._tmpdir) if f.startswith("pred_") and f.endswith(".npy") and not f.endswith("_meta.npy")]
+
+        all_cols = []
+        col_names = []
+        for prob_file in sorted(prob_files):
+            model_name = prob_file[5:-4]  # Remove "pred_" prefix and ".npy" suffix
+            prob_array, level, classes = self._load_model_predictions(model_name)
+            if level != 0:
+                continue
+            for i, cls in enumerate(classes):
+                col_name = f"{level}_{model_name}_{cls}"
+                col_names.append(col_name)
+                all_cols.append(prob_array[:, i])
+
+        if not all_cols:
             return None
-        df = (
-            pl.DataFrame(level0_preds)
-            .pivot(
-                values="probability",
-                index="index",
-                on=["level", "model", "class"],
-            )
-            .sort("index")
-        )
-        prob_cols = sorted(c for c in df.columns if c != "index")
-        self._probability_columns = prob_cols
-        prob_array = df.select(prob_cols).to_numpy()
+
+        # Sort columns for consistent ordering
+        sorted_indices = sorted(range(len(col_names)), key=lambda i: col_names[i])
+        self._probability_columns = [col_names[i] for i in sorted_indices]
+        prob_array = np.column_stack([all_cols[i] for i in sorted_indices])
         return prob_array
 
     def _compute_oof_accuracy(self, y, model_name):
-        """Compute OOF accuracy for a given model (already unique per repetition)."""
-        model_preds = [p for p in self.predictions if p["model"] == model_name]
-        if len(model_preds) == 0:
+        """Compute OOF accuracy for a given model from disk."""
+        prob_array, level, classes = self._load_model_predictions(model_name)
+
+        # Get non-NaN rows (OOF samples)
+        valid_mask = ~np.isnan(prob_array).any(axis=1)
+        valid_indices = np.where(valid_mask)[0]
+
+        if len(valid_indices) == 0:
             return 0.0
-        df = (
-            pl.DataFrame(model_preds)
-            .pivot(
-                values="probability",
-                index="index",
-                on=["level", "model", "class"],
-            )
-            .sort("index")
-        )
-        probas = df.drop("index").to_numpy()
+
+        probas = prob_array[valid_mask]
         pred_indices = np.argmax(probas, axis=1)
-        preds = self.classes_[pred_indices]
-        return accuracy_score(y, preds)
+        preds = np.array(classes)[pred_indices]
+        return accuracy_score(y[valid_indices], preds)
 
     def _fit(self, X, y):
         import shutil
@@ -2068,7 +2208,7 @@ class LokyStackerV7(LokyStackerV6):
 
         if self.cv_splits is None:
             self.cv_splits = []
-        print(f"[{perf_counter() - fit_start_time:.4f}s] Starting fitting")
+        print(f"[{perf_counter() - fit_start_time:.4f}s] Starting fitting (n_repetitions={self.n_repetitions}, k_folds={self.k_folds}, keep_features={self.keep_features})")
 
         # Check if each class has at least 2 instances for fold training
         unique, counts = np.unique(y, return_counts=True)
@@ -2080,13 +2220,13 @@ class LokyStackerV7(LokyStackerV6):
             print(f"[{perf_counter() - fit_start_time:.4f}s] Fallback model trained successfully")
             return
 
-        # Create run directory: ./tscglue/<run_id>/{models,features}
+        # Create run directory: ./tscglue/<run_id>/{models,features_training}
         if self._base_dir and os.path.exists(self._base_dir):
             shutil.rmtree(self._base_dir)
         self._run_id = uuid.uuid4().hex[:16]
         self._base_dir = os.path.join(".", "tscglue", self._run_id)
         self._model_dir = os.path.join(self._base_dir, "models")
-        self._tmpdir = os.path.join(self._base_dir, "features")
+        self._tmpdir = os.path.join(self._base_dir, "features_training")
         os.makedirs(self._model_dir, exist_ok=True)
         os.makedirs(self._tmpdir, exist_ok=True)
         print(f"Starting executor with {self.n_jobs} workers, run_dir={self._base_dir}")
@@ -2201,6 +2341,9 @@ class LokyStackerV7(LokyStackerV6):
                             self.trained_models_.append((model_name_result, model_groups[model_name_result]))
                             del model_groups[model_name_result]
 
+                            # Save OOF predictions to disk and clear from memory
+                            self._save_model_predictions(model_name_result, n_samples=X.shape[0], level=0)
+
                             oof_acc = self._compute_oof_accuracy(y, model_name_result)
                             print(
                                 f"[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name_result}: {oof_acc}"
@@ -2281,6 +2424,9 @@ class LokyStackerV7(LokyStackerV6):
 
                 self.trained_models_.append((model_name, model_group))
 
+                # Save stacking model OOF predictions to disk
+                self._save_model_predictions(model_name, n_samples=X.shape[0], level=1)
+
                 oof_acc = self._compute_oof_accuracy(y, model_name)
                 print(
                     f"[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name}: {oof_acc}"
@@ -2289,11 +2435,64 @@ class LokyStackerV7(LokyStackerV6):
             print(f"[{perf_counter() - fit_start_time:.4f}s] Completed all repetitions and stacking")
 
         finally:
-            # Clean up temp directory
-            if self._tmpdir and os.path.exists(self._tmpdir):
+            # Clean up temp directory unless keep_features is set
+            if not self.keep_features and self._tmpdir and os.path.exists(self._tmpdir):
                 shutil.rmtree(self._tmpdir)
                 self._tmpdir = None
+            # Store training dir in a fitted attribute that survives aeon's post-fit reset
+            if self.keep_features and self._tmpdir:
+                self.features_training_dir_ = self._tmpdir
             print("Executor shutdown complete")
+
+    def _get_training_dir(self):
+        """Return the training features directory, checking both _tmpdir and the fitted attribute."""
+        d = getattr(self, "features_training_dir_", None) or self._tmpdir
+        if not self.keep_features or not d or not os.path.exists(d):
+            raise RuntimeError(
+                f"Not available. Set keep_features=True before fitting. "
+                f"keep_features={self.keep_features}, dir={d}"
+            )
+        return d
+
+    def get_oof_predictions(self) -> pl.DataFrame:
+        """Return OOF predictions as a polars DataFrame.
+
+        Requires keep_features=True.
+        Returns a DataFrame with columns: model_name|class for each model/class,
+        with NaN for non-OOF indices.
+        """
+        d = self._get_training_dir()
+        frames = []
+        for f in sorted(os.listdir(d)):
+            if f.startswith("pred_") and f.endswith(".npy") and not f.endswith("_meta.npy"):
+                model_name = f[5:-4]
+                prob_array = np.load(os.path.join(d, f))
+                meta = np.load(os.path.join(d, f"pred_{model_name}_meta.npy"), allow_pickle=True)
+                level, classes = int(meta[0]), list(meta[1:])
+                schema = [f"{model_name}|{cls}" for cls in classes]
+                frames.append(pl.DataFrame(prob_array, schema=schema))
+        if not frames:
+            return pl.DataFrame()
+        return pl.concat(frames, how="horizontal")
+
+    def get_features(self) -> pl.DataFrame:
+        """Return training feature arrays as a polars DataFrame.
+
+        Requires keep_features=True.
+        Returns a DataFrame with columns named by feature type and index,
+        e.g. 'quant_r0|0', 'multirocket_r0|1', etc.
+        """
+        d = self._get_training_dir()
+        frames = []
+        for f in sorted(os.listdir(d)):
+            if f.startswith("Xt_") and f.endswith(".npy") and f != "Xt_probabilities.npy":
+                key = f[3:-4]  # e.g. "quant_r0", "multirocket_r1"
+                arr = np.load(os.path.join(d, f))
+                schema = [f"{key}|{i}" for i in range(arr.shape[1])]
+                frames.append(pl.DataFrame(arr, schema=schema))
+        if not frames:
+            return pl.DataFrame()
+        return pl.concat(frames, how="horizontal")
 
     def compute_features(self, X: np.ndarray) -> dict[int, dict[str, np.ndarray]]:
         """Compute features for prediction, returning per-repetition feature dicts.
@@ -2313,8 +2512,8 @@ class LokyStackerV7(LokyStackerV6):
         predict_start_time = perf_counter()
         print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction")
 
-        # Create features directory for mmap files
-        self._tmpdir = os.path.join(self._base_dir, "features")
+        # Create features_inference directory for mmap files
+        self._tmpdir = os.path.join(self._base_dir, "features_inference")
         os.makedirs(self._tmpdir, exist_ok=True)
         print(f"Starting executor with {self.n_jobs} workers, run_dir={self._base_dir}")
 
@@ -2327,14 +2526,23 @@ class LokyStackerV7(LokyStackerV6):
             np.save(X_path, X)
 
             # Save per-repetition feature manifests
+            # Quant is computed once (rep 0) and shared across all repetitions
             rep_manifests = {}
+            shared_features = {}
             for rep, feature_dict in rep_features.items():
                 manifest = {}
                 for feat_type, arr in feature_dict.items():
                     path = f"{self._tmpdir}/Xt_{feat_type}_r{rep}.npy"
                     np.save(path, arr)
                     manifest[feat_type] = [path]
+                    if feat_type == "quant":
+                        shared_features[feat_type] = [path]
                 rep_manifests[rep] = manifest
+            # Inject shared features (quant) into repetitions that don't have them
+            for rep in rep_manifests:
+                for feat_type, paths in shared_features.items():
+                    if feat_type not in rep_manifests[rep]:
+                        rep_manifests[rep][feat_type] = paths
             print(f"[{perf_counter() - predict_start_time:.4f}s] Feature arrays saved to mmap files")
 
             predictions = []
