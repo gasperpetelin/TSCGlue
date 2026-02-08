@@ -893,7 +893,7 @@ def _load_feature_dict_v7(directory, feature_specs):
 
 
 def _train_one_model_v7(fold_number, model_name, is_series, train_idx, val_idx, model_seed,
-                         directory, feature_specs, save_path):
+                         directory, feature_specs, model_dir, repetition):
     """Training function for V7 - loads data via read_array, saves model to disk."""
     X = read_array("X", directory)
     y = read_array("y", directory)
@@ -905,8 +905,7 @@ def _train_one_model_v7(fold_number, model_name, is_series, train_idx, val_idx, 
     if is_series:
         clf.fit(X[train_idx], y[train_idx])
         proba = clf.predict_proba(X[val_idx])
-        with open(save_path, 'wb') as f:
-            pickle.dump((None, clf), f)
+        _, model_size = save_model((None, clf), model_name, model_dir, repetition, fold_number)
     else:
         train_dict = {k: v[train_idx] for k, v in feature_dict.items()}
         val_dict = {k: v[val_idx] for k, v in feature_dict.items()}
@@ -914,21 +913,18 @@ def _train_one_model_v7(fold_number, model_name, is_series, train_idx, val_idx, 
         X_val = scaler.transform(val_dict)
         clf.fit(X_train, y[train_idx])
         proba = clf.predict_proba(X_val)
-        with open(save_path, 'wb') as f:
-            pickle.dump((scaler, clf), f)
+        _, model_size = save_model((scaler, clf), model_name, model_dir, repetition, fold_number)
 
-    model_size = os.path.getsize(save_path)
     train_dur = perf_counter() - start_train
     return (train_idx, val_idx, proba, clf.classes_, model_size, train_dur, model_name, fold_number)
 
 
-def _predict_one_model_v7(model_name, model_path, is_series, directory, feature_specs):
+def _predict_one_model_v7(display_name, model_name, is_series, directory, feature_specs, model_dir, repetition, fold):
     """Prediction function for V7 - loads model from disk, loads data via read_array."""
     X = read_array("X", directory)
     feature_dict = _load_feature_dict_v7(directory, feature_specs)
 
-    with open(model_path, 'rb') as f:
-        scaler, clf = pickle.load(f)
+    scaler, clf = read_model(model_name, model_dir, repetition, fold)
     start_predict = perf_counter()
 
     if is_series:
@@ -938,7 +934,7 @@ def _predict_one_model_v7(model_name, model_path, is_series, directory, feature_
         proba = clf.predict_proba(X_scaled)
 
     predict_dur = perf_counter() - start_predict
-    return (proba, clf.classes_, predict_dur, model_name)
+    return (proba, clf.classes_, predict_dur, display_name)
 
 
 class LokyStackerV5(BaseClassifier):
@@ -2060,15 +2056,17 @@ def read_array(name, directory, repetition=None, mmap_mode="r", allow_pickle=Fal
     # TODO remove allow_pickle=True once all features/models are numpy arrays
     return np.load(path, mmap_mode=mmap_mode, allow_pickle=allow_pickle)
 
-def save_model(model, name, directory, repetition, fold):
-    path = f"{directory}/{name}_r_{repetition}_f_{fold}.pkl"
+def save_model(model, name, directory, repetition, fold=None):
+    fold_suffix = f"_f_{fold}" if fold is not None else ""
+    path = f"{directory}/{name}_r_{repetition}{fold_suffix}.pkl"
     with open(path, 'wb') as f:
         pickle.dump(model, f)
     size = os.path.getsize(path)
     return path, size
 
-def read_model(name, directory, repetition, fold):
-    path = f"{directory}/{name}_r_{repetition}_f_{fold}.pkl"
+def read_model(name, directory, repetition, fold=None):
+    fold_suffix = f"_f_{fold}" if fold is not None else ""
+    path = f"{directory}/{name}_r_{repetition}{fold_suffix}.pkl"
     with open(path, 'rb') as f:
         return pickle.load(f)
 
@@ -2099,8 +2097,6 @@ class LokyStackerV7(BaseClassifier):
         self.verbose = verbose
 
         self.feature_seed = np.random.default_rng(random_state)
-        self.feature_transformers = []
-        self.trained_models_ = None
 
         self.fallback_model = None
 
@@ -2165,7 +2161,7 @@ class LokyStackerV7(BaseClassifier):
         transform = get_feature_transformer(feature_type, seed=self._get_feature_seed(), n_jobs=self.n_jobs)
         transform.fit(X)
         X_t = transform.transform(X)
-        self.feature_transformers.append((feature_type, repetition, transform))
+        save_model(transform, f"transformer_{feature_type}", self._model_dir, repetition)
 
         return save_array(X_t, f"Xt_{feature_type}", self._tmpdir, dtype=np.float64, repetition=repetition)
 
@@ -2255,8 +2251,6 @@ class LokyStackerV7(BaseClassifier):
         fit_start_time = perf_counter()
 
         predictions = []
-        self.trained_models_ = []
-        self.feature_transformers = []
 
         if self.cv_splits is None:
             self.cv_splits = []
@@ -2329,16 +2323,14 @@ class LokyStackerV7(BaseClassifier):
                 # Per-repetition feature specs
                 feature_specs = {ft: repetition for ft in ("quant", "multirocket", "hydra", "rdst")}
 
-                # Build list of tasks — model names tagged with repetition for save paths
+                # Build list of tasks — model names tagged with repetition
                 tasks = []
                 for model_name in self.feature_models + self.series_models:
-                    tagged_name = f"{model_name}_r{repetition}"
                     is_series = model_name in self.series_models
                     for fold_number, (train_idx, val_idx) in enumerate(current_splits):
                         model_seed = self._get_feature_seed()
-                        save_path = f"{self._model_dir}/{tagged_name}_f{fold_number}.pkl"
                         tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
-                                      self._tmpdir, feature_specs, save_path))
+                                      self._tmpdir, feature_specs, self._model_dir, repetition))
 
                 n_workers = min(self.n_jobs, len(tasks))
                 print(f"[{perf_counter() - fit_start_time:.4f}s] Starting training with {n_workers} workers for {len(tasks)} models")
@@ -2356,7 +2348,6 @@ class LokyStackerV7(BaseClassifier):
                     for future in as_completed(futures):
                         task = futures[future]
                         fold_number, base_model_name = task[0], task[1]
-                        save_path = task[-1]
                         try:
                             result = future.result()
                         except Exception as e:
@@ -2384,14 +2375,12 @@ class LokyStackerV7(BaseClassifier):
 
                         if model_name_result not in model_groups:
                             model_groups[model_name_result] = []
-                        model_groups[model_name_result].append(save_path)
+                        model_groups[model_name_result].append(fold_number)
 
                         if len(model_groups[model_name_result]) == self.k_folds:
                             print(
                                 f"[{perf_counter() - fit_start_time:.4f}s] Completed training for model {model_name_result}"
                             )
-
-                            self.trained_models_.append((model_name_result, model_groups[model_name_result]))
                             del model_groups[model_name_result]
 
                             # Save OOF predictions to disk and clear from memory
@@ -2428,9 +2417,8 @@ class LokyStackerV7(BaseClassifier):
                 is_series = model_name in self.series_models
                 for fold_number, (train_idx, val_idx) in enumerate(all_splits):
                     model_seed = self._get_feature_seed()
-                    save_path = f"{self._model_dir}/{model_name}_stacking_f{fold_number}.pkl"
                     tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
-                                  self._tmpdir, stacking_specs, save_path))
+                                  self._tmpdir, stacking_specs, self._model_dir, 0))
 
                 n_workers = min(self.n_jobs, len(tasks))
                 with ProcessPoolExecutor(
@@ -2442,11 +2430,9 @@ class LokyStackerV7(BaseClassifier):
                         for task in tasks
                     }
 
-                    model_group = []
                     for future in as_completed(futures):
                         task = futures[future]
                         fold_number, model_name_task = task[0], task[1]
-                        save_path = task[-1]
                         try:
                             result = future.result()
                         except Exception as e:
@@ -2470,9 +2456,6 @@ class LokyStackerV7(BaseClassifier):
                                     "probability": prob.item(),
                                 }
                                 predictions.append(d)
-                        model_group.append(save_path)
-
-                self.trained_models_.append((model_name, model_group))
 
                 # Save stacking model OOF predictions to disk
                 predictions = self._save_model_predictions(predictions, model_name, n_samples=X.shape[0], level=1)
@@ -2550,11 +2533,16 @@ class LokyStackerV7(BaseClassifier):
         Returns {repetition: {feature_type: np.ndarray}}.
         """
         rep_features = {}
-        for feature_type, repetition, transform in self.feature_transformers:
-            X_t = transform.transform(X)
+        # Quant is computed once at rep 0
+        quant_transform = read_model("transformer_quant", self._model_dir, repetition=0)
+        rep_features[0] = {"quant": quant_transform.transform(X)}
+        # Other feature types are per-repetition
+        for repetition in range(self.n_repetitions):
             if repetition not in rep_features:
                 rep_features[repetition] = {}
-            rep_features[repetition][feature_type] = X_t
+            for feature_type in ("multirocket", "hydra", "rdst"):
+                transform = read_model(f"transformer_{feature_type}", self._model_dir, repetition=repetition)
+                rep_features[repetition][feature_type] = transform.transform(X)
         return rep_features
 
     def predict_proba_per_model(self, X):
@@ -2585,21 +2573,17 @@ class LokyStackerV7(BaseClassifier):
 
             predictions = []
 
-            # Build tasks: each model is tagged with repetition
-            first_level_models = [(model_name, model_group) for model_name, model_group in self.trained_models_
-                                  if any(model_name.startswith(fm) for fm in self.feature_models + self.series_models)]
-
+            # Build tasks from known model structure
             tasks = []
-            for model_name, model_paths in reversed(first_level_models):
-                # Extract repetition from tagged model name (e.g., "quant-ridge_r0" -> 0)
-                rep = int(model_name.rsplit("_r", 1)[1])
-                base_name = model_name.rsplit("_r", 1)[0]
-                is_series = base_name in self.series_models
-                feature_specs = {ft: rep for ft in ("quant", "multirocket", "hydra", "rdst")}
-                feature_specs["quant"] = quant_rep  # always shared from first rep
-                for model_path in model_paths:
-                    tasks.append((model_name, model_path, is_series,
-                                  self._tmpdir, feature_specs))
+            for model_name in self.feature_models + self.series_models:
+                is_series = model_name in self.series_models
+                for rep in range(self.n_repetitions):
+                    tagged_name = f"{model_name}_r{rep}"
+                    feature_specs = {ft: rep for ft in ("quant", "multirocket", "hydra", "rdst")}
+                    feature_specs["quant"] = quant_rep  # always shared from first rep
+                    for fold in range(self.k_folds):
+                        tasks.append((tagged_name, model_name, is_series,
+                                      self._tmpdir, feature_specs, self._model_dir, rep, fold))
 
             n_workers = min(self.n_jobs, len(tasks))
             print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction with {n_workers} workers for {len(tasks)} first-level models")
@@ -2657,16 +2641,14 @@ class LokyStackerV7(BaseClassifier):
             save_array(prob_array, "Xt_probabilities", self._tmpdir)
             stacking_specs = {"probabilities": None}
 
-            stacking_models = [(model_name, model_group) for model_name, model_group in self.trained_models_
-                               if model_name in self.stacking_models]
-
             # Build tasks for stacking models
+            n_stacking_folds = self.n_repetitions * self.k_folds
             tasks = []
-            for model_name, model_paths in reversed(stacking_models):
+            for model_name in self.stacking_models:
                 is_series = model_name in self.series_models
-                for model_path in model_paths:
-                    tasks.append((model_name, model_path, is_series,
-                                  self._tmpdir, stacking_specs))
+                for fold in range(n_stacking_folds):
+                    tasks.append((model_name, model_name, is_series,
+                                  self._tmpdir, stacking_specs, self._model_dir, 0, fold))
 
             n_workers = min(self.n_jobs, len(tasks))
             print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction with {n_workers} workers for {len(tasks)} stacking models")
@@ -2711,7 +2693,12 @@ class LokyStackerV7(BaseClassifier):
                 .sort("index")
             )
             return_dict = {}
-            for model_name, _ in self.trained_models_:
+            all_model_names = []
+            for model_name in self.feature_models + self.series_models:
+                for rep in range(self.n_repetitions):
+                    all_model_names.append(f"{model_name}_r{rep}")
+            all_model_names.extend(self.stacking_models)
+            for model_name in all_model_names:
                 prob_columns = sorted(col for col in all_preds_df.columns if model_name in col)
                 agg_probs = all_preds_df.select(prob_columns)
                 return_dict[model_name] = agg_probs.to_numpy()
