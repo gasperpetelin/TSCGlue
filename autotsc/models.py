@@ -30,6 +30,7 @@ from sklearn.base import clone
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.linear_model import RidgeClassifierCV
 from sklearn.metrics import accuracy_score
+import shutil
 
 # from run_stacking import generate_folds, SparseScaler, MultiScaler, RidgeClassifierCVIndicator, NoScaler, StackerV4
 from sklearn.pipeline import Pipeline, make_pipeline
@@ -2056,17 +2057,19 @@ def read_array(name, directory, repetition=None, mmap_mode="r", allow_pickle=Fal
     # TODO remove allow_pickle=True once all features/models are numpy arrays
     return np.load(path, mmap_mode=mmap_mode, allow_pickle=allow_pickle)
 
-def save_model(model, name, directory, repetition, fold=None):
+def save_model(model, name, directory, repetition=None, fold=None):
+    rep_suffix = f"_r_{repetition}" if repetition is not None else ""
     fold_suffix = f"_f_{fold}" if fold is not None else ""
-    path = f"{directory}/{name}_r_{repetition}{fold_suffix}.pkl"
+    path = f"{directory}/{name}{rep_suffix}{fold_suffix}.pkl"
     with open(path, 'wb') as f:
         pickle.dump(model, f)
     size = os.path.getsize(path)
     return path, size
 
-def read_model(name, directory, repetition, fold=None):
+def read_model(name, directory, repetition=None, fold=None):
+    rep_suffix = f"_r_{repetition}" if repetition is not None else ""
     fold_suffix = f"_f_{fold}" if fold is not None else ""
-    path = f"{directory}/{name}_r_{repetition}{fold_suffix}.pkl"
+    path = f"{directory}/{name}{rep_suffix}{fold_suffix}.pkl"
     with open(path, 'rb') as f:
         return pickle.load(f)
 
@@ -2098,12 +2101,10 @@ class LokyStackerV7(BaseClassifier):
 
         self.feature_seed = np.random.default_rng(random_state)
 
-        self.fallback_model = None
-
-        self._run_id = None
-        self._base_dir = None
-        self._model_dir = None
-        self._tmpdir = None
+        self._run_id = uuid.uuid4().hex[:16]
+        self._base_dir = os.path.join(".", "tscglue", self._run_id)
+        self._model_dir = os.path.join(self._base_dir, "models")
+        self._tmpdir = os.path.join(self._base_dir, "features_training")
         self.keep_features = keep_features
 
         self.feature_models = ["multirockethydra-ridgecv", "quant-etc", "rdst-ridgecv"]
@@ -2117,9 +2118,14 @@ class LokyStackerV7(BaseClassifier):
     def _get_feature_seed(self):
         return int(self.feature_seed.integers(0, 2**31 - 1, dtype=np.int32))
 
-    def log(self, message, level):
+    def log(self, message, level, start_time=None, current_time=None):
         if self.verbose >= level:
-            print(message)
+            if start_time is not None:
+                if current_time is None:
+                    current_time = perf_counter()
+                print(f"[{current_time - start_time:.2f}s] {message}")
+            else:
+                print(message)
 
     def add_probabilities(self, probas, classes, model_name, level):
         predictions = []
@@ -2135,35 +2141,35 @@ class LokyStackerV7(BaseClassifier):
                 predictions.append(d)
         return predictions
 
+    def _has_fallback(self):
+        fallback_path = f"{self._model_dir}/fallback.pkl"
+        return self._model_dir and os.path.exists(fallback_path)
+
     def _predict_proba(self, X):
-        if self.fallback_model is not None:
-            return self.fallback_model.predict_proba(X)
+        if self._has_fallback():
+            fallback = read_model("fallback", self._model_dir, )
+            return fallback.predict_proba(X)
         return self.predict_proba_per_model(X)[self.best_model]
 
     def _predict(self, X):
-        if self.fallback_model is not None:
-            return self.fallback_model.predict(X)
+        if self._has_fallback():
+            fallback = read_model("fallback", self._model_dir, )
+            return fallback.predict(X)
         probas = self._predict_proba(X)
         predicted_indices = np.argmax(probas, axis=1)
         return self.classes_[predicted_indices]
 
     def cleanup(self):
         """Remove saved models and features from disk."""
-        import shutil
         if self._base_dir and os.path.exists(self._base_dir):
             shutil.rmtree(self._base_dir)
-        self._base_dir = None
-        self._model_dir = None
-        self._tmpdir = None
-        self._run_id = None
 
     def calculate_features(self, feature_type: str, X: np.ndarray, repetition: int):
         transform = get_feature_transformer(feature_type, seed=self._get_feature_seed(), n_jobs=self.n_jobs)
-        transform.fit(X)
-        X_t = transform.transform(X)
-        save_model(transform, f"transformer_{feature_type}", self._model_dir, repetition)
-
-        return save_array(X_t, f"Xt_{feature_type}", self._tmpdir, dtype=np.float64, repetition=repetition)
+        X_t = transform.fit_transform(X)
+        model_path, model_size = save_model(transform, f"transformer_{feature_type}", self._model_dir, repetition)
+        array_path, array_shape, array_size = save_array(X_t, f"Xt_{feature_type}", self._tmpdir, dtype=np.float64, repetition=repetition)
+        return model_path, model_size, array_path, array_shape, array_size
 
     def _save_model_predictions(self, predictions, model_name, n_samples, level):
         """Save a model's predictions to disk and remove from the list.
@@ -2244,48 +2250,46 @@ class LokyStackerV7(BaseClassifier):
         preds = np.array(classes)[pred_indices]
         return accuracy_score(y[valid_indices], preds)
 
-
+    def _fit_fallback(self, X, y, fit_start_time):
+        print(f"[{perf_counter() - fit_start_time:.4f}s] Falling back to MultiRocketHydraClassifier")
+        fallback = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
+        fallback.fit(X, y)
+        save_model(fallback, "fallback", self._model_dir)
+        print(f"[{perf_counter() - fit_start_time:.4f}s] Fallback model trained successfully")
 
     def _fit(self, X, y):
-        import shutil
         fit_start_time = perf_counter()
+        self.log(f"Starting executor with {self.n_jobs} workers, run_dir={self._base_dir}", level=1, start_time=fit_start_time)
+        os.makedirs(self._model_dir, exist_ok=True)
+        os.makedirs(self._tmpdir, exist_ok=True)
 
-        predictions = []
+        start_save_x_y_time = perf_counter()
+        X_path, _, _ = save_array(X, "X", self._tmpdir)
+        y_path, _, _ = save_array(y, "y", self._tmpdir)
+        save_durration = perf_counter() - start_save_x_y_time
+        print(f"[{perf_counter() - fit_start_time:.4f}s] Saved X and y to disk in {save_durration:.4f}s")
+
+        # Check if each class has at least 2 instances for fold training
+        _, counts = np.unique(y, return_counts=True)
+        if np.any(counts < 2):
+            print(f"[{perf_counter() - fit_start_time:.4f}s] Some classes have fewer than 2 instances, fold training not possible")
+            self._fit_fallback(X, y, fit_start_time)
+            return
 
         if self.cv_splits is None:
             self.cv_splits = []
-        print(f"[{perf_counter() - fit_start_time:.4f}s] Starting fitting (n_repetitions={self.n_repetitions}, k_folds={self.k_folds}, keep_features={self.keep_features})")
+        #print(f"[{perf_counter() - fit_start_time:.4f}s] Starting fitting (n_repetitions={self.n_repetitions}, k_folds={self.k_folds}, keep_features={self.keep_features})")
 
-        # Check if each class has at least 2 instances for fold training
-        unique, counts = np.unique(y, return_counts=True)
-        if np.any(counts < 2):
-            print(f"[{perf_counter() - fit_start_time:.4f}s] Some classes have fewer than 2 instances, fold training not possible")
-            print(f"[{perf_counter() - fit_start_time:.4f}s] Falling back to MultiRocketHydraClassifier")
-            self.fallback_model = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
-            self.fallback_model.fit(X, y)
-            print(f"[{perf_counter() - fit_start_time:.4f}s] Fallback model trained successfully")
-            return
 
-        # Create run directory: ./tscglue/<run_id>/{models,features_training}
-        if self._base_dir and os.path.exists(self._base_dir):
-            shutil.rmtree(self._base_dir)
-        self._run_id = uuid.uuid4().hex[:16]
-        self._base_dir = os.path.join(".", "tscglue", self._run_id)
-        self._model_dir = os.path.join(self._base_dir, "models")
-        self._tmpdir = os.path.join(self._base_dir, "features_training")
-        os.makedirs(self._model_dir, exist_ok=True)
-        os.makedirs(self._tmpdir, exist_ok=True)
-        print(f"Starting executor with {self.n_jobs} workers, run_dir={self._base_dir}")
+        predictions = []
 
         quant_start_time = perf_counter()
-        quant_path, shape, size_mb = self.calculate_features(feature_type="quant", X=X, repetition=0)
+        model_path, model_size, array_path, shape, size_mb = self.calculate_features(feature_type="quant", X=X, repetition=0)
         quant_durration = perf_counter() - quant_start_time
         print(
             f"[{perf_counter() - fit_start_time:.4f}s] Computed QUANT features {shape} ({size_mb:.2f} MB) in {quant_durration:.4f}s"
         )
 
-        X_path, _, _ = save_array(X, "X", self._tmpdir)
-        y_path, _, _ = save_array(y, "y", self._tmpdir)
 
         # Accumulate all splits across repetitions for stacking
         all_splits = []
@@ -2295,21 +2299,21 @@ class LokyStackerV7(BaseClassifier):
                 print(f"[{perf_counter() - fit_start_time:.4f}s] Starting repetition {repetition}")
 
                 multirocket_start_time = perf_counter()
-                _, shape, size_mb = self.calculate_features(feature_type="multirocket", X=X, repetition=repetition)
+                _, _, _, shape, size_mb = self.calculate_features(feature_type="multirocket", X=X, repetition=repetition)
                 multirocket_durration = perf_counter() - multirocket_start_time
                 print(
                     f"[{perf_counter() - fit_start_time:.4f}s] Computed MultiRocket features {shape} ({size_mb:.2f} MB) in {multirocket_durration:.4f}s"
                 )
 
                 hydra_start_time = perf_counter()
-                _, shape, size_mb = self.calculate_features(feature_type="hydra", X=X, repetition=repetition)
+                _, _, _, shape, size_mb = self.calculate_features(feature_type="hydra", X=X, repetition=repetition)
                 hydra_durration = perf_counter() - hydra_start_time
                 print(
                     f"[{perf_counter() - fit_start_time:.4f}s] Computed Hydra features {shape} ({size_mb:.2f} MB) in {hydra_durration:.4f}s"
                 )
 
                 rdst_start_time = perf_counter()
-                _, shape, size_mb = self.calculate_features(feature_type="rdst", X=X, repetition=repetition)
+                _, _, _, shape, size_mb = self.calculate_features(feature_type="rdst", X=X, repetition=repetition)
                 rdst_durration = perf_counter() - rdst_start_time
                 print(
                     f"[{perf_counter() - fit_start_time:.4f}s] Computed RDST features {shape} ({size_mb:.2f} MB) in {rdst_durration:.4f}s"
@@ -2403,8 +2407,9 @@ class LokyStackerV7(BaseClassifier):
             if prob_array is None or np.isnan(prob_array).any():
                 print(f"[{perf_counter() - fit_start_time:.4f}s] NaN values detected in probability array, skipping stacking")
                 print(f"[{perf_counter() - fit_start_time:.4f}s] Falling back to MultiRocketHydraClassifier")
-                self.fallback_model = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
-                self.fallback_model.fit(X, y)
+                fallback = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
+                fallback.fit(X, y)
+                save_model(fallback, "fallback", self._model_dir)
                 print(f"[{perf_counter() - fit_start_time:.4f}s] Fallback model trained successfully")
                 return
 
