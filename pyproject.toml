@@ -5,7 +5,7 @@ description = "Automatic Time Series Classification"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "polars>=1.31.0",
+    "polars>=1.38.0",
     "scikit-learn",
     "tqdm",
     "aeon[dl]>=1.3.0",
@@ -21,7 +21,7 @@ dependencies = [
     "catboost",
     "imblearn",
     "click",
-    "pyarrow"
+    "pyarrow",
 ]
 
 [project.optional-dependencies]
@@ -31,7 +31,8 @@ dev = [
     "pytest",
     "s3fs",
     "boto3",
-    "awscli"
+    "awscli",
+    # "datasets<3.0.0"
 ]
 notebooks = [
     "jupyter",

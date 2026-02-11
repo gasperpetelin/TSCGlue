@@ -13,9 +13,9 @@ from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
 from sklearn.linear_model import RidgeClassifierCV
 from sklearn.metrics import accuracy_score
 from sklearn.pipeline import Pipeline
-
+from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from autotsc.data_loader import DATA_DIR, load_fold
-from autotsc.gpu_models import MRHydraClassifier
+from autotsc.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier
 from autotsc.models import (
     LokyStackerV5,
     LokyStackerV5SoftET,
@@ -25,6 +25,7 @@ from autotsc.models import (
     LokyStackerV6SoftET,
     LokyStackerV6SoftRidge,
     LokyStackerV6SoftRF,
+    LokyStackerV7,
 )
 
 
@@ -76,6 +77,10 @@ def get_model(model_name, random_state, n_train=None):
             ("clf", RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))),
         ])
         return MRHydraClassifier(estimator=e, n_jobs=16, random_state=random_state)
+    elif model_name == "mr-hydra-contained-auto":
+        return MultiRocketHydraSelectKBestClassifier(k=None, n_jobs=8, random_state=random_state)
+    elif model_name == "loky-stacker-v7":
+        return LokyStackerV7(random_state=random_state, n_repetitions=1, n_jobs=8)
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([
@@ -89,10 +94,10 @@ def get_model(model_name, random_state, n_train=None):
 
 
 ALL_MODELS = [
-    "loky-stacker-v5-r1",
-    "loky-stacker-v5-soft-et",
-    "loky-stacker-v5-soft-ridge",
-    "loky-stacker-v5-soft-rf",
+    # "loky-stacker-v5-r1",
+    # "loky-stacker-v5-soft-et",
+    # "loky-stacker-v5-soft-ridge",
+    # "loky-stacker-v5-soft-rf",
     "loky-stacker-v6",
     "loky-stacker-v6-soft-et",
     "loky-stacker-v6-soft-ridge",
@@ -101,6 +106,8 @@ ALL_MODELS = [
     "mr-hydra-kbest-10000",
     "mr-hydra-kbest-30000",
     "mr-hydra-kbest-auto",
+    "mr-hydra-contained-auto",
+    "loky-stacker-v7",
 ]
 
 

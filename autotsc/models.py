@@ -908,12 +908,8 @@ def _train_one_model_v7(fold_number, model_name, is_series, train_idx, val_idx, 
         proba = clf.predict_proba(X[val_idx])
         _, model_size = save_model((None, clf), model_name, model_dir, repetition, fold_number)
     else:
-        train_dict = {k: v[train_idx] for k, v in feature_dict.items()}
-        val_dict = {k: v[val_idx] for k, v in feature_dict.items()}
-        X_train = scaler.fit_transform(train_dict)
-        X_val = scaler.transform(val_dict)
-        clf.fit(X_train, y[train_idx])
-        proba = clf.predict_proba(X_val)
+        clf.fit(scaler.fit_transform(feature_dict, idx=train_idx), y[train_idx])
+        proba = clf.predict_proba(scaler.transform(feature_dict, idx=val_idx))
         _, model_size = save_model((scaler, clf), model_name, model_dir, repetition, fold_number)
 
     train_dur = perf_counter() - start_train
@@ -2090,7 +2086,9 @@ def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1):
 class LokyStackerV7(BaseClassifier):
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10,
                  n_jobs=1, keep_features=False,
-                 hyperparameters=None, verbose=0):
+                 hyperparameters=None, verbose=0,
+                 feature_models=None, series_models=None,
+                 stacking_models=None):
         super().__init__()
         self.n_repetitions = n_repetitions
         self.k_folds = k_folds
@@ -2107,11 +2105,11 @@ class LokyStackerV7(BaseClassifier):
         self._tmpdir = os.path.join(self._base_dir, "features_training")
         self.keep_features = keep_features
 
-        self.feature_models = ["multirockethydra-ridgecv", "quant-etc", "rdst-ridgecv"]
-        self.series_models = ["rstsf"]
-        self.oof_models = []
-        self.stacking_models = ["probability-ridgecv"]
-        self.best_model = "probability-ridgecv"
+        self.feature_models = feature_models if feature_models is not None else ["multirockethydra-ridgecv", "quant-etc", "rdst-ridgecv"]
+        self.series_models = series_models if series_models is not None else ["rstsf"]
+        self.stacking_models = stacking_models if stacking_models is not None else ["probability-ridgecv"]
+        assert len(self.stacking_models) == 1, f"Expected exactly 1 stacking model, got {len(self.stacking_models)}"
+        self.best_model = self.stacking_models[-1]
 
         self.hyperparameters = hyperparameters
 
@@ -2267,7 +2265,9 @@ class LokyStackerV7(BaseClassifier):
         X_path, _, _ = save_array(X, "X", self._tmpdir)
         y_path, _, _ = save_array(y, "y", self._tmpdir)
         save_durration = perf_counter() - start_save_x_y_time
-        print(f"[{perf_counter() - fit_start_time:.4f}s] Saved X and y to disk in {save_durration:.4f}s")
+        #print(f"[{perf_counter() - fit_start_time:.4f}s] Saved X and y to disk in {save_durration:.4f}s")
+
+        self.log(f"Saved X and y to disk in {save_durration:.2f}s", level=2, start_time=fit_start_time)
 
         # Check if each class has at least 2 instances for fold training
         _, counts = np.unique(y, return_counts=True)
@@ -3136,24 +3136,57 @@ class DictMultiScaler(BaseEstimator, TransformerMixin):
     def __init__(self, scalers):
         self.scalers = scalers
 
-    def fit(self, X: dict[str, np.ndarray], y=None):
+    def fit(self, X: dict[str, np.ndarray], y=None, idx=None):
         self.scalers_ = {}
         for key, scaler in self.scalers.items():
             if key in X:
                 self.scalers_[key] = scaler
-                scaler.fit(X[key])
+                if idx is not None:
+                    scaler.fit(X[key][idx])
+                else:
+                    scaler.fit(X[key])
         return self
 
-    def transform(self, X: dict[str, np.ndarray]):
+    def transform(self, X: dict[str, np.ndarray], idx=None):
         parts = []
         for key in self.scalers_:
             if key in X:
-                parts.append(self.scalers_[key].transform(X[key]))
+                if idx is not None:
+                    parts.append(self.scalers_[key].transform(X[key][idx]))
+                else:
+                    parts.append(self.scalers_[key].transform(X[key]))
         return np.hstack(parts) if parts else np.empty((next(iter(X.values())).shape[0], 0))
 
-    def fit_transform(self, X: dict[str, np.ndarray], y=None):
-        return self.fit(X, y).transform(X)
+    def fit_transform(self, X: dict[str, np.ndarray], y=None, idx=None):
+        return self.fit(X, y, idx=idx).transform(X, idx=idx)
 
+#class DictMultiIndexScaler(BaseEstimator, TransformerMixin):
+#    def __init__(self, scalers):
+#        self.scalers = scalers
+#
+#    def fit(self, X: dict[str, np.ndarray], y=None, idx=None):
+#        self.scalers_ = {}
+#        for key, scaler in self.scalers.items():
+#            if key in X:
+#                self.scalers_[key] = scaler
+#                if idx is not None:
+#                    scaler.fit(X[key][idx])
+#                else:
+#                    scaler.fit(X[key])
+#        return self
+#
+#    def transform(self, X: dict[str, np.ndarray], idx=None):
+#        parts = []
+#        for key in self.scalers_:
+#            if key in X:
+#                if idx is not None:
+#                    parts.append(self.scalers_[key].transform(X[key][idx]))
+#                else:
+#                    parts.append(self.scalers_[key].transform(X[key]))
+#        return np.hstack(parts) if parts else np.empty((next(iter(X.values())).shape[0], 0))
+#
+#    def fit_transform(self, X: dict[str, np.ndarray], y=None, idx=None):
+#        return self.fit(X, y, idx=idx).transform(X, idx=idx)
 
 class NoScaler(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
