@@ -286,12 +286,14 @@ class MultiRocketHydraSelectKBestClassifier(BaseClassifier):
         n_groups: int = 64,
         n_jobs: int = 1,
         random_state=None,
+        classifier=None,
     ):
         self.k = k
         self.n_kernels = n_kernels
         self.n_groups = n_groups
         self.n_jobs = n_jobs
         self.random_state = random_state
+        self.classifier = classifier
 
         super().__init__()
 
@@ -325,10 +327,11 @@ class MultiRocketHydraSelectKBestClassifier(BaseClassifier):
         k = self.k if self.k is not None else _optimal_k(X.shape[0])
         self.k_ = k
 
+        clf = self.classifier if self.classifier is not None else RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))
         self.classifier_ = Pipeline([
             ("var", VarianceThreshold()),
             ("select", SelectKBest(f_classif, k=k)),
-            ("clf", RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))),
+            ("clf", clf),
         ])
 
         t0 = time.perf_counter()

@@ -27,24 +27,69 @@ from autotsc.models import (
     LokyStackerV6SoftRF,
     LokyStackerV7,
     LokyStackerV7SoftET,
+    LokyStackerV7SoftFilterRidge,
     LokyStackerV7SoftRidge,
     LokyStackerV7SoftRF,
 )
 
+import boto3
+from botocore.exceptions import ClientError
+from urllib.parse import urlparse
 
-def s3_file_exists(s3_uri: str) -> bool:
-    s3 = boto3.client("s3")
-    parsed = urlparse(s3_uri)
-    bucket = parsed.netloc
-    key = parsed.path.lstrip("/")
 
-    try:
-        s3.head_object(Bucket=bucket, Key=key)
-        return True
-    except ClientError as e:
-        if e.response["Error"]["Code"] == "404":
-            return False
-        raise
+class S3FileCache:
+    def __init__(self, base_s3_dir: str):
+        parsed = urlparse(base_s3_dir)
+        self.bucket = parsed.netloc
+        self.prefix = parsed.path.lstrip("/").rstrip("/")
+        self._s3 = boto3.client("s3")
+
+        self._files = set()
+        self._loaded = False
+
+    def _full_key(self, filename: str) -> str:
+        return f"{self.prefix}/{filename}" if self.prefix else filename
+
+    def _load_once(self):
+        if self._loaded:
+            return
+
+        paginator = self._s3.get_paginator("list_objects_v2")
+
+        for page in paginator.paginate(
+            Bucket=self.bucket,
+            Prefix=self.prefix
+        ):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                # store only filename part
+                filename = key[len(self.prefix) + 1:] if self.prefix else key
+                self._files.add(filename)
+
+        self._loaded = True
+
+    def exists(self, filename: str) -> bool:
+        self._load_once()
+
+        if filename in self._files:
+            return True
+
+        key = self._full_key(filename)
+
+        try:
+            self._s3.head_object(Bucket=self.bucket, Key=key)
+            self._files.add(filename)
+            return True
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "404":
+                return False
+            raise
+
+    def add(self, df: pl.DataFrame, filename: str):
+        full_name = self._full_key(filename)
+        df.write_parquet(full_name)
+
+
 
 
 def optimal_k(n_train, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
@@ -90,6 +135,8 @@ def get_model(model_name, random_state, n_train=None):
         return LokyStackerV7SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=8)
     elif model_name == "loky-stacker-v7-soft-rf":
         return LokyStackerV7SoftRF(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v7-soft-filter-ridge":
+        return LokyStackerV7SoftFilterRidge(random_state=random_state, n_repetitions=1, n_jobs=8)
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([
@@ -117,9 +164,10 @@ ALL_MODELS = [
     "mr-hydra-kbest-auto",
     "mr-hydra-contained-auto",
     "loky-stacker-v7",
-    "loky-stacker-v7-soft-et",
-    "loky-stacker-v7-soft-ridge",
-    "loky-stacker-v7-soft-rf",
+    "loky-stacker-v7-soft-filter-ridge",
+    #"loky-stacker-v7-soft-et",
+    #"loky-stacker-v7-soft-ridge",
+    #"loky-stacker-v7-soft-rf",
 ]
 
 
@@ -202,6 +250,7 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets):
         requested_folds = [int(x.strip()) for x in fold_spec.split(",")]
 
     write_dir = "s3://tsc-glue/performance-benchmarking"
+    s3_cache = S3FileCache(write_dir)
 
     # Build all (dataset, model, fold) combos
     combos = []
@@ -224,9 +273,9 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets):
             }
 
             hash_val = pl.DataFrame([stats]).hash_rows(seed=42, seed_1=1, seed_2=2, seed_3=3).item()
-            file = f"{write_dir}/{hash_val}.parquet"
-
-            if s3_file_exists(file):
+            # file = f"{write_dir}/{hash_val}.parquet"
+            file_name = f"{hash_val}.parquet"
+            if s3_cache.exists(file_name):
                 print(f"[{k}/{n}] Skipping: Dataset={dataset}, Fold={fold}, Model={model_name}")
                 continue
             else:
@@ -244,7 +293,8 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets):
             stats["test_accuracy"] = acc
 
             df_stat = pl.DataFrame([stats])
-            df_stat.write_parquet(file)
+            # df_stat.write_parquet(file)
+            s3_cache.add(df_stat, file_name)
         except Exception as e:
             print(f"Error processing Dataset={dataset}, Fold={fold}, Model={model_name}: {e}")
 

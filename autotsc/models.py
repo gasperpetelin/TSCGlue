@@ -3,6 +3,8 @@ import os
 import tempfile
 import uuid
 
+from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
+
 os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 import numpy as np
 import polars as pl
@@ -38,6 +40,7 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 from autotsc import old_models, transformers, utils
+from autotsc.gpu_models import MultiRocketHydraSelectKBestClassifier
 
 
 def save_mmap_data(X: np.ndarray, Xt: pl.DataFrame, y: np.ndarray, tmpdir: str) -> tuple[str, str, str]:
@@ -687,6 +690,76 @@ def get_model(name, seed=None, n_jobs=1):
         raise ValueError(f"Unknown model name: {name}")
 
 
+def _optimal_k(n_train, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
+    return int(k_min + (k_max - k_min) / (1 + np.exp(-steepness * (n_train - midpoint))))
+
+import numpy as np
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
+from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
+from sklearn.pipeline import Pipeline
+
+
+class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
+    def __init__(self, classifier=None, k=None, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
+        self.classifier = classifier
+        self.k = k
+        self.k_min = k_min
+        self.k_max = k_max
+        self.midpoint = midpoint
+        self.steepness = steepness
+
+    def _optimal_k(self, n_train: int) -> int:
+        return int(
+            self.k_min
+            + (self.k_max - self.k_min)
+            / (1.0 + np.exp(-self.steepness * (n_train - self.midpoint)))
+        )
+
+    def fit(self, X, y):
+        return self._fit(X, y)
+
+    def predict(self, X):
+        return self._predict(X)
+
+    def predict_proba(self, X):
+        return self._predict_proba(X)
+
+    # internal helpers
+    def _fit(self, X, y):
+        k = self.k if self.k is not None else self._optimal_k(X.shape[0])
+
+        if self.classifier is None:
+            clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10))
+        else:
+            clf = clone(self.classifier)
+
+        self.classifier_ = Pipeline(
+            [
+                ("var", VarianceThreshold()),
+                ("select", SelectKBest(score_func=f_classif, k=k)),
+                ("clf", clf),
+            ]
+        )
+        self.classifier_.fit(X, y)
+
+        # sklearn convention: expose classes_
+        inner = self.classifier_.named_steps["clf"]
+        if hasattr(inner, "classes_"):
+            self.classes_ = inner.classes_
+
+        return self
+
+    def _predict(self, X):
+        return self.classifier_.predict(X)
+
+    def _predict_proba(self, X):
+        inner = self.classifier_.named_steps["clf"]
+        if not hasattr(inner, "predict_proba"):
+            raise AttributeError("Underlying classifier does not support predict_proba().")
+        return self.classifier_.predict_proba(X)
+
+
+
 def get_model_v6(name, seed=None, n_jobs=1):
     """Returns (DictMultiScaler, classifier) for feature/stacking models, or (None, pipe) for series models."""
     if name == "multirockethydra-ridgecv":
@@ -725,6 +798,10 @@ def get_model_v6(name, seed=None, n_jobs=1):
     elif name == "probability-rf":
         scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
         clf = RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=n_jobs)
+        return scaler, clf
+    elif name == "multirockethydra-bestk-p-ridgecv":
+        scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
+        clf = AutoSelectKBestClassifier()
         return scaler, clf
     elif name == "rstsf":
         return None, RSTSF(random_state=seed, n_jobs=n_jobs, n_estimators=100)
@@ -2249,11 +2326,11 @@ class LokyStackerV7(BaseClassifier):
         return accuracy_score(y[valid_indices], preds)
 
     def _fit_fallback(self, X, y, fit_start_time):
-        print(f"[{perf_counter() - fit_start_time:.4f}s] Falling back to MultiRocketHydraClassifier")
+        self.log("Falling back to MultiRocketHydraClassifier", level=1, start_time=fit_start_time)
         fallback = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
         fallback.fit(X, y)
         save_model(fallback, "fallback", self._model_dir)
-        print(f"[{perf_counter() - fit_start_time:.4f}s] Fallback model trained successfully")
+        self.log("Fallback model trained successfully", level=1, start_time=fit_start_time)
 
     def _fit(self, X, y):
         fit_start_time = perf_counter()
@@ -2272,13 +2349,12 @@ class LokyStackerV7(BaseClassifier):
         # Check if each class has at least 2 instances for fold training
         _, counts = np.unique(y, return_counts=True)
         if np.any(counts < 2):
-            print(f"[{perf_counter() - fit_start_time:.4f}s] Some classes have fewer than 2 instances, fold training not possible")
+            self.log("Some classes have fewer than 2 instances, fold training not possible", level=1, start_time=fit_start_time)
             self._fit_fallback(X, y, fit_start_time)
             return
 
         if self.cv_splits is None:
             self.cv_splits = []
-        #print(f"[{perf_counter() - fit_start_time:.4f}s] Starting fitting (n_repetitions={self.n_repetitions}, k_folds={self.k_folds}, keep_features={self.keep_features})")
 
 
         predictions = []
@@ -2286,9 +2362,7 @@ class LokyStackerV7(BaseClassifier):
         quant_start_time = perf_counter()
         model_path, model_size, array_path, shape, size_mb = self.calculate_features(feature_type="quant", X=X, repetition=0)
         quant_durration = perf_counter() - quant_start_time
-        print(
-            f"[{perf_counter() - fit_start_time:.4f}s] Computed QUANT features {shape} ({size_mb:.2f} MB) in {quant_durration:.4f}s"
-        )
+        self.log(f"Computed QUANT features {shape} ({size_mb:.2f} MB) in {quant_durration:.4f}s", level=1, start_time=fit_start_time)
 
 
         # Accumulate all splits across repetitions for stacking
@@ -2296,28 +2370,22 @@ class LokyStackerV7(BaseClassifier):
 
         try:
             for repetition in range(self.n_repetitions):
-                print(f"[{perf_counter() - fit_start_time:.4f}s] Starting repetition {repetition}")
+                self.log(f"Starting repetition {repetition}", level=2, start_time=fit_start_time)
 
                 multirocket_start_time = perf_counter()
                 _, _, _, shape, size_mb = self.calculate_features(feature_type="multirocket", X=X, repetition=repetition)
                 multirocket_durration = perf_counter() - multirocket_start_time
-                print(
-                    f"[{perf_counter() - fit_start_time:.4f}s] Computed MultiRocket features {shape} ({size_mb:.2f} MB) in {multirocket_durration:.4f}s"
-                )
+                self.log(f"Computed MultiRocket features {shape} ({size_mb:.2f} MB) in {multirocket_durration:.4f}s", level=1, start_time=fit_start_time)
 
                 hydra_start_time = perf_counter()
                 _, _, _, shape, size_mb = self.calculate_features(feature_type="hydra", X=X, repetition=repetition)
                 hydra_durration = perf_counter() - hydra_start_time
-                print(
-                    f"[{perf_counter() - fit_start_time:.4f}s] Computed Hydra features {shape} ({size_mb:.2f} MB) in {hydra_durration:.4f}s"
-                )
+                self.log(f"Computed Hydra features {shape} ({size_mb:.2f} MB) in {hydra_durration:.4f}s", level=1, start_time=fit_start_time)
 
                 rdst_start_time = perf_counter()
                 _, _, _, shape, size_mb = self.calculate_features(feature_type="rdst", X=X, repetition=repetition)
                 rdst_durration = perf_counter() - rdst_start_time
-                print(
-                    f"[{perf_counter() - fit_start_time:.4f}s] Computed RDST features {shape} ({size_mb:.2f} MB) in {rdst_durration:.4f}s"
-                )
+                self.log(f"Computed RDST features {shape} ({size_mb:.2f} MB) in {rdst_durration:.4f}s", level=1, start_time=fit_start_time)
 
                 current_splits = generate_folds(
                     X, y, n_splits=self.k_folds, n_repetitions=1, random_state=self._get_feature_seed()
@@ -2337,7 +2405,7 @@ class LokyStackerV7(BaseClassifier):
                                       self._tmpdir, feature_specs, self._model_dir, repetition))
 
                 n_workers = min(self.n_jobs, len(tasks))
-                print(f"[{perf_counter() - fit_start_time:.4f}s] Starting training with {n_workers} workers for {len(tasks)} models")
+                self.log(f"Starting training with {n_workers} workers for {len(tasks)} models", level=2, start_time=fit_start_time)
 
                 with ProcessPoolExecutor(
                     max_workers=n_workers,
@@ -2360,9 +2428,7 @@ class LokyStackerV7(BaseClassifier):
 
                         train_idx, val_idx, proba, classes_, model_size, train_dur, model_name_result, fold_number = result
                         model_name_result = f"{model_name_result}_r{repetition}"
-                        print(
-                            f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number}/r-{repetition} ({model_size / (1024 * 1024):.2f} MB)"
-                        )
+                        self.log(f"Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number}/r-{repetition} ({model_size / (1024 * 1024):.2f} MB)", level=2, start_time=fit_start_time)
 
                         level = 0
                         for idx, p in zip(val_idx, proba):
@@ -2382,35 +2448,31 @@ class LokyStackerV7(BaseClassifier):
                         model_groups[model_name_result].append(fold_number)
 
                         if len(model_groups[model_name_result]) == self.k_folds:
-                            print(
-                                f"[{perf_counter() - fit_start_time:.4f}s] Completed training for model {model_name_result}"
-                            )
+                            self.log(f"Completed training for model {model_name_result}", level=2, start_time=fit_start_time)
                             del model_groups[model_name_result]
 
                             # Save OOF predictions to disk and clear from memory
                             predictions = self._save_model_predictions(predictions, model_name_result, n_samples=X.shape[0], level=0)
 
                             oof_acc = self._compute_oof_accuracy(y, model_name_result)
-                            print(
-                                f"[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name_result}: {oof_acc}"
-                            )
+                            self.log(f"OOF acc for model {model_name_result}: {oof_acc}", level=1, start_time=fit_start_time)
 
-                print(f"[{perf_counter() - fit_start_time:.4f}s] Completed repetition {repetition}")
+                self.log(f"Completed repetition {repetition}", level=1, start_time=fit_start_time)
 
             # Train stacking models only once after all repetitions
-            print(f"[{perf_counter() - fit_start_time:.4f}s] Starting stacking model training (single pass)")
+            self.log("Starting stacking model training (single pass)", level=2, start_time=fit_start_time)
 
             # Build probability array from level-0 predictions (no averaging — model names are unique per rep)
             prob_array = self._build_probability_array(n_samples=X.shape[0])
 
             # Check for NaN values
             if prob_array is None or np.isnan(prob_array).any():
-                print(f"[{perf_counter() - fit_start_time:.4f}s] NaN values detected in probability array, skipping stacking")
-                print(f"[{perf_counter() - fit_start_time:.4f}s] Falling back to MultiRocketHydraClassifier")
+                self.log("NaN values detected in probability array, skipping stacking", level=2, start_time=fit_start_time)
+                self.log("Falling back to MultiRocketHydraClassifier", level=2, start_time=fit_start_time)
                 fallback = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
                 fallback.fit(X, y)
                 save_model(fallback, "fallback", self._model_dir)
-                print(f"[{perf_counter() - fit_start_time:.4f}s] Fallback model trained successfully")
+                self.log("Fallback model trained successfully", level=2, start_time=fit_start_time)
                 return
 
             # Save probability array
@@ -2445,9 +2507,7 @@ class LokyStackerV7(BaseClassifier):
 
                         train_idx, val_idx, proba, classes_, model_size, train_dur, model_name_result, fold_number = result
 
-                        print(
-                            f"[{perf_counter() - fit_start_time:.4f}s] Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number} ({model_size / (1024 * 1024):.2f} MB)"
-                        )
+                        self.log(f"Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number} ({model_size / (1024 * 1024):.2f} MB)", level=2, start_time=fit_start_time)
 
                         level = 1
                         for idx, p in zip(val_idx, proba):
@@ -2466,11 +2526,9 @@ class LokyStackerV7(BaseClassifier):
                 predictions = self._save_model_predictions(predictions, model_name, n_samples=X.shape[0], level=1)
 
                 oof_acc = self._compute_oof_accuracy(y, model_name)
-                print(
-                    f"[{perf_counter() - fit_start_time:.4f}s] OOF acc for model {model_name}: {oof_acc}"
-                )
+                self.log(f"OOF acc for model {model_name}: {oof_acc}", level=1, start_time=fit_start_time)
 
-            print(f"[{perf_counter() - fit_start_time:.4f}s] Completed all repetitions and stacking")
+            self.log("Completed all repetitions and stacking", level=1, start_time=fit_start_time)
 
         finally:
             # Clean up temp directory unless keep_features is set
@@ -2480,7 +2538,7 @@ class LokyStackerV7(BaseClassifier):
             # Store training dir in a fitted attribute that survives aeon's post-fit reset
             if self.keep_features and self._tmpdir:
                 self.features_training_dir_ = self._tmpdir
-            print("Executor shutdown complete")
+            self.log("Executor shutdown complete", level=2, start_time=fit_start_time)
 
     def _get_training_dir(self):
         """Return the training features directory, checking both _tmpdir and the fitted attribute."""
@@ -2717,6 +2775,17 @@ class LokyStackerV7(BaseClassifier):
                 self._tmpdir = None
             print("Executor shutdown complete")
 
+class LokyStackerV7SoftFilterRidge(LokyStackerV7):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
+
+        self.feature_models = ["multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+
+        stacking_model = "probability-ridgecv"
+        self.stacking_models = [stacking_model]
+        self.best_model = stacking_model
 
 class LokyStackerV7SoftET(LokyStackerV7):
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1):
