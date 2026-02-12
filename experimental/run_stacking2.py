@@ -26,6 +26,9 @@ from autotsc.models import (
     LokyStackerV6SoftRidge,
     LokyStackerV6SoftRF,
     LokyStackerV7,
+    LokyStackerV7SoftET,
+    LokyStackerV7SoftRidge,
+    LokyStackerV7SoftRF,
 )
 
 
@@ -81,6 +84,12 @@ def get_model(model_name, random_state, n_train=None):
         return MultiRocketHydraSelectKBestClassifier(k=None, n_jobs=8, random_state=random_state)
     elif model_name == "loky-stacker-v7":
         return LokyStackerV7(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v7-soft-et":
+        return LokyStackerV7SoftET(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v7-soft-ridge":
+        return LokyStackerV7SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=8)
+    elif model_name == "loky-stacker-v7-soft-rf":
+        return LokyStackerV7SoftRF(random_state=random_state, n_repetitions=1, n_jobs=8)
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([
@@ -108,6 +117,9 @@ ALL_MODELS = [
     "mr-hydra-kbest-auto",
     "mr-hydra-contained-auto",
     "loky-stacker-v7",
+    "loky-stacker-v7-soft-et",
+    "loky-stacker-v7-soft-ridge",
+    "loky-stacker-v7-soft-rf",
 ]
 
 
