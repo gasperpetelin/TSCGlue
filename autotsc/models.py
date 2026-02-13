@@ -2775,6 +2775,7 @@ class LokyStackerV7(BaseClassifier):
                 self._tmpdir = None
             print("Executor shutdown complete")
 
+
 class LokyStackerV7SoftFilterRidge(LokyStackerV7):
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
         super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
@@ -2832,6 +2833,10 @@ def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
         folds = utils.get_folds(X, y, n_splits=n_splits, random_state=random_state + i)
         all_folds.extend(folds)
     return all_folds
+
+class TSCGlue(LokyStackerV7SoftFilterRidge):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
 
 
 class CrossValidationWrapper(BaseClassifier):

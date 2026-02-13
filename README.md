@@ -12,18 +12,18 @@ pip install autotsc
 
 ```python
 from autotsc import utils
-from autotsc.models2 import StackerV4Ray
+from autotsc.models import TSCGlue
 from sklearn.metrics import accuracy_score
 
 # Load a time series classification dataset
 X_train, y_train, X_test, y_test = utils.load_dataset("ArrowHead")
 
 # Create and train the model
-model = StackerV4Ray(
+model = TSCGlue(
     random_state=270,
     n_repetitions=1,
     k_folds=10,
-    n_jobs=-1  # Use all available CPUs
+    n_jobs=-1
 )
 model.fit(X_train, y_train)
 

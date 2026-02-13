@@ -4,10 +4,15 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --output=stacking2_%j.out
 #SBATCH --error=stacking2_%j.err
+#SBATCH --reservation=e7
+#SBATCH --array=0-29
 
+# Folds are handled by SLURM array (0-29), storage is always disk.
+# All other args are passed through to run_stacking2.py via "$@".
+#
 # Usage:
-#   sbatch run_stacking2.slurm                          # run all models
-#   sbatch run_stacking2.slurm loky-stacker-v6          # run a specific model
-#   sbatch run_stacking2.slurm loky-stacker-v6,loky-stacker-v7  # run multiple models
+#   sbatch run_stacking2.slurm                                        # all models, all folds
+#   sbatch run_stacking2.slurm -m loky-stacker-v6                     # specific model, all folds
+#   sbatch run_stacking2.slurm -m loky-stacker-v6 -d Worms            # specific model + dataset
 
-uv run run_stacking2.py "$@"
+uv run run_stacking2.py --storage disk -f $SLURM_ARRAY_TASK_ID "$@"

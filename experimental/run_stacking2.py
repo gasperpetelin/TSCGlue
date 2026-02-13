@@ -210,7 +210,8 @@ def discover_folds(dataset_name: str) -> list[int]:
 @click.option("-f", "--folds", "fold_spec", default=None, help="Folds to run (comma-separated, e.g. '0,1,2'). Default: all available folds.")
 @click.option("-l", "--list-models", is_flag=True, help="List all available models and exit")
 @click.option("--list-datasets", is_flag=True, help="List all available datasets and exit")
-def main(models, dataset_names, fold_spec, list_models, list_datasets):
+@click.option("--storage", type=click.Choice(["s3", "disk"]), default="s3", help="Storage backend: s3 or disk")
+def main(models, dataset_names, fold_spec, list_models, list_datasets, storage):
     """Run loky stacking experiments on local fold datasets."""
     all_datasets = discover_datasets()
 
@@ -262,8 +263,10 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets):
     if fold_spec is not None:
         requested_folds = [int(x.strip()) for x in fold_spec.split(",")]
 
-    write_dir = "s3://tsc-glue/performance-benchmarking"
-    s3_cache = S3FileCache(write_dir)
+    if storage == "s3":
+        cache = S3FileCache("s3://tsc-glue/performance-benchmarking")
+    else:
+        cache = LocalFileCache("performance-benchmarking")
 
     # Build all (dataset, model, fold) combos
     combos = []
@@ -288,7 +291,7 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets):
             hash_val = pl.DataFrame([stats]).hash_rows(seed=42, seed_1=1, seed_2=2, seed_3=3).item()
             # file = f"{write_dir}/{hash_val}.parquet"
             file_name = f"{hash_val}.parquet"
-            if s3_cache.exists(file_name):
+            if cache.exists(file_name):
                 print(f"[{k}/{n}] Skipping: Dataset={dataset}, Fold={fold}, Model={model_name}")
                 continue
             else:
@@ -307,7 +310,7 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets):
 
             df_stat = pl.DataFrame([stats])
             # df_stat.write_parquet(file)
-            s3_cache.add(df_stat, file_name)
+            cache.add(df_stat, file_name)
         except Exception as e:
             print(f"Error processing Dataset={dataset}, Fold={fold}, Model={model_name}: {e}")
 
