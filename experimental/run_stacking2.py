@@ -178,9 +178,9 @@ ALL_MODELS = [
     "mr-hydra-contained-auto",
     "loky-stacker-v7",
     "loky-stacker-v7-soft-filter-ridge",
-    #"loky-stacker-v7-soft-et",
-    #"loky-stacker-v7-soft-ridge",
-    #"loky-stacker-v7-soft-rf",
+    "loky-stacker-v7-soft-et",
+    "loky-stacker-v7-soft-ridge",
+    "loky-stacker-v7-soft-rf",
 ]
 
 
