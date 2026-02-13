@@ -1,4 +1,4 @@
-.PHONY: help install-uv setup list clean tests format
+.PHONY: help install-uv setup list clean tests format download-ucr
 .ONESHELL:
 
 help:   ## Show available commands
@@ -27,3 +27,9 @@ format: ## Format the code with isort and ruff
 	uv run --extra dev isort . --profile black
 	uv run --extra dev ruff format .
 	uv run --extra dev ruff check . --fix
+
+download-ucr: ## Download and unzip UCR archive (all folds) into data/
+	mkdir -p data
+	curl -L -o data/ucr.zip 'https://drive.usercontent.google.com/download?id=1V36LSZLAK6FIYRfPx6mmE5euzogcXS83&export=download&authuser=0&confirm=t&uuid=07e23200-74c3-4fd6-ba24-c5cde6e39a45&at=APcXIO39z41iEW4mVw4ltHUn9yYC%3A1769851071815'
+	unzip -o data/ucr.zip -d data/
+	rm data/ucr.zip

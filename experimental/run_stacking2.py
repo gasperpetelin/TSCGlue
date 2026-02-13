@@ -2,6 +2,7 @@ import os
 import re
 import random
 from itertools import product
+from pathlib import Path
 from urllib.parse import urlparse
 
 import boto3
@@ -39,6 +40,7 @@ from urllib.parse import urlparse
 
 class S3FileCache:
     def __init__(self, base_s3_dir: str):
+        self.base_s3_dir = base_s3_dir.rstrip("/")
         parsed = urlparse(base_s3_dir)
         self.bucket = parsed.netloc
         self.prefix = parsed.path.lstrip("/").rstrip("/")
@@ -86,10 +88,21 @@ class S3FileCache:
             raise
 
     def add(self, df: pl.DataFrame, filename: str):
-        full_name = self._full_key(filename)
+        full_name = f"{self.base_s3_dir}/{filename}"
         df.write_parquet(full_name)
+        self._files.add(filename)
 
 
+class LocalFileCache:
+    def __init__(self, base_dir: str):
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+
+    def exists(self, filename: str) -> bool:
+        return (self.base_dir / filename).exists()
+
+    def add(self, df: pl.DataFrame, filename: str):
+        df.write_parquet(self.base_dir / filename)
 
 
 def optimal_k(n_train, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
@@ -128,15 +141,15 @@ def get_model(model_name, random_state, n_train=None):
     elif model_name == "mr-hydra-contained-auto":
         return MultiRocketHydraSelectKBestClassifier(k=None, n_jobs=8, random_state=random_state)
     elif model_name == "loky-stacker-v7":
-        return LokyStackerV7(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV7(random_state=random_state, n_repetitions=1, n_jobs=8, verbose=10)
     elif model_name == "loky-stacker-v7-soft-et":
-        return LokyStackerV7SoftET(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV7SoftET(random_state=random_state, n_repetitions=1, n_jobs=8, verbose=10)
     elif model_name == "loky-stacker-v7-soft-ridge":
-        return LokyStackerV7SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV7SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=8, verbose=10)
     elif model_name == "loky-stacker-v7-soft-rf":
-        return LokyStackerV7SoftRF(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV7SoftRF(random_state=random_state, n_repetitions=1, n_jobs=8, verbose=10)
     elif model_name == "loky-stacker-v7-soft-filter-ridge":
-        return LokyStackerV7SoftFilterRidge(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV7SoftFilterRidge(random_state=random_state, n_repetitions=1, n_jobs=8, verbose=10)
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([

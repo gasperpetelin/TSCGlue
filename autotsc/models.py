@@ -2788,8 +2788,8 @@ class LokyStackerV7SoftFilterRidge(LokyStackerV7):
         self.best_model = stacking_model
 
 class LokyStackerV7SoftET(LokyStackerV7):
-    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1):
-        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs)
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
 
         self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
         self.series_models = ["rstsf"]
@@ -2801,8 +2801,8 @@ class LokyStackerV7SoftET(LokyStackerV7):
 
 
 class LokyStackerV7SoftRidge(LokyStackerV7):
-    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1):
-        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs)
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
 
         self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
         self.series_models = ["rstsf"]
@@ -2814,8 +2814,8 @@ class LokyStackerV7SoftRidge(LokyStackerV7):
 
 
 class LokyStackerV7SoftRF(LokyStackerV7):
-    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1):
-        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs)
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
 
         self.feature_models = ["multirockethydra-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
         self.series_models = ["rstsf"]
