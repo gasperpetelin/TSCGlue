@@ -4,6 +4,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --output=stacking2_%j.out
 #SBATCH --error=stacking2_%j.err
+#SBATCH --partition=e7
 #SBATCH --reservation=e7
 #SBATCH --array=0-29
 
