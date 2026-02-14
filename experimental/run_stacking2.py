@@ -109,25 +109,25 @@ def optimal_k(n_train, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
     return int(k_min + (k_max - k_min) / (1 + np.exp(-steepness * (n_train - midpoint))))
 
 
-def get_model(model_name, random_state, n_train=None):
+def get_model(model_name, random_state, n_train=None, n_jobs=8):
     if model_name == "loky-stacker-v5-r1":
-        return LokyStackerV5(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV5(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
     elif model_name == "loky-stacker-v5-r3":
-        return LokyStackerV5(random_state=random_state, n_repetitions=3, n_jobs=8)
+        return LokyStackerV5(random_state=random_state, n_repetitions=3, n_jobs=n_jobs)
     elif model_name == "loky-stacker-v5-soft-et":
-        return LokyStackerV5SoftET(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV5SoftET(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
     elif model_name == "loky-stacker-v5-soft-ridge":
-        return LokyStackerV5SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV5SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
     elif model_name == "loky-stacker-v5-soft-rf":
-        return LokyStackerV5SoftRF(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV5SoftRF(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
     elif model_name == "loky-stacker-v6":
-        return LokyStackerV6(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV6(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
     elif model_name == "loky-stacker-v6-soft-et":
-        return LokyStackerV6SoftET(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV6SoftET(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
     elif model_name == "loky-stacker-v6-soft-ridge":
-        return LokyStackerV6SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV6SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
     elif model_name == "loky-stacker-v6-soft-rf":
-        return LokyStackerV6SoftRF(random_state=random_state, n_repetitions=1, n_jobs=8)
+        return LokyStackerV6SoftRF(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
     elif model_name == "mr-hydra-kbest-auto":
         if n_train is None:
             raise ValueError("n_train is required for mr-hydra-kbest-auto")
@@ -137,19 +137,19 @@ def get_model(model_name, random_state, n_train=None):
             ("select", SelectKBest(f_classif, k=k)),
             ("clf", RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))),
         ])
-        return MRHydraClassifier(estimator=e, n_jobs=16, random_state=random_state)
+        return MRHydraClassifier(estimator=e, n_jobs=n_jobs, random_state=random_state)
     elif model_name == "mr-hydra-contained-auto":
-        return MultiRocketHydraSelectKBestClassifier(k=None, n_jobs=8, random_state=random_state)
+        return MultiRocketHydraSelectKBestClassifier(k=None, n_jobs=n_jobs, random_state=random_state)
     elif model_name == "loky-stacker-v7":
-        return LokyStackerV7(random_state=random_state, n_repetitions=1, n_jobs=8, verbose=10)
+        return LokyStackerV7(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v7-soft-et":
-        return LokyStackerV7SoftET(random_state=random_state, n_repetitions=1, n_jobs=8, verbose=10)
+        return LokyStackerV7SoftET(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v7-soft-ridge":
-        return LokyStackerV7SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=8, verbose=10)
+        return LokyStackerV7SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v7-soft-rf":
-        return LokyStackerV7SoftRF(random_state=random_state, n_repetitions=1, n_jobs=8, verbose=10)
+        return LokyStackerV7SoftRF(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v7-soft-filter-ridge":
-        return LokyStackerV7SoftFilterRidge(random_state=random_state, n_repetitions=1, n_jobs=8, verbose=10)
+        return LokyStackerV7SoftFilterRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([
@@ -157,7 +157,7 @@ def get_model(model_name, random_state, n_train=None):
             ("select", SelectKBest(f_classif, k=k)),
             ("clf", RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))),
         ])
-        return MRHydraClassifier(estimator=e, n_jobs=16, random_state=random_state)
+        return MRHydraClassifier(estimator=e, n_jobs=n_jobs, random_state=random_state)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
@@ -211,7 +211,8 @@ def discover_folds(dataset_name: str) -> list[int]:
 @click.option("-l", "--list-models", is_flag=True, help="List all available models and exit")
 @click.option("--list-datasets", is_flag=True, help="List all available datasets and exit")
 @click.option("--storage", type=click.Choice(["s3", "disk"]), default="s3", help="Storage backend: s3 or disk")
-def main(models, dataset_names, fold_spec, list_models, list_datasets, storage):
+@click.option("-j", "--n-jobs", default=8, type=int, help="Number of parallel jobs")
+def main(models, dataset_names, fold_spec, list_models, list_datasets, storage, n_jobs):
     """Run loky stacking experiments on local fold datasets."""
     all_datasets = discover_datasets()
 
@@ -299,7 +300,7 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets, storage):
 
             X_train, y_train, X_test, y_test = load_fold(dataset, fold)
 
-            model = get_model(model_name, random_state=fold, n_train=len(X_train))
+            model = get_model(model_name, random_state=fold, n_train=len(X_train), n_jobs=n_jobs)
             model.fit(X_train, y_train)
             preds = model.predict(X_test)
             if hasattr(model, "cleanup"):
