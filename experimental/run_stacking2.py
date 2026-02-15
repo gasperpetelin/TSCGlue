@@ -18,6 +18,13 @@ from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from autotsc.data_loader import DATA_DIR, load_fold
 from autotsc.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier
 from autotsc.models import (
+    LokyStackerV7,
+    LokyStackerV7SoftET,
+    LokyStackerV7SoftFilterRidge,
+    LokyStackerV7SoftRidge,
+    LokyStackerV7SoftRF,
+)
+from autotsc.old_models import (
     LokyStackerV5,
     LokyStackerV5SoftET,
     LokyStackerV5SoftRidge,
@@ -26,11 +33,6 @@ from autotsc.models import (
     LokyStackerV6SoftET,
     LokyStackerV6SoftRidge,
     LokyStackerV6SoftRF,
-    LokyStackerV7,
-    LokyStackerV7SoftET,
-    LokyStackerV7SoftFilterRidge,
-    LokyStackerV7SoftRidge,
-    LokyStackerV7SoftRF,
 )
 
 import boto3

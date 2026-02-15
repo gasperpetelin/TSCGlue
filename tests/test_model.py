@@ -1,7 +1,8 @@
 """Tests for AutoTSC models."""
 
 import pytest
-from autotsc.models import LokyStackerV5, LokyStackerV6, LokyStackerV7
+from autotsc.models import LokyStackerV7
+from autotsc.old_models import LokyStackerV5, LokyStackerV6
 from sklearn.metrics import accuracy_score
 from autotsc import utils
 

@@ -28,7 +28,7 @@ from sklearn.metrics import accuracy_score
 from catboost import CatBoostClassifier
 
 from autotsc import transformers, utils
-from autotsc.models import StackerV4, LokyStackerV5, LokyStackerV5SoftET, LokyStackerV5SoftRidge, LokyStackerV5SoftRF
+from autotsc.old_models import StackerV4, LokyStackerV5, LokyStackerV5SoftET, LokyStackerV5SoftRidge, LokyStackerV5SoftRF
 
 
 def s3_file_exists(s3_uri: str) -> bool:
