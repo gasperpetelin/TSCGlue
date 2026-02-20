@@ -161,3 +161,7 @@ Executor shutdown complete
 Script should clean up its data if killed or if it exits.
 
 - #### Split code on tsc-glue and bechmarking 
+
+- #### Handle what happens if one model/model raises error. 
+
+- #### Precheck what models can even be ussed and what not (due to dependencies)

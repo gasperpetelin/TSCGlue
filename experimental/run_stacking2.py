@@ -15,6 +15,8 @@ from sklearn.linear_model import RidgeClassifierCV
 from sklearn.metrics import accuracy_score
 from sklearn.pipeline import Pipeline
 from aeon.classification.convolution_based import MultiRocketHydraClassifier
+from aeon.classification.dummy import DummyClassifier
+from aeon.classification.feature_based import Catch22Classifier
 from autotsc.data_loader import DATA_DIR, load_fold
 from autotsc.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier
 from autotsc.models import (
@@ -23,7 +25,41 @@ from autotsc.models import (
     LokyStackerV7SoftFilterRidge,
     LokyStackerV7SoftRidge,
     LokyStackerV7SoftRF,
+    LokyStackerV8Base,
+    LokyStackerV7Filter_M,
+    LokyStackerV7Filter_Q,
+    LokyStackerV7Filter_R,
+    LokyStackerV7Filter_S,
+    LokyStackerV7Filter_MQ,
+    LokyStackerV7Filter_MR,
+    LokyStackerV7Filter_MS,
+    LokyStackerV7Filter_QR,
+    LokyStackerV7Filter_QS,
+    LokyStackerV7Filter_RS,
+    LokyStackerV7Filter_MQR,
+    LokyStackerV7Filter_MQS,
+    LokyStackerV7Filter_MRS,
+    LokyStackerV7Filter_QRS,
+    LokyStackerV7Filter_MQRS,
 )
+
+_FILTER_VARIANTS = {
+    "loky-filter-M":    LokyStackerV7Filter_M,
+    "loky-filter-Q":    LokyStackerV7Filter_Q,
+    "loky-filter-R":    LokyStackerV7Filter_R,
+    "loky-filter-S":    LokyStackerV7Filter_S,
+    "loky-filter-MQ":   LokyStackerV7Filter_MQ,
+    "loky-filter-MR":   LokyStackerV7Filter_MR,
+    "loky-filter-MS":   LokyStackerV7Filter_MS,
+    "loky-filter-QR":   LokyStackerV7Filter_QR,
+    "loky-filter-QS":   LokyStackerV7Filter_QS,
+    "loky-filter-RS":   LokyStackerV7Filter_RS,
+    "loky-filter-MQR":  LokyStackerV7Filter_MQR,
+    "loky-filter-MQS":  LokyStackerV7Filter_MQS,
+    "loky-filter-MRS":  LokyStackerV7Filter_MRS,
+    "loky-filter-QRS":  LokyStackerV7Filter_QRS,
+    "loky-filter-MQRS": LokyStackerV7Filter_MQRS,
+}
 from autotsc.old_models import (
     LokyStackerV5,
     LokyStackerV5SoftET,
@@ -152,6 +188,20 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return LokyStackerV7SoftRF(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v7-soft-filter-ridge":
         return LokyStackerV7SoftFilterRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v8-base":
+        return LokyStackerV8Base(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
+    elif model_name == "mydummy":
+        return DummyClassifier()
+    elif model_name == "mycatch22":
+        return Catch22Classifier(random_state=random_state)
+    elif model_name == "mycatch22v2":
+        return Catch22Classifier(random_state=random_state + 1000)
+    elif model_name == "mymrhydra":
+        return MultiRocketHydraClassifier(random_state=random_state, n_jobs=n_jobs)
+    elif model_name == "mymrhydrav2":
+        return MultiRocketHydraClassifier(random_state=random_state + 1000, n_jobs=n_jobs)
+    elif model_name in _FILTER_VARIANTS:
+        return _FILTER_VARIANTS[model_name](random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([
@@ -180,9 +230,16 @@ ALL_MODELS = [
     "mr-hydra-contained-auto",
     "loky-stacker-v7",
     "loky-stacker-v7-soft-filter-ridge",
+    "loky-stacker-v8-base",
     "loky-stacker-v7-soft-et",
     "loky-stacker-v7-soft-ridge",
     "loky-stacker-v7-soft-rf",
+    "mydummy",
+    "mycatch22",
+    "mycatch22v2",
+    "mymrhydra",
+    "mymrhydrav2",
+    #*_FILTER_VARIANTS,
 ]
 
 

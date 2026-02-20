@@ -23,7 +23,7 @@ from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.linear_model import RidgeClassifierCV
 from sklearn.metrics import accuracy_score
 import shutil
-from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from autotsc import utils
@@ -237,6 +237,8 @@ def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1):
         case _:
             raise ValueError(f"Unknown feature transformer type: {feature_type}")
 
+def _noop():
+    return None
 
 class LokyStackerV7(BaseClassifier):
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10,
@@ -267,6 +269,7 @@ class LokyStackerV7(BaseClassifier):
         self.best_model = self.stacking_models[-1]
 
         self.hyperparameters = hyperparameters
+        self._oof_scores = []
 
     def _get_feature_seed(self):
         return int(self.feature_seed.integers(0, 2**31 - 1, dtype=np.int32))
@@ -417,7 +420,7 @@ class LokyStackerV7(BaseClassifier):
         os.makedirs(self._tmpdir, exist_ok=True)
 
         start_save_x_y_time = perf_counter()
-        X_path, _, _ = save_array(X, "X", self._tmpdir)
+        X_path, _, _ = save_array(X, "X", self._tmpdir, dtype=np.float64) # TODO Ensure this is saved as 32 or 64 depending on the input
         y_path, _, _ = save_array(y, "y", self._tmpdir)
         save_durration = perf_counter() - start_save_x_y_time
         #print(f"[{perf_counter() - fit_start_time:.4f}s] Saved X and y to disk in {save_durration:.4f}s")
@@ -434,7 +437,6 @@ class LokyStackerV7(BaseClassifier):
         if self.cv_splits is None:
             self.cv_splits = []
 
-
         predictions = []
 
         quant_start_time = perf_counter()
@@ -446,49 +448,58 @@ class LokyStackerV7(BaseClassifier):
         # Accumulate all splits across repetitions for stacking
         all_splits = []
 
-        try:
-            for repetition in range(self.n_repetitions):
-                self.log(f"Starting repetition {repetition}", level=2, start_time=fit_start_time)
+        self._executor = ProcessPoolExecutor(
+            max_workers=self.n_jobs,
+            mp_context=multiprocessing.get_context('spawn'),
+        )
+        futures = [self._executor.submit(_noop) for _ in range(self.n_jobs)]
+        with self._executor as executor:
 
-                multirocket_start_time = perf_counter()
-                _, _, _, shape, size_mb = self.calculate_features(feature_type="multirocket", X=X, repetition=repetition)
-                multirocket_durration = perf_counter() - multirocket_start_time
-                self.log(f"Computed MultiRocket features {shape} ({size_mb:.2f} MB) in {multirocket_durration:.4f}s", level=1, start_time=fit_start_time)
+            try:
+                for repetition in range(self.n_repetitions):
 
-                hydra_start_time = perf_counter()
-                _, _, _, shape, size_mb = self.calculate_features(feature_type="hydra", X=X, repetition=repetition)
-                hydra_durration = perf_counter() - hydra_start_time
-                self.log(f"Computed Hydra features {shape} ({size_mb:.2f} MB) in {hydra_durration:.4f}s", level=1, start_time=fit_start_time)
+                    self.log(f"Starting repetition {repetition}", level=2, start_time=fit_start_time)
 
-                rdst_start_time = perf_counter()
-                _, _, _, shape, size_mb = self.calculate_features(feature_type="rdst", X=X, repetition=repetition)
-                rdst_durration = perf_counter() - rdst_start_time
-                self.log(f"Computed RDST features {shape} ({size_mb:.2f} MB) in {rdst_durration:.4f}s", level=1, start_time=fit_start_time)
+                    multirocket_start_time = perf_counter()
+                    _, _, _, shape, size_mb = self.calculate_features(feature_type="multirocket", X=X, repetition=repetition)
+                    multirocket_durration = perf_counter() - multirocket_start_time
+                    self.log(f"Computed MultiRocket features {shape} ({size_mb:.2f} MB) in {multirocket_durration:.4f}s", level=1, start_time=fit_start_time)
 
-                current_splits = generate_folds(
-                    X, y, n_splits=self.k_folds, n_repetitions=1, random_state=self._get_feature_seed()
-                )
-                all_splits.extend(current_splits)
+                    hydra_start_time = perf_counter()
+                    _, _, _, shape, size_mb = self.calculate_features(feature_type="hydra", X=X, repetition=repetition)
+                    hydra_durration = perf_counter() - hydra_start_time
+                    self.log(f"Computed Hydra features {shape} ({size_mb:.2f} MB) in {hydra_durration:.4f}s", level=1, start_time=fit_start_time)
 
-                # Per-repetition feature specs
-                feature_specs = {ft: repetition for ft in ("quant", "multirocket", "hydra", "rdst")}
+                    rdst_start_time = perf_counter()
+                    _, _, _, shape, size_mb = self.calculate_features(feature_type="rdst", X=X.astype(np.float64), repetition=repetition)
+                    rdst_durration = perf_counter() - rdst_start_time
+                    self.log(f"Computed RDST features {shape} ({size_mb:.2f} MB) in {rdst_durration:.4f}s", level=1, start_time=fit_start_time)
 
-                # Build list of tasks — model names tagged with repetition
-                tasks = []
-                for model_name in self.feature_models + self.series_models:
-                    is_series = model_name in self.series_models
-                    for fold_number, (train_idx, val_idx) in enumerate(current_splits):
-                        model_seed = self._get_feature_seed()
-                        tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
-                                      self._tmpdir, feature_specs, self._model_dir, repetition))
+                    current_splits = generate_folds(
+                        X, y, n_splits=self.k_folds, n_repetitions=1, random_state=self._get_feature_seed()
+                    )
+                    all_splits.extend(current_splits)
 
-                n_workers = min(self.n_jobs, len(tasks))
-                self.log(f"Starting training with {n_workers} workers for {len(tasks)} models", level=2, start_time=fit_start_time)
+                    # Per-repetition feature specs
+                    feature_specs = {ft: repetition for ft in ("quant", "multirocket", "hydra", "rdst")}
 
-                with ProcessPoolExecutor(
-                    max_workers=n_workers,
-                    mp_context=multiprocessing.get_context('spawn'),
-                ) as executor:
+                    # Build list of tasks — model names tagged with repetition
+                    tasks = []
+                    for model_name in self.feature_models + self.series_models:
+                        is_series = model_name in self.series_models
+                        for fold_number, (train_idx, val_idx) in enumerate(current_splits):
+                            model_seed = self._get_feature_seed()
+                            tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
+                                        self._tmpdir, feature_specs, self._model_dir, repetition))
+
+                    n_workers = min(self.n_jobs, len(tasks))
+                    self.log(f"Starting training with {n_workers} workers for {len(tasks)} models", level=2, start_time=fit_start_time)
+
+                    # TODO this should be collected only first time so processes are initialized and warmed up while features are being calculated
+                    for f in futures:
+                        f.result()
+
+                    
                     futures = {
                         executor.submit(_train_one_model_v7, *task): task
                         for task in tasks
@@ -533,43 +544,40 @@ class LokyStackerV7(BaseClassifier):
                             predictions = self._save_model_predictions(predictions, model_name_result, n_samples=X.shape[0], level=0)
 
                             oof_acc = self._compute_oof_accuracy(y, model_name_result)
+                            self._oof_scores.append({"model": model_name_result, "level": 0, "oof_accuracy": oof_acc})
                             self.log(f"OOF acc for model {model_name_result}: {oof_acc}", level=1, start_time=fit_start_time)
 
-                self.log(f"Completed repetition {repetition}", level=1, start_time=fit_start_time)
+                    self.log(f"Completed repetition {repetition}", level=1, start_time=fit_start_time)
 
-            # Train stacking models only once after all repetitions
-            self.log("Starting stacking model training (single pass)", level=2, start_time=fit_start_time)
+                # Train stacking models only once after all repetitions
+                self.log("Starting stacking model training (single pass)", level=2, start_time=fit_start_time)
 
-            # Build probability array from level-0 predictions (no averaging — model names are unique per rep)
-            prob_array = self._build_probability_array(n_samples=X.shape[0])
+                # Build probability array from level-0 predictions (no averaging — model names are unique per rep)
+                prob_array = self._build_probability_array(n_samples=X.shape[0])
 
-            # Check for NaN values
-            if prob_array is None or np.isnan(prob_array).any():
-                self.log("NaN values detected in probability array, skipping stacking", level=2, start_time=fit_start_time)
-                self.log("Falling back to MultiRocketHydraClassifier", level=2, start_time=fit_start_time)
-                fallback = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
-                fallback.fit(X, y)
-                save_model(fallback, "fallback", self._model_dir)
-                self.log("Fallback model trained successfully", level=2, start_time=fit_start_time)
-                return
+                # Check for NaN values
+                if prob_array is None or np.isnan(prob_array).any():
+                    self.log("NaN values detected in probability array, skipping stacking", level=2, start_time=fit_start_time)
+                    self.log("Falling back to MultiRocketHydraClassifier", level=2, start_time=fit_start_time)
+                    fallback = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
+                    fallback.fit(X, y)
+                    save_model(fallback, "fallback", self._model_dir)
+                    self.log("Fallback model trained successfully", level=2, start_time=fit_start_time)
+                    return
 
-            # Save probability array
-            save_array(prob_array, "Xt_probabilities", self._tmpdir)
-            stacking_specs = {"probabilities": None}
+                # Save probability array
+                save_array(prob_array, "Xt_probabilities", self._tmpdir)
+                stacking_specs = {"probabilities": None}
 
-            for model_name in self.stacking_models:
-                tasks = []
-                is_series = model_name in self.series_models
-                for fold_number, (train_idx, val_idx) in enumerate(all_splits):
-                    model_seed = self._get_feature_seed()
-                    tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
-                                  self._tmpdir, stacking_specs, self._model_dir, 0))
+                for model_name in self.stacking_models:
+                    tasks = []
+                    is_series = model_name in self.series_models
+                    for fold_number, (train_idx, val_idx) in enumerate(all_splits):
+                        model_seed = self._get_feature_seed()
+                        tasks.append((fold_number, model_name, is_series, train_idx, val_idx, model_seed,
+                                    self._tmpdir, stacking_specs, self._model_dir, 0))
 
-                n_workers = min(self.n_jobs, len(tasks))
-                with ProcessPoolExecutor(
-                    max_workers=n_workers,
-                    mp_context=multiprocessing.get_context('spawn'),
-                ) as executor:
+                    n_workers = min(self.n_jobs, len(tasks))
                     futures = {
                         executor.submit(_train_one_model_v7, *task): task
                         for task in tasks
@@ -600,23 +608,24 @@ class LokyStackerV7(BaseClassifier):
                                 }
                                 predictions.append(d)
 
-                # Save stacking model OOF predictions to disk
-                predictions = self._save_model_predictions(predictions, model_name, n_samples=X.shape[0], level=1)
+                    # Save stacking model OOF predictions to disk
+                    predictions = self._save_model_predictions(predictions, model_name, n_samples=X.shape[0], level=1)
 
-                oof_acc = self._compute_oof_accuracy(y, model_name)
-                self.log(f"OOF acc for model {model_name}: {oof_acc}", level=1, start_time=fit_start_time)
+                    oof_acc = self._compute_oof_accuracy(y, model_name)
+                    self._oof_scores.append({"model": model_name, "level": 1, "oof_accuracy": oof_acc})
+                    self.log(f"OOF acc for model {model_name}: {oof_acc}", level=1, start_time=fit_start_time)
 
-            self.log("Completed all repetitions and stacking", level=1, start_time=fit_start_time)
+                self.log("Completed all repetitions and stacking", level=1, start_time=fit_start_time)
 
-        finally:
-            # Clean up temp directory unless keep_features is set
-            if not self.keep_features and self._tmpdir and os.path.exists(self._tmpdir):
-                shutil.rmtree(self._tmpdir)
-                self._tmpdir = None
-            # Store training dir in a fitted attribute that survives aeon's post-fit reset
-            if self.keep_features and self._tmpdir:
-                self.features_training_dir_ = self._tmpdir
-            self.log("Executor shutdown complete", level=2, start_time=fit_start_time)
+            finally:
+                # Clean up temp directory unless keep_features is set
+                if not self.keep_features and self._tmpdir and os.path.exists(self._tmpdir):
+                    shutil.rmtree(self._tmpdir)
+                    self._tmpdir = None
+                # Store training dir in a fitted attribute that survives aeon's post-fit reset
+                if self.keep_features and self._tmpdir:
+                    self.features_training_dir_ = self._tmpdir
+                self.log("Executor shutdown complete", level=2, start_time=fit_start_time)
 
     def _get_training_dir(self):
         """Return the training features directory, checking both _tmpdir and the fitted attribute."""
@@ -667,6 +676,14 @@ class LokyStackerV7(BaseClassifier):
         if not frames:
             return pl.DataFrame()
         return pl.concat(frames, how="horizontal")
+
+    def summary(self) -> list[dict]:
+        """Return OOF scores collected during fit.
+
+        Each entry is a dict with keys: model, level, oof_accuracy.
+        Level 0 = base models, level 1 = stacking models.
+        """
+        return self._oof_scores
 
     def compute_features(self, X: np.ndarray) -> dict[int, dict[str, np.ndarray]]:
         """Compute features for prediction, returning per-repetition feature dicts.
@@ -853,6 +870,29 @@ class LokyStackerV7(BaseClassifier):
                 self._tmpdir = None
             print("Executor shutdown complete")
 
+    def predict_per_model(self, X):
+        """Return hard predictions for each sub-model.
+
+        Returns dict {model_name: np.ndarray of predicted class labels}.
+        """
+        proba_per_model = self.predict_proba_per_model(X)
+        return {
+            model_name: self.classes_[np.argmax(proba, axis=1)]
+            for model_name, proba in proba_per_model.items()
+        }
+
+class LokyStackerV8Base(LokyStackerV7):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
+
+        self.feature_models = ["multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+        self.series_models = ["rstsf"]
+        self.oof_models = []
+
+        stacking_model = "probability-ridgecv"
+        other_stacking_models = ["probability-et", "probability-rf"]
+        self.stacking_models = [stacking_model] + other_stacking_models
+        self.best_model = stacking_model
 
 class LokyStackerV7SoftFilterRidge(LokyStackerV7):
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
@@ -865,6 +905,58 @@ class LokyStackerV7SoftFilterRidge(LokyStackerV7):
         stacking_model = "probability-ridgecv"
         self.stacking_models = [stacking_model]
         self.best_model = stacking_model
+
+
+def _make_filter_variant(cls_name, feature_models, series_models):
+    """Factory for LokyStackerV7 ablation variants with a specific sub-model combination."""
+    _fm = list(feature_models)
+    _sm = list(series_models)
+    _stacking = "probability-ridgecv"
+
+    class _Variant(LokyStackerV7):
+        def __init__(self, random_state=None, n_repetitions=1, k_folds=10,
+                     n_jobs=1, keep_features=False, verbose=0):
+            super().__init__(
+                random_state=random_state, n_repetitions=n_repetitions,
+                k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features,
+                verbose=verbose,
+            )
+            self.feature_models = _fm[:]
+            self.series_models = _sm[:]
+            self.oof_models = []
+            self.stacking_models = [_stacking]
+            self.best_model = _stacking
+
+    _Variant.__name__ = cls_name
+    _Variant.__qualname__ = cls_name
+    return _Variant
+
+
+_MRH = "multirockethydra-bestk-p-ridgecv"
+_Q   = "quant-etc"
+_R   = "rdst-p-ridgecv"
+_S   = "rstsf"
+
+# Single-component
+LokyStackerV7Filter_M    = _make_filter_variant("LokyStackerV7Filter_M",    [_MRH],          [])
+LokyStackerV7Filter_Q    = _make_filter_variant("LokyStackerV7Filter_Q",    [_Q],            [])
+LokyStackerV7Filter_R    = _make_filter_variant("LokyStackerV7Filter_R",    [_R],            [])
+LokyStackerV7Filter_S    = _make_filter_variant("LokyStackerV7Filter_S",    [],              [_S])
+# Two-component
+LokyStackerV7Filter_MQ   = _make_filter_variant("LokyStackerV7Filter_MQ",   [_MRH, _Q],      [])
+LokyStackerV7Filter_MR   = _make_filter_variant("LokyStackerV7Filter_MR",   [_MRH, _R],      [])
+LokyStackerV7Filter_MS   = _make_filter_variant("LokyStackerV7Filter_MS",   [_MRH],          [_S])
+LokyStackerV7Filter_QR   = _make_filter_variant("LokyStackerV7Filter_QR",   [_Q, _R],        [])
+LokyStackerV7Filter_QS   = _make_filter_variant("LokyStackerV7Filter_QS",   [_Q],            [_S])
+LokyStackerV7Filter_RS   = _make_filter_variant("LokyStackerV7Filter_RS",   [_R],            [_S])
+# Three-component
+LokyStackerV7Filter_MQR  = _make_filter_variant("LokyStackerV7Filter_MQR",  [_MRH, _Q, _R],  [])
+LokyStackerV7Filter_MQS  = _make_filter_variant("LokyStackerV7Filter_MQS",  [_MRH, _Q],      [_S])
+LokyStackerV7Filter_MRS  = _make_filter_variant("LokyStackerV7Filter_MRS",  [_MRH, _R],      [_S])
+LokyStackerV7Filter_QRS  = _make_filter_variant("LokyStackerV7Filter_QRS",  [_Q, _R],        [_S])
+# All four (equivalent to LokyStackerV7SoftFilterRidge)
+LokyStackerV7Filter_MQRS = _make_filter_variant("LokyStackerV7Filter_MQRS", [_MRH, _Q, _R],  [_S])
+
 
 class LokyStackerV7SoftET(LokyStackerV7):
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
@@ -913,8 +1005,8 @@ def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
     return all_folds
 
 class TSCGlue(LokyStackerV7SoftFilterRidge):
-    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
-        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
+    def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
+        super().__init__(random_state=random_state, n_repetitions=1, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
 
 
 class CrossValidationWrapper(BaseClassifier):
