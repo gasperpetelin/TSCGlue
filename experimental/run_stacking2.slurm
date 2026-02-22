@@ -18,4 +18,6 @@
 #   sbatch run_stacking2.slurm -m loky-stacker-v6                     # specific model, all folds
 #   sbatch run_stacking2.slurm -m loky-stacker-v6 -d Worms            # specific model + dataset
 
+set -x
+export PYTHONUNBUFFERED=1
 uv run run_stacking2.py --storage disk -j 4 -f $SLURM_ARRAY_TASK_ID "$@"
