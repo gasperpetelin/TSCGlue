@@ -50,8 +50,8 @@ import tempfile
 import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from autotsc import transformers, utils
-from autotsc.models import (
+from tscglue import transformers, utils
+from tscglue.models import (
     DictMultiScaler,
     MultiScaler,
     NoScaler,

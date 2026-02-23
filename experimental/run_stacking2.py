@@ -17,9 +17,9 @@ from sklearn.pipeline import Pipeline
 from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.classification.dummy import DummyClassifier
 from aeon.classification.feature_based import Catch22Classifier
-from autotsc.data_loader import DATA_DIR, load_fold
-from autotsc.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier
-from autotsc.models import (
+from tscglue.data_loader import DATA_DIR, load_fold
+from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier
+from tscglue.models import (
     LokyStackerV7,
     LokyStackerV7SoftET,
     LokyStackerV7SoftFilterRidge,
@@ -60,7 +60,7 @@ _FILTER_VARIANTS = {
     "loky-filter-QRS":  LokyStackerV7Filter_QRS,
     "loky-filter-MQRS": LokyStackerV7Filter_MQRS,
 }
-from autotsc.old_models import (
+from tscglue.old_models import (
     LokyStackerV5,
     LokyStackerV5SoftET,
     LokyStackerV5SoftRidge,

@@ -26,7 +26,7 @@ import shutil
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
-from autotsc import utils
+from tscglue import utils
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
@@ -257,7 +257,7 @@ class LokyStackerV7(BaseClassifier):
         self.feature_seed = np.random.default_rng(random_state)
 
         self._run_id = uuid.uuid4().hex[:16]
-        self._base_dir = os.path.join(".", "tscglue", self._run_id)
+        self._base_dir = os.path.join(".", "tscglue_runs", self._run_id)
         self._model_dir = os.path.join(self._base_dir, "models")
         self._tmpdir = os.path.join(self._base_dir, "features_training")
         self.keep_features = keep_features

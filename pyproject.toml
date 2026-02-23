@@ -1,5 +1,5 @@
 [project]
-name = "autotsc"
+name = "tscglue"
 version = "0.1.0"
 description = "Automatic Time Series Classification"
 readme = "README.md"
@@ -47,7 +47,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["autotsc"]
+packages = ["tscglue"]
 
 [tool.ruff]
 line-length = 100

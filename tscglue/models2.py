@@ -31,7 +31,7 @@ from aeon.transformations.collection import (
 )
 from aeon.utils.numba.general import first_order_differences_3d
 from sklearn.preprocessing import FunctionTransformer
-from autotsc import utils
+from tscglue import utils
 from aeon.transformations.collection.interval_based import RandomIntervals
 
 

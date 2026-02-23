@@ -1,6 +1,6 @@
 import os
 
-from autotsc.models2 import RSTSFUnsupervisedClassifier
+from tscglue.models2 import RSTSFUnsupervisedClassifier
 
 os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 from urllib.parse import urlparse
@@ -14,7 +14,7 @@ from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
 from sklearn.linear_model import RidgeClassifierCV, SGDClassifier
 from sklearn.pipeline import Pipeline
 
-from autotsc.gpu_models import MRHydraClassifier
+from tscglue.gpu_models import MRHydraClassifier
 from aeon.classification.feature_based import Catch22Classifier
 from aeon.classification.hybrid import HIVECOTEV2
 from aeon.classification.interval_based import RSTSF, QUANTClassifier, DrCIFClassifier
@@ -27,8 +27,8 @@ from botocore.exceptions import ClientError
 from sklearn.metrics import accuracy_score
 from catboost import CatBoostClassifier
 
-from autotsc import transformers, utils
-from autotsc.old_models import StackerV4, LokyStackerV5, LokyStackerV5SoftET, LokyStackerV5SoftRidge, LokyStackerV5SoftRF
+from tscglue import transformers, utils
+from tscglue.old_models import StackerV4, LokyStackerV5, LokyStackerV5SoftET, LokyStackerV5SoftRidge, LokyStackerV5SoftRF
 
 
 def s3_file_exists(s3_uri: str) -> bool:

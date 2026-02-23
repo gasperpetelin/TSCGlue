@@ -1,10 +1,10 @@
 """Tests for AutoTSC models."""
 
 import pytest
-from autotsc.models import LokyStackerV7
-from autotsc.old_models import LokyStackerV5, LokyStackerV6
+from tscglue.models import LokyStackerV7
+from tscglue.old_models import LokyStackerV5, LokyStackerV6
 from sklearn.metrics import accuracy_score
-from autotsc import utils
+from tscglue import utils
 
 
 def test_model_accuracy_on_arrowhead():
