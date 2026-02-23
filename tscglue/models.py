@@ -315,6 +315,20 @@ class LokyStackerV7(BaseClassifier):
         predicted_indices = np.argmax(probas, axis=1)
         return self.classes_[predicted_indices]
 
+    def _on_stacking_complete(self, fit_start_time=None):
+        """Hook called after all stacking models are trained. Handles auto best-model selection."""
+        if self.best_model == "auto-best-stacking":
+            scores = [s for s in self._oof_scores if s["level"] == 1]
+        elif self.best_model == "auto-best-base":
+            scores = [s for s in self._oof_scores if s["level"] == 0]
+        elif self.best_model == "auto-best":
+            scores = list(self._oof_scores)
+        else:
+            return
+        if scores:
+            self.best_model = max(scores, key=lambda s: s["oof_accuracy"])["model"]
+            self.log(f"Auto-selected best model: {self.best_model}", level=1, start_time=fit_start_time)
+
     def cleanup(self):
         """Remove saved models and features from disk."""
         if self._base_dir and os.path.exists(self._base_dir):
@@ -616,6 +630,7 @@ class LokyStackerV7(BaseClassifier):
                     self.log(f"OOF acc for model {model_name}: {oof_acc}", level=1, start_time=fit_start_time)
 
                 self.log("Completed all repetitions and stacking", level=1, start_time=fit_start_time)
+                self._on_stacking_complete(fit_start_time=fit_start_time)
 
             finally:
                 # Clean up temp directory unless keep_features is set
@@ -893,6 +908,21 @@ class LokyStackerV8Base(LokyStackerV7):
         other_stacking_models = ["probability-et", "probability-rf"]
         self.stacking_models = [stacking_model] + other_stacking_models
         self.best_model = stacking_model
+
+class LokyStackerV8AutoBestStacking(LokyStackerV8Base):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
+        self.best_model = "auto-best-stacking"
+
+class LokyStackerV8AutoBestBase(LokyStackerV8Base):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
+        self.best_model = "auto-best-base"
+
+class LokyStackerV8AutoBest(LokyStackerV8Base):
+    def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
+        self.best_model = "auto-best"
 
 class LokyStackerV7SoftFilterRidge(LokyStackerV7):
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):

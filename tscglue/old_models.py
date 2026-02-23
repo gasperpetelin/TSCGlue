@@ -2002,7 +2002,7 @@ class LokyStackerV6(LokyStackerV5):
         if self._base_dir and os.path.exists(self._base_dir):
             shutil.rmtree(self._base_dir)
         self._run_id = uuid.uuid4().hex[:16]
-        self._base_dir = os.path.join(".", "tscglue", self._run_id)
+        self._base_dir = os.path.join(".", "tscglue_runs", self._run_id)
         self._model_dir = os.path.join(self._base_dir, "models")
         self._tmpdir = os.path.join(self._base_dir, "features")
         os.makedirs(self._model_dir, exist_ok=True)

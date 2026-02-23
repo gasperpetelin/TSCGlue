@@ -26,6 +26,9 @@ from tscglue.models import (
     LokyStackerV7SoftRidge,
     LokyStackerV7SoftRF,
     LokyStackerV8Base,
+    LokyStackerV8AutoBestStacking,
+    LokyStackerV8AutoBestBase,
+    LokyStackerV8AutoBest,
     LokyStackerV7Filter_M,
     LokyStackerV7Filter_Q,
     LokyStackerV7Filter_R,
@@ -190,6 +193,12 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return LokyStackerV7SoftFilterRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v8-base":
         return LokyStackerV8Base(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v8-auto-best-stacking":
+        return LokyStackerV8AutoBestStacking(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v8-auto-best-base":
+        return LokyStackerV8AutoBestBase(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v8-auto-best":
+        return LokyStackerV8AutoBest(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name == "mydummy":
         return DummyClassifier()
     elif model_name == "mycatch22":
@@ -231,6 +240,9 @@ ALL_MODELS = [
     "loky-stacker-v7",
     "loky-stacker-v7-soft-filter-ridge",
     "loky-stacker-v8-base",
+    "loky-stacker-v8-auto-best-stacking",
+    "loky-stacker-v8-auto-best-base",
+    "loky-stacker-v8-auto-best",
     "loky-stacker-v7-soft-et",
     "loky-stacker-v7-soft-ridge",
     "loky-stacker-v7-soft-rf",
