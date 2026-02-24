@@ -326,7 +326,13 @@ class LokyStackerV7(BaseClassifier):
         else:
             return
         if scores:
-            self.best_model = max(scores, key=lambda s: s["oof_accuracy"])["model"]
+            selected_model = max(scores, key=lambda s: s["oof_accuracy"])["model"]
+            # Stacking OOF entries may be repetition-tagged (e.g. "probability-ridgecv_r1"),
+            # while inference keys remain unsuffixed stacking model names.
+            parts = selected_model.rsplit("_r", 1)
+            if len(parts) == 2 and parts[1].isdigit() and parts[0] in self.stacking_models:
+                selected_model = parts[0]
+            self.best_model = selected_model
             self.log(f"Auto-selected best model: {self.best_model}", level=1, start_time=fit_start_time)
 
     def cleanup(self):
@@ -494,8 +500,9 @@ class LokyStackerV7(BaseClassifier):
                     )
                     all_splits.extend(current_splits)
 
-                    # Per-repetition feature specs
+                    # Quant is computed once at r0 and reused across all repetitions.
                     feature_specs = {ft: repetition for ft in ("quant", "multirocket", "hydra", "rdst")}
+                    feature_specs["quant"] = 0
 
                     # Build list of tasks — model names tagged with repetition
                     tasks = []
@@ -597,6 +604,7 @@ class LokyStackerV7(BaseClassifier):
                         for task in tasks
                     }
 
+                    model_groups = {}
                     for future in as_completed(futures):
                         task = futures[future]
                         fold_number, model_name_task = task[0], task[1]
@@ -606,28 +614,45 @@ class LokyStackerV7(BaseClassifier):
                             raise RuntimeError(f"Worker failed during stacking training {model_name_task} fold {fold_number}: {e}")
 
                         train_idx, val_idx, proba, classes_, model_size, train_dur, model_name_result, fold_number = result
+                        repetition = fold_number // self.k_folds
+                        fold_in_repetition = fold_number % self.k_folds
+                        tagged_model_name = f"{model_name_result}_r{repetition}"
 
-                        self.log(f"Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number} ({model_size / (1024 * 1024):.2f} MB)", level=2, start_time=fit_start_time)
+                        self.log(
+                            f"Trained {tagged_model_name} in {train_dur:.4f}s for f-{fold_in_repetition}/r-{repetition} ({model_size / (1024 * 1024):.2f} MB)",
+                            level=2,
+                            start_time=fit_start_time,
+                        )
 
                         level = 1
                         for idx, p in zip(val_idx, proba):
                             for scls, prob in zip(classes_, p):
                                 d = {
                                     "index": idx,
-                                    "model": model_name_result,
-                                    "repetition": 0,
+                                    "model": tagged_model_name,
+                                    "repetition": repetition,
                                     "level": level,
                                     "class": scls.item(),
                                     "probability": prob.item(),
                                 }
                                 predictions.append(d)
 
-                    # Save stacking model OOF predictions to disk
-                    predictions = self._save_model_predictions(predictions, model_name, n_samples=X.shape[0], level=1)
+                        if tagged_model_name not in model_groups:
+                            model_groups[tagged_model_name] = []
+                        model_groups[tagged_model_name].append(fold_number)
 
-                    oof_acc = self._compute_oof_accuracy(y, model_name)
-                    self._oof_scores.append({"model": model_name, "level": 1, "oof_accuracy": oof_acc})
-                    self.log(f"OOF acc for model {model_name}: {oof_acc}", level=1, start_time=fit_start_time)
+                        if len(model_groups[tagged_model_name]) == self.k_folds:
+                            self.log(f"Completed training for model {tagged_model_name}", level=2, start_time=fit_start_time)
+                            del model_groups[tagged_model_name]
+
+                            # Save OOF predictions to disk and clear from memory
+                            predictions = self._save_model_predictions(
+                                predictions, tagged_model_name, n_samples=X.shape[0], level=1
+                            )
+
+                            oof_acc = self._compute_oof_accuracy(y, tagged_model_name)
+                            self._oof_scores.append({"model": tagged_model_name, "level": 1, "oof_accuracy": oof_acc})
+                            self.log(f"OOF acc for model {tagged_model_name}: {oof_acc}", level=1, start_time=fit_start_time)
 
                 self.log("Completed all repetitions and stacking", level=1, start_time=fit_start_time)
                 self._on_stacking_complete(fit_start_time=fit_start_time)

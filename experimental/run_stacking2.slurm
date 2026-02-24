@@ -3,7 +3,7 @@
 #SBATCH --time=08:00:00
 #SBATCH --time-min=00:30:00
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --output=logs/stacking2_%A_%a.out
 #SBATCH --error=logs/stacking2_%A_%a.err
 #SBATCH --partition=e7

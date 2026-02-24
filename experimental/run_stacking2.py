@@ -191,8 +191,10 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return LokyStackerV7SoftRF(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v7-soft-filter-ridge":
         return LokyStackerV7SoftFilterRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v8-base":
+    elif model_name in ("loky-stacker-v8-base", "loky-stacker-v8-base-r1"):
         return LokyStackerV8Base(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v8-base-r3":
+        return LokyStackerV8Base(random_state=random_state, n_repetitions=3, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v8-auto-best-stacking":
         return LokyStackerV8AutoBestStacking(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v8-auto-best-base":
@@ -239,7 +241,8 @@ ALL_MODELS = [
     "mr-hydra-contained-auto",
     "loky-stacker-v7",
     "loky-stacker-v7-soft-filter-ridge",
-    "loky-stacker-v8-base",
+    "loky-stacker-v8-base-r1",
+    "loky-stacker-v8-base-r3",
     "loky-stacker-v8-auto-best-stacking",
     "loky-stacker-v8-auto-best-base",
     "loky-stacker-v8-auto-best",
