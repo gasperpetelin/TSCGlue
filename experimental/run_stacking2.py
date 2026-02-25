@@ -18,6 +18,7 @@ from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.classification.dummy import DummyClassifier
 from aeon.classification.feature_based import Catch22Classifier
 from tscglue.data_loader import DATA_DIR, load_fold
+from tscglue.models_tsfm import Chronos2Classifier
 from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier
 from tscglue.models import (
     LokyStackerV7,
@@ -201,6 +202,8 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return LokyStackerV8AutoBestBase(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v8-auto-best":
         return LokyStackerV8AutoBest(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
+    elif model_name == "chronos2":
+        return Chronos2Classifier()
     elif model_name == "mydummy":
         return DummyClassifier()
     elif model_name == "mycatch22":
@@ -249,6 +252,7 @@ ALL_MODELS = [
     "loky-stacker-v7-soft-et",
     "loky-stacker-v7-soft-ridge",
     "loky-stacker-v7-soft-rf",
+    "chronos2",
     "mydummy",
     "mycatch22",
     "mycatch22v2",

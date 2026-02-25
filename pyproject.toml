@@ -39,7 +39,11 @@ notebooks = [
     "jupyter",
     "jupyterlab",
     "ipykernel",
-    "hvplot"
+    "hvplot",
+    "pandas",
+    "transformers",
+    "accelerate",
+    "chronos-forecasting",
 ]
 
 [build-system]

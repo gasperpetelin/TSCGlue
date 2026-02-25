@@ -131,7 +131,7 @@ def get_model_v6(name, seed=None, n_jobs=1):
         return scaler, clf
     elif name == "probability-rf":
         scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
-        clf = RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=n_jobs)
+        clf = RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=-1)
         return scaler, clf
     elif name == "multirockethydra-bestk-p-ridgecv":
         scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})

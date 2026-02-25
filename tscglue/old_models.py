@@ -1170,7 +1170,7 @@ def get_model(name, seed=None, n_jobs=1):
                 },
                 verbose=False,
             ),
-            RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=n_jobs),
+            RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=-1),
         )
         return pipe
     else:
