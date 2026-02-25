@@ -732,30 +732,45 @@ class LokyStackerV7(BaseClassifier):
         """
         rep_features = {}
         # Quant is computed once at rep 0
+        compute_start_time = perf_counter()
         quant_transform = read_model("transformer_quant", self._model_dir, repetition=0)
-        rep_features[0] = {"quant": quant_transform.transform(X)}
+        X_t = quant_transform.transform(X)
+        size_mb = X_t.nbytes / (1024 * 1024)
+        shape = X_t.shape
+        rep_features[0] = {"quant": X_t}
+        duration = perf_counter() - compute_start_time
+        self.log(f"Computed QUANT features {shape} ({size_mb:.2f} MB) in {duration:4f}s", level=1, start_time=compute_start_time)
         # Other feature types are per-repetition
         for repetition in range(self.n_repetitions):
             if repetition not in rep_features:
                 rep_features[repetition] = {}
-            for feature_type in ("multirocket", "hydra", "rdst"):
-                transform = read_model(f"transformer_{feature_type}", self._model_dir, repetition=repetition)
-                rep_features[repetition][feature_type] = transform.transform(X)
+            for feature_type in ("MultiRocket", "Hydra", "RDST"):
+                feature_start_time = perf_counter()
+                transform = read_model(f"transformer_{feature_type.lower()}", self._model_dir, repetition=repetition)
+                X_t = transform.transform(X)
+                size_mb = X_t.nbytes / (1024 * 1024)
+                shape = X_t.shape
+                rep_features[repetition][feature_type.lower()] = X_t
+                duration = perf_counter() - feature_start_time
+                self.log(f"Computed repetition {repetition} {feature_type} features {shape[0],shape[1]} ({size_mb:.2f} MB) in {duration:4f}s", level=1, start_time=compute_start_time)
+
         return rep_features
 
     def predict_proba_per_model(self, X):
         import shutil
         predict_start_time = perf_counter()
-        print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction")
+        self.log("Starting prediction", level=1, start_time=predict_start_time)
 
         # Create features_inference directory for mmap files
         self._tmpdir = os.path.join(self._base_dir, "features_inference")
         os.makedirs(self._tmpdir, exist_ok=True)
-        print(f"Starting executor with {self.n_jobs} workers, run_dir={self._base_dir}")
+        self.log(f"Starting executor with {self.n_jobs} workers, run_dir={self._base_dir}", level=1, start_time=predict_start_time)
+
 
         try:
             rep_features = self.compute_features(X)
-            print(f"[{perf_counter() - predict_start_time:.4f}s] Computed features for prediction")
+            self.log(f"Computed features for prediction", level=1,
+                     start_time=predict_start_time)
 
             # Save X and per-repetition feature arrays
             save_array(X, "X", self._tmpdir)
@@ -767,7 +782,8 @@ class LokyStackerV7(BaseClassifier):
                     save_array(arr, f"Xt_{feat_type}", self._tmpdir, repetition=rep)
                     if feat_type == "quant":
                         quant_rep = rep
-            print(f"[{perf_counter() - predict_start_time:.4f}s] Feature arrays saved to mmap files")
+            self.log(f"Feature arrays saved to mmap files", level=2,
+                     start_time=predict_start_time)
 
             predictions = []
 
@@ -784,7 +800,7 @@ class LokyStackerV7(BaseClassifier):
                                       self._tmpdir, feature_specs, self._model_dir, rep, fold))
 
             n_workers = min(self.n_jobs, len(tasks))
-            print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction with {n_workers} workers for {len(tasks)} first-level models")
+            self.log(f"Starting prediction with {n_workers} workers for {len(tasks)} first-level models", level=1, start_time=predict_start_time)
 
             with ProcessPoolExecutor(
                 max_workers=n_workers,
@@ -804,15 +820,13 @@ class LokyStackerV7(BaseClassifier):
                         raise RuntimeError(f"Worker failed during prediction {model_name_task}: {e}")
 
                     proba, classes_, predict_dur, model_name = result
-                    print(
-                        f"[{perf_counter() - predict_start_time:.4f}s] Predicted {model_name} in {predict_dur:.4f}s"
-                    )
+                    self.log(f"Predicted {model_name} in {predict_dur:.4f}s", level=2, start_time=predict_start_time)
 
                     level = 0
                     pred_list = self.add_probabilities(proba, classes_, model_name, level)
                     predictions.extend(pred_list)
 
-            print(f"[{perf_counter() - predict_start_time:.4f}s] Completed all first-level model predictions")
+            self.log(f"Completed all first-level model predictions", level=1, start_time=predict_start_time)
 
             # Build probability array from level-0 predictions for stacking
             if self._tmpdir and os.path.exists(self._tmpdir):
@@ -849,8 +863,8 @@ class LokyStackerV7(BaseClassifier):
                                   self._tmpdir, stacking_specs, self._model_dir, 0, fold))
 
             n_workers = min(self.n_jobs, len(tasks))
-            print(f"[{perf_counter() - predict_start_time:.4f}s] Starting prediction with {n_workers} workers for {len(tasks)} stacking models")
-
+            self.log(f"Starting prediction with {n_workers} workers for {len(tasks)} stacking models",
+                     level=1, start_time=predict_start_time)
             with ProcessPoolExecutor(
                 max_workers=n_workers,
                 mp_context=multiprocessing.get_context('spawn'),
@@ -869,16 +883,13 @@ class LokyStackerV7(BaseClassifier):
                         raise RuntimeError(f"Worker failed during stacking prediction {model_name_task}: {e}")
 
                     proba, classes_, predict_dur, model_name = result
-                    print(
-                        f"[{perf_counter() - predict_start_time:.4f}s] Predicted {model_name} in {predict_dur:.4f}s"
-                    )
+                    self.log(f"Predicted {model_name} in {predict_dur:.4f}s", level=2, start_time=predict_start_time)
 
                     level = 1
                     pred_list = self.add_probabilities(proba, classes_, model_name, level)
                     predictions.extend(pred_list)
 
-            print(f"[{perf_counter() - predict_start_time:.4f}s] Completed all stacking model predictions")
-
+            self.log(f"Completed all stacking model predictions", level=1, start_time=predict_start_time)
             # Build return dict: average probabilities per model across folds
             all_preds_df = (
                 pl.DataFrame(predictions)
@@ -908,7 +919,7 @@ class LokyStackerV7(BaseClassifier):
             if self._tmpdir and os.path.exists(self._tmpdir):
                 shutil.rmtree(self._tmpdir)
                 self._tmpdir = None
-            print("Executor shutdown complete")
+            self.log("Executor shutdown complete", level=1, start_time=predict_start_time)
 
     def predict_per_model(self, X):
         """Return hard predictions for each sub-model.
