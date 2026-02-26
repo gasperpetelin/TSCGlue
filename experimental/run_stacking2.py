@@ -64,16 +64,6 @@ _FILTER_VARIANTS = {
     "loky-filter-QRS":  LokyStackerV7Filter_QRS,
     "loky-filter-MQRS": LokyStackerV7Filter_MQRS,
 }
-from tscglue.old_models import (
-    LokyStackerV5,
-    LokyStackerV5SoftET,
-    LokyStackerV5SoftRidge,
-    LokyStackerV5SoftRF,
-    LokyStackerV6,
-    LokyStackerV6SoftET,
-    LokyStackerV6SoftRidge,
-    LokyStackerV6SoftRF,
-)
 
 import boto3
 from botocore.exceptions import ClientError
@@ -152,25 +142,7 @@ def optimal_k(n_train, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
 
 
 def get_model(model_name, random_state, n_train=None, n_jobs=8):
-    if model_name == "loky-stacker-v5-r1":
-        return LokyStackerV5(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    elif model_name == "loky-stacker-v5-r3":
-        return LokyStackerV5(random_state=random_state, n_repetitions=3, n_jobs=n_jobs)
-    elif model_name == "loky-stacker-v5-soft-et":
-        return LokyStackerV5SoftET(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    elif model_name == "loky-stacker-v5-soft-ridge":
-        return LokyStackerV5SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    elif model_name == "loky-stacker-v5-soft-rf":
-        return LokyStackerV5SoftRF(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    elif model_name == "loky-stacker-v6":
-        return LokyStackerV6(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    elif model_name == "loky-stacker-v6-soft-et":
-        return LokyStackerV6SoftET(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    elif model_name == "loky-stacker-v6-soft-ridge":
-        return LokyStackerV6SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    elif model_name == "loky-stacker-v6-soft-rf":
-        return LokyStackerV6SoftRF(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    elif model_name == "mr-hydra-kbest-auto":
+    if model_name == "mr-hydra-kbest-auto":
         if n_train is None:
             raise ValueError("n_train is required for mr-hydra-kbest-auto")
         k = optimal_k(n_train)
