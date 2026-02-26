@@ -768,44 +768,48 @@ class LokyStackerV7(BaseClassifier):
 
 
         try:
-            rep_features = self.compute_features(X)
-            self.log(f"Computed features for prediction", level=1,
-                     start_time=predict_start_time)
-
-            # Save X and per-repetition feature arrays
-            save_array(X, "X", self._tmpdir)
-
-            # Quant is computed once (rep 0) and shared across all repetitions
-            quant_rep = None
-            for rep, feature_dict in rep_features.items():
-                for feat_type, arr in feature_dict.items():
-                    save_array(arr, f"Xt_{feat_type}", self._tmpdir, repetition=rep)
-                    if feat_type == "quant":
-                        quant_rep = rep
-            self.log(f"Feature arrays saved to mmap files", level=2,
-                     start_time=predict_start_time)
-
-            predictions = []
-
-            # Build tasks from known model structure
-            tasks = []
-            for model_name in self.feature_models + self.series_models:
-                is_series = model_name in self.series_models
-                for rep in range(self.n_repetitions):
-                    tagged_name = f"{model_name}_r{rep}"
-                    feature_specs = {ft: rep for ft in ("quant", "multirocket", "hydra", "rdst")}
-                    feature_specs["quant"] = quant_rep  # always shared from first rep
-                    for fold in range(self.k_folds):
-                        tasks.append((tagged_name, model_name, is_series,
-                                      self._tmpdir, feature_specs, self._model_dir, rep, fold))
-
-            n_workers = min(self.n_jobs, len(tasks))
-            self.log(f"Starting prediction with {n_workers} workers for {len(tasks)} first-level models", level=1, start_time=predict_start_time)
-
             with ProcessPoolExecutor(
-                max_workers=n_workers,
-                mp_context=multiprocessing.get_context('spawn'),
+                    max_workers=self.n_jobs,
+                    mp_context=multiprocessing.get_context('spawn'),
             ) as executor:
+                futures = [executor.submit(_noop) for _ in range(self.n_jobs)]
+
+                rep_features = self.compute_features(X)
+                self.log(f"Computed features for prediction", level=1,
+                         start_time=predict_start_time)
+
+                # Save X and per-repetition feature arrays
+                save_array(X, "X", self._tmpdir)
+
+                # Quant is computed once (rep 0) and shared across all repetitions
+                quant_rep = None
+                for rep, feature_dict in rep_features.items():
+                    for feat_type, arr in feature_dict.items():
+                        save_array(arr, f"Xt_{feat_type}", self._tmpdir, repetition=rep)
+                        if feat_type == "quant":
+                            quant_rep = rep
+                self.log(f"Feature arrays saved to mmap files", level=2,
+                         start_time=predict_start_time)
+
+                predictions = []
+
+                # Build tasks from known model structure
+                tasks = []
+                for model_name in self.feature_models + self.series_models:
+                    is_series = model_name in self.series_models
+                    for rep in range(self.n_repetitions):
+                        tagged_name = f"{model_name}_r{rep}"
+                        feature_specs = {ft: rep for ft in ("quant", "multirocket", "hydra", "rdst")}
+                        feature_specs["quant"] = quant_rep  # always shared from first rep
+                        for fold in range(self.k_folds):
+                            tasks.append((tagged_name, model_name, is_series,
+                                          self._tmpdir, feature_specs, self._model_dir, rep, fold))
+
+
+                self.log(f"Starting prediction with {self.n_jobs} workers for {len(tasks)} first-level models", level=1, start_time=predict_start_time)
+                for f in futures:
+                    f.result()
+
                 futures = {
                     executor.submit(_predict_one_model_v7, *task): task
                     for task in tasks
@@ -826,49 +830,45 @@ class LokyStackerV7(BaseClassifier):
                     pred_list = self.add_probabilities(proba, classes_, model_name, level)
                     predictions.extend(pred_list)
 
-            self.log(f"Completed all first-level model predictions", level=1, start_time=predict_start_time)
+                self.log(f"Completed all first-level model predictions", level=1, start_time=predict_start_time)
 
-            # Build probability array from level-0 predictions for stacking
-            if self._tmpdir and os.path.exists(self._tmpdir):
-                shutil.rmtree(self._tmpdir)
-            self._tmpdir = os.path.join(self._base_dir, "features")
-            os.makedirs(self._tmpdir, exist_ok=True)
+                # Build probability array from level-0 predictions for stacking
+                if self._tmpdir and os.path.exists(self._tmpdir):
+                    shutil.rmtree(self._tmpdir)
+                self._tmpdir = os.path.join(self._base_dir, "features")
+                os.makedirs(self._tmpdir, exist_ok=True)
 
-            # Pivot level-0 predictions into probability array (average across folds)
-            df = (
-                pl.DataFrame(predictions)
-                .pivot(
-                    values="probability",
-                    index="index",
-                    on=["level", "model", "class"],
-                    aggregate_function="mean",
+                # Pivot level-0 predictions into probability array (average across folds)
+                df = (
+                    pl.DataFrame(predictions)
+                    .pivot(
+                        values="probability",
+                        index="index",
+                        on=["level", "model", "class"],
+                        aggregate_function="mean",
+                    )
+                    .sort("index")
                 )
-                .sort("index")
-            )
-            # Use same sorted column order as training to ensure scaler alignment
-            prob_cols = sorted(c for c in df.columns if c != "index")
-            prob_array = df.select(prob_cols).to_numpy()
+                # Use same sorted column order as training to ensure scaler alignment
+                prob_cols = sorted(c for c in df.columns if c != "index")
+                prob_array = df.select(prob_cols).to_numpy()
 
-            save_array(X, "X", self._tmpdir)
-            save_array(prob_array, "Xt_probabilities", self._tmpdir)
-            stacking_specs = {"probabilities": None}
+                save_array(X, "X", self._tmpdir)
+                save_array(prob_array, "Xt_probabilities", self._tmpdir)
+                stacking_specs = {"probabilities": None}
 
-            # Build tasks for stacking models
-            n_stacking_folds = self.n_repetitions * self.k_folds
-            tasks = []
-            for model_name in self.stacking_models:
-                is_series = model_name in self.series_models
-                for fold in range(n_stacking_folds):
-                    tasks.append((model_name, model_name, is_series,
-                                  self._tmpdir, stacking_specs, self._model_dir, 0, fold))
+                # Build tasks for stacking models
+                n_stacking_folds = self.n_repetitions * self.k_folds
+                tasks = []
+                for model_name in self.stacking_models:
+                    is_series = model_name in self.series_models
+                    for fold in range(n_stacking_folds):
+                        tasks.append((model_name, model_name, is_series,
+                                      self._tmpdir, stacking_specs, self._model_dir, 0, fold))
 
-            n_workers = min(self.n_jobs, len(tasks))
-            self.log(f"Starting prediction with {n_workers} workers for {len(tasks)} stacking models",
-                     level=1, start_time=predict_start_time)
-            with ProcessPoolExecutor(
-                max_workers=n_workers,
-                mp_context=multiprocessing.get_context('spawn'),
-            ) as executor:
+                self.log(f"Starting prediction with {self.n_jobs} workers for {len(tasks)} stacking models",
+                         level=1, start_time=predict_start_time)
+
                 futures = {
                     executor.submit(_predict_one_model_v7, *task): task
                     for task in tasks
