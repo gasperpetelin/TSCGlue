@@ -506,7 +506,7 @@ class LokyStackerV7(BaseClassifier):
 
                     # Build list of tasks — model names tagged with repetition
                     tasks = []
-                    for model_name in self.feature_models + self.series_models:
+                    for model_name in self.series_models + self.feature_models:
                         is_series = model_name in self.series_models
                         for fold_number, (train_idx, val_idx) in enumerate(current_splits):
                             model_seed = self._get_feature_seed()
@@ -515,11 +515,6 @@ class LokyStackerV7(BaseClassifier):
 
                     n_workers = min(self.n_jobs, len(tasks))
                     self.log(f"Starting training with {n_workers} workers for {len(tasks)} models", level=2, start_time=fit_start_time)
-
-                    # TODO this should be collected only first time so processes are initialized and warmed up while features are being calculated
-                    for f in futures:
-                        f.result()
-
                     
                     futures = {
                         executor.submit(_train_one_model_v7, *task): task
@@ -660,7 +655,9 @@ class LokyStackerV7(BaseClassifier):
             finally:
                 # Clean up temp directory unless keep_features is set
                 if not self.keep_features and self._tmpdir and os.path.exists(self._tmpdir):
+                    cleanup_start = perf_counter()
                     shutil.rmtree(self._tmpdir)
+                    self.log(f"Cleaned up tmpdir in {perf_counter() - cleanup_start:.2f}s", level=2, start_time=fit_start_time)
                     self._tmpdir = None
                 # Store training dir in a fitted attribute that survives aeon's post-fit reset
                 if self.keep_features and self._tmpdir:
@@ -795,7 +792,7 @@ class LokyStackerV7(BaseClassifier):
 
                 # Build tasks from known model structure
                 tasks = []
-                for model_name in self.feature_models + self.series_models:
+                for model_name in reversed(self.feature_models + self.series_models):
                     is_series = model_name in self.series_models
                     for rep in range(self.n_repetitions):
                         tagged_name = f"{model_name}_r{rep}"
@@ -941,8 +938,8 @@ class LokyStackerV8Base(LokyStackerV7):
         self.oof_models = []
 
         stacking_model = "probability-ridgecv"
-        other_stacking_models = ["probability-et", "probability-rf"]
-        self.stacking_models = [stacking_model] + other_stacking_models
+        # other_stacking_models = ["probability-et", "probability-rf"]
+        self.stacking_models = [stacking_model] # + other_stacking_models
         self.best_model = stacking_model
 
 class LokyStackerV8AutoBestStacking(LokyStackerV8Base):
