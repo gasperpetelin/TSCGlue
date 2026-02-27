@@ -728,36 +728,30 @@ class LokyStackerV7(BaseClassifier):
         """
         return self._oof_scores
 
-    def compute_features(self, X: np.ndarray) -> dict[int, dict[str, np.ndarray]]:
-        """Compute features for prediction, returning per-repetition feature dicts.
-
-        Returns {repetition: {feature_type: np.ndarray}}.
-        """
-        rep_features = {}
-        # Quant is computed once at rep 0
+    def compute_features(self, X: np.ndarray, directory: str) -> None:
+        """Compute features for prediction, saving each to disk immediately to minimise peak RAM."""
         compute_start_time = perf_counter()
+        # Quant is computed once at rep 0 and shared across all repetitions
         quant_transform = read_model("transformer_quant", self._model_dir, repetition=0)
         X_t = quant_transform.transform(X)
         size_mb = X_t.nbytes / (1024 * 1024)
         shape = X_t.shape
-        rep_features[0] = {"quant": X_t}
+        save_array(X_t, "Xt_quant", directory, repetition=0)
+        del X_t
         duration = perf_counter() - compute_start_time
         self.log(f"Computed QUANT features {shape} ({size_mb:.2f} MB) in {duration:4f}s", level=1, start_time=compute_start_time)
         # Other feature types are per-repetition
         for repetition in range(self.n_repetitions):
-            if repetition not in rep_features:
-                rep_features[repetition] = {}
             for feature_type in ("MultiRocket", "Hydra", "RDST"):
                 feature_start_time = perf_counter()
                 transform = read_model(f"transformer_{feature_type.lower()}", self._model_dir, repetition=repetition)
                 X_t = transform.transform(X)
                 size_mb = X_t.nbytes / (1024 * 1024)
                 shape = X_t.shape
-                rep_features[repetition][feature_type.lower()] = X_t
+                save_array(X_t, f"Xt_{feature_type.lower()}", directory, repetition=repetition)
+                del X_t
                 duration = perf_counter() - feature_start_time
                 self.log(f"Computed repetition {repetition} {feature_type} features {shape[0],shape[1]} ({size_mb:.2f} MB) in {duration:4f}s", level=1, start_time=compute_start_time)
-
-        return rep_features
 
     def predict_proba_per_model(self, X):
         import shutil
@@ -777,21 +771,9 @@ class LokyStackerV7(BaseClassifier):
             ) as executor:
                 futures = [executor.submit(_noop) for _ in range(self.n_jobs)]
 
-                rep_features = self.compute_features(X)
-                self.log(f"Computed features for prediction", level=1,
-                         start_time=predict_start_time)
-
-                # Save X and per-repetition feature arrays
                 save_array(X, "X", self._tmpdir)
-
-                # Quant is computed once (rep 0) and shared across all repetitions
-                quant_rep = None
-                for rep, feature_dict in rep_features.items():
-                    for feat_type, arr in feature_dict.items():
-                        save_array(arr, f"Xt_{feat_type}", self._tmpdir, repetition=rep)
-                        if feat_type == "quant":
-                            quant_rep = rep
-                self.log(f"Feature arrays saved to mmap files", level=2,
+                self.compute_features(X, self._tmpdir)
+                self.log(f"Computed and saved features for prediction", level=1,
                          start_time=predict_start_time)
 
                 predictions = []
@@ -803,7 +785,7 @@ class LokyStackerV7(BaseClassifier):
                     for rep in range(self.n_repetitions):
                         tagged_name = f"{model_name}_r{rep}"
                         feature_specs = {ft: rep for ft in ("quant", "multirocket", "hydra", "rdst")}
-                        feature_specs["quant"] = quant_rep  # always shared from first rep
+                        feature_specs["quant"] = 0  # quant is always shared from rep 0
                         for fold in range(self.k_folds):
                             tasks.append((tagged_name, model_name, is_series,
                                           self._tmpdir, feature_specs, self._model_dir, rep, fold))
