@@ -18,6 +18,7 @@ dependencies = [
     "imblearn",
     "click",
     "pyarrow",
+    "statsmodels"
 ]
 
 [project.optional-dependencies]
