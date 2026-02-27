@@ -245,6 +245,8 @@ def _noop():
     return None
 
 class LokyStackerV7(BaseClassifier):
+    _tags = {"capability:multivariate": True}
+
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10,
                  n_jobs=1, keep_features=False,
                  hyperparameters=None, verbose=0,

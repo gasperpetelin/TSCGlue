@@ -14,11 +14,7 @@ dependencies = [
     "torch",
     "torchvision",
     "pytorch-lightning",
-    "tabpfn",
     "huggingface-hub",
-    "tsfresh",
-    "ray",
-    "catboost",
     "imblearn",
     "click",
     "pyarrow",
@@ -33,7 +29,6 @@ dev = [
     "boto3",
     "awscli",
     "moto[s3]",
-    # "datasets<3.0.0"
 ]
 notebooks = [
     "jupyter",
