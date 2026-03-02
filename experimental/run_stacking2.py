@@ -23,6 +23,7 @@ from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestCla
 from tscglue.models import (
     LokyStackerV7,
     LokyStackerV7SoftET,
+    LokyStackerV9Base,
     LokyStackerV7SoftFilterRidge,
     LokyStackerV7SoftRidge,
     LokyStackerV7SoftRF,
@@ -174,6 +175,14 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return LokyStackerV8AutoBestBase(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v8-auto-best":
         return LokyStackerV8AutoBest(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v9-base-r1":
+        return LokyStackerV9Base(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v9-base-r2":
+        return LokyStackerV9Base(random_state=random_state, n_repetitions=2, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v9-base-r3":
+        return LokyStackerV9Base(random_state=random_state, n_repetitions=3, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v9-base-r5":
+        return LokyStackerV9Base(random_state=random_state, n_repetitions=5, n_jobs=n_jobs, verbose=10)
     elif model_name == "chronos2":
         return Chronos2Classifier()
     elif model_name == "mydummy":
@@ -221,6 +230,10 @@ ALL_MODELS = [
     "loky-stacker-v8-auto-best-stacking",
     "loky-stacker-v8-auto-best-base",
     "loky-stacker-v8-auto-best",
+    "loky-stacker-v9-base-r1",
+    "loky-stacker-v9-base-r2",
+    "loky-stacker-v9-base-r3",
+    "loky-stacker-v9-base-r5",
     "loky-stacker-v7-soft-et",
     "loky-stacker-v7-soft-ridge",
     "loky-stacker-v7-soft-rf",
