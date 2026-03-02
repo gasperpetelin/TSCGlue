@@ -147,17 +147,17 @@ def optimal_k(n_train, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
 
 def get_model(model_name, random_state, n_train=None, n_jobs=8):
     match model_name:
-        case "mydummy": return DummyClassifier()
-        case "mycatch22": return Catch22Classifier(random_state=random_state)
-        case "mymrhydra": return MultiRocketHydraClassifier(random_state=random_state, n_jobs=n_jobs)
+        case "dummy": return DummyClassifier()
+        case "catch22": return Catch22Classifier(random_state=random_state)
+        case "mrhydra": return MultiRocketHydraClassifier(random_state=random_state, n_jobs=n_jobs)
         case "quant": return QUANTClassifier(interval_depth=1)
         case _: raise ValueError(f"Unknown model name: {model_name}")
 
 
 ALL_MODELS = [
-    "mydummy",
-    "mycatch22",
-    "mymrhydra",
+    "dummy",
+    "catch22",
+    "mrhydra",
     "quant"
 ]
 
