@@ -17,6 +17,8 @@ from sklearn.pipeline import Pipeline
 from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.classification.dummy import DummyClassifier
 from aeon.classification.feature_based import Catch22Classifier
+from aeon.classification.interval_based import QUANTClassifier
+from aeon.utils.discovery import all_estimators
 from tscglue.data_loader import DATA_DIR, load_fold
 from time import perf_counter
 # from tscglue.models_tsfm import Chronos2Classifier
@@ -144,113 +146,19 @@ def optimal_k(n_train, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
 
 
 def get_model(model_name, random_state, n_train=None, n_jobs=8):
-    # if model_name == "loky-stacker-v5-r1":
-    #     return LokyStackerV5(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    # elif model_name == "loky-stacker-v5-r3":
-    #     return LokyStackerV5(random_state=random_state, n_repetitions=3, n_jobs=n_jobs)
-    # elif model_name == "loky-stacker-v5-soft-et":
-    #     return LokyStackerV5SoftET(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    # elif model_name == "loky-stacker-v5-soft-ridge":
-    #     return LokyStackerV5SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    # elif model_name == "loky-stacker-v5-soft-rf":
-    #     return LokyStackerV5SoftRF(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    # elif model_name == "loky-stacker-v6":
-    #     return LokyStackerV6(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    # elif model_name == "loky-stacker-v6-soft-et":
-    #     return LokyStackerV6SoftET(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    # elif model_name == "loky-stacker-v6-soft-ridge":
-    #     return LokyStackerV6SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    # elif model_name == "loky-stacker-v6-soft-rf":
-    #     return LokyStackerV6SoftRF(random_state=random_state, n_repetitions=1, n_jobs=n_jobs)
-    # elif model_name == "mr-hydra-kbest-auto":
-    #     if n_train is None:
-    #         raise ValueError("n_train is required for mr-hydra-kbest-auto")
-    #     k = optimal_k(n_train)
-    #     e = Pipeline([
-    #         ("var", VarianceThreshold()),
-    #         ("select", SelectKBest(f_classif, k=k)),
-    #         ("clf", RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))),
-    #     ])
-    #     return MRHydraClassifier(estimator=e, n_jobs=n_jobs, random_state=random_state)
-    # elif model_name == "mr-hydra-contained-auto":
-    #     return MultiRocketHydraSelectKBestClassifier(k=None, n_jobs=n_jobs, random_state=random_state)
-    # elif model_name == "loky-stacker-v7":
-    #     return LokyStackerV7(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    # elif model_name == "loky-stacker-v7-soft-et":
-    #     return LokyStackerV7SoftET(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    # elif model_name == "loky-stacker-v7-soft-ridge":
-    #     return LokyStackerV7SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    # elif model_name == "loky-stacker-v7-soft-rf":
-    #     return LokyStackerV7SoftRF(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    # elif model_name == "loky-stacker-v7-soft-filter-ridge":
-    #     return LokyStackerV7SoftFilterRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    # elif model_name in ("loky-stacker-v8-base", "loky-stacker-v8-base-r1"):
-    #     return LokyStackerV8Base(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    # elif model_name == "loky-stacker-v8-base-r3":
-    #     return LokyStackerV8Base(random_state=random_state, n_repetitions=3, n_jobs=n_jobs, verbose=10)
-    # elif model_name == "loky-stacker-v8-auto-best-stacking":
-    #     return LokyStackerV8AutoBestStacking(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    # elif model_name == "loky-stacker-v8-auto-best-base":
-    #     return LokyStackerV8AutoBestBase(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    # elif model_name == "loky-stacker-v8-auto-best":
-    #     return LokyStackerV8AutoBest(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    # elif model_name == "chronos2":
-    #     return Chronos2Classifier()
-    if model_name == "mydummy":
-        return DummyClassifier()
-    # elif model_name == "mycatch22":
-    #     return Catch22Classifier(random_state=random_state)
-    elif model_name == "mycatch22v2":
-        return Catch22Classifier(random_state=random_state + 1000)
-    # elif model_name == "mymrhydra":
-    #     return MultiRocketHydraClassifier(random_state=random_state, n_jobs=n_jobs)
-    elif model_name == "mymrhydrav2":
-        return MultiRocketHydraClassifier(random_state=random_state + 1000, n_jobs=n_jobs)
-    # elif model_name in _FILTER_VARIANTS:
-    #     return _FILTER_VARIANTS[model_name](random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    # elif model_name.startswith("mr-hydra-kbest-"):
-    #     k = int(model_name.split("-")[-1])
-    #     e = Pipeline([
-    #         ("var", VarianceThreshold()),
-    #         ("select", SelectKBest(f_classif, k=k)),
-    #         ("clf", RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))),
-    #     ])
-    #     return MRHydraClassifier(estimator=e, n_jobs=n_jobs, random_state=random_state)
-    else:
-        raise ValueError(f"Unknown model name: {model_name}")
+    match model_name:
+        case "mydummy": return DummyClassifier()
+        case "mycatch22": return Catch22Classifier(random_state=random_state)
+        case "mymrhydra": return MultiRocketHydraClassifier(random_state=random_state, n_jobs=n_jobs)
+        case "quant": return QUANTClassifier(interval_depth=1)
+        case _: raise ValueError(f"Unknown model name: {model_name}")
 
 
 ALL_MODELS = [
-    # "loky-stacker-v5-r1",
-    # "loky-stacker-v5-soft-et",
-    # "loky-stacker-v5-soft-ridge",
-    # "loky-stacker-v5-soft-rf",
-    # "loky-stacker-v6",
-    # "loky-stacker-v6-soft-et",
-    # "loky-stacker-v6-soft-ridge",
-    # "loky-stacker-v6-soft-rf",
-    # "mr-hydra-kbest-5000",
-    # "mr-hydra-kbest-10000",
-    # "mr-hydra-kbest-30000",
-    # "mr-hydra-kbest-auto",
-    # "mr-hydra-contained-auto",
-    # "loky-stacker-v7",
-    # "loky-stacker-v7-soft-filter-ridge",
-    # "loky-stacker-v8-base-r1",
-    # "loky-stacker-v8-base-r3",
-    # "loky-stacker-v8-auto-best-stacking",
-    # "loky-stacker-v8-auto-best-base",
-    # "loky-stacker-v8-auto-best",
-    # "loky-stacker-v7-soft-et",
-    # "loky-stacker-v7-soft-ridge",
-    # "loky-stacker-v7-soft-rf",
-    # "chronos2",
     "mydummy",
-    # "mycatch22",
-    "mycatch22v2",
-    # "mymrhydra",
-    "mymrhydrav2",
-    #*_FILTER_VARIANTS,
+    "mycatch22",
+    "mymrhydra",
+    "quant"
 ]
 
 
@@ -335,9 +243,9 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets, storage, 
         requested_folds = [int(x.strip()) for x in fold_spec.split(",")]
 
     if storage == "s3":
-        cache = S3FileCache("s3://tsc-glue/performance-benchmarking")
+        cache = S3FileCache("s3://tsc-glue/time-benchmarking")
     else:
-        cache = LocalFileCache("performance-benchmarking")
+        cache = LocalFileCache("time-benchmarking")
 
     # Build all (dataset, model, fold) combos
     combos = []
@@ -367,23 +275,25 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets, storage, 
                 continue
             else:
                 print(f"[{k}/{n}] Processing: Dataset={dataset}, Fold={fold}, Model={model_name}")
-            start_time = perf_counter()
             X_train, y_train, X_test, y_test = load_fold(dataset, fold)
 
             model = get_model(model_name, random_state=fold, n_train=len(X_train), n_jobs=n_jobs)
+            train_start = perf_counter()
             model.fit(X_train, y_train)
+            train_duration = perf_counter() - train_start
+            inference_start = perf_counter()
             preds = model.predict(X_test)
+            inference_duration = perf_counter() - inference_start
             if hasattr(model, "cleanup"):
                 model.cleanup()
             acc = accuracy_score(y_test, preds)
-            duration = perf_counter() - start_time
             stats["test_accuracy"] = acc
-            stats["test_time"] = duration
+            stats["train_time"] = train_duration
+            stats["inference_time"] = inference_duration
             stats["cpus"] = os.getenv("SLURM_CPUS_PER_TASK")
             df_stat = pl.DataFrame([stats])
             # df_stat.write_parquet(file)
             cache.add(df_stat, file_name)
-            print(df_stat)
         except Exception as e:
             print(f"Error processing Dataset={dataset}, Fold={fold}, Model={model_name}: {e}")
 
