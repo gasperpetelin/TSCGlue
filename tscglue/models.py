@@ -1180,6 +1180,9 @@ class LokyStackerV9Base(BaseClassifier):
             mp_context=multiprocessing.get_context('spawn'),
         )
         futures = [self._executor.submit(_noop) for _ in range(self.n_jobs)]
+
+        self.neki = []
+
         with self._executor as executor:
 
             try:
@@ -1248,6 +1251,7 @@ class LokyStackerV9Base(BaseClassifier):
                                 "probability": prob.item(),
                             }
                             predictions.append(d)
+                            self.neki.append(d)
 
                     if model_name_result not in model_groups:
                         model_groups[model_name_result] = []
@@ -1721,9 +1725,9 @@ def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
         all_folds.extend(folds)
     return all_folds
 
-class TSCGlue(LokyStackerV7SoftFilterRidge):
-    def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
-        super().__init__(random_state=random_state, n_repetitions=1, k_folds=k_folds, n_jobs=n_jobs, keep_features=keep_features, verbose=verbose)
+class TSCGlue(LokyStackerV8Base):
+    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0):
+        super().__init__(random_state=random_state, n_repetitions=1, k_folds=k_folds, n_jobs=n_jobs, keep_features=False, verbose=verbose)
 
 
 class SparseScaler:

@@ -46,6 +46,7 @@ from tscglue.models import (
     LokyStackerV7Filter_MRS,
     LokyStackerV7Filter_QRS,
     LokyStackerV7Filter_MQRS,
+    TSCGlue,
 )
 
 _FILTER_VARIANTS = {
@@ -189,6 +190,8 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return DummyClassifier()
     elif model_name == "mycatch22":
         return Catch22Classifier(random_state=random_state)
+    elif model_name == "TSCGlue-3-3-26":
+        return TSCGlue(random_state=random_state, n_jobs=n_jobs)
     elif model_name == "mycatch22v2":
         return Catch22Classifier(random_state=random_state + 1000)
     elif model_name == "mymrhydra":
