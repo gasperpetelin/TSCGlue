@@ -243,6 +243,7 @@ ALL_MODELS = [
     "chronos2",
     "mydummy",
     "mycatch22",
+    "TSCGlue-3-3-26",
     "mycatch22v2",
     "mymrhydra",
     "mymrhydrav2",
