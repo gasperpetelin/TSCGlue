@@ -222,6 +222,7 @@ def save_model(model, name, directory, repetition=None, fold=None):
     return path, size
 
 def read_model(name, directory, repetition=None, fold=None):
+    directory = str(directory)
     rep_suffix = f"_r_{repetition}" if repetition is not None else ""
     fold_suffix = f"_f_{fold}" if fold is not None else ""
     path = f"{directory}/{name}{rep_suffix}{fold_suffix}.pkl"
@@ -916,6 +917,635 @@ class LokyStackerV7(BaseClassifier):
             model_name: self.classes_[np.argmax(proba, axis=1)]
             for model_name, proba in proba_per_model.items()
         }
+
+from pathlib import Path
+from typing import Any, Iterable
+from collections import defaultdict
+
+from dataclasses import dataclass
+from typing import Tuple
+
+@dataclass(frozen=True)
+class FeatureSpec:
+    feature_name: str
+    feature_seed: int | None = None
+
+    def get_feature_id(self):
+        return f'{self.feature_name}_s_{self.feature_seed}' if self.feature_seed is not None else self.feature_name
+
+@dataclass(frozen=True)
+class ModelSpec:
+    model_id: str
+    model_name: str
+    model_seed: int
+    is_series: bool
+    level: int
+    features: Tuple[FeatureSpec, ...]
+
+def _load_feature_dict_v10(directory, feature_specs):
+    """Load feature arrays using read_array with (feat_type, repetition) specs."""
+    feature_dict = {}
+    for feat_spec in feature_specs:
+        feat_id = feat_spec.get_feature_id()
+        feature_dict[feat_spec.feature_name] = read_array(f"Xt_{feat_id}", directory)
+    return feature_dict
+
+def _predict_one_model_v10(display_name, model_name, is_series, directory, feature_specs, model_dir, repetition, fold):
+    """Prediction function for V7 - loads model from disk, loads data via read_array."""
+    X = read_array("X", directory)
+    feature_dict = _load_feature_dict_v10(directory, feature_specs)
+
+    scaler, clf = read_model(model_name, model_dir, repetition, fold)
+    start_predict = perf_counter()
+
+    if is_series:
+        proba = clf.predict_proba(X)
+    else:
+        X_scaled = scaler.transform(feature_dict)
+        proba = clf.predict_proba(X_scaled)
+
+    predict_dur = perf_counter() - start_predict
+    return (proba, clf.classes_, predict_dur, display_name)
+
+def _train_one_model_v10(fold_number, model_name, is_series, train_idx, val_idx, model_seed,
+                         directory, feature_specs, model_dir, repetition):
+    """Training function for V7 - loads data via read_array, saves model to disk."""
+    X = read_array("X", directory)
+    y = read_array("y", directory)
+    feature_dict = _load_feature_dict_v10(directory, feature_specs)
+
+    scaler, clf = get_model_v6(model_name, seed=model_seed)
+    start_train = perf_counter()
+
+    if is_series:
+        clf.fit(X[train_idx], y[train_idx])
+        proba = clf.predict_proba(X[val_idx])
+        _, model_size = save_model((None, clf), model_name, model_dir, repetition, fold_number)
+    else:
+        clf.fit(scaler.fit_transform(feature_dict, idx=train_idx), y[train_idx])
+        proba = clf.predict_proba(scaler.transform(feature_dict, idx=val_idx))
+        _, model_size = save_model((scaler, clf), model_name, model_dir, repetition, fold_number)
+
+    train_dur = perf_counter() - start_train
+    return (train_idx, val_idx, proba, clf.classes_, model_size, train_dur, model_name, fold_number)
+
+class LokyStackerV10Base(BaseClassifier):
+    _tags = {"capability:multivariate": True}
+
+    FEATURE_MODELS = ["multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+    SERIES_MODELS = ["rstsf"]
+    STACKING_MODEL = "probability-ridgecv"
+    FEATURE_TYPES = ["quant", "multirocket", "hydra", "rdst"]
+
+    def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
+        super().__init__()
+        self.k_folds = int(k_folds)
+        self.random_state = random_state
+        self.n_jobs = int(n_jobs)
+        self.keep_features = bool(keep_features)
+        self.verbose = int(verbose)
+
+        self.cv_splits = None
+        self.feature_seed = np.random.default_rng(random_state)
+
+        self._run_id = uuid.uuid4().hex[:16]
+        self._base_dir = Path(".", "tscglue_runs", self._run_id)
+        self._model_dir = self._base_dir / "models"
+        self._tmpdir: Path | None = self._base_dir / "features_training"
+
+        self.feature_models = self.FEATURE_MODELS.copy()
+        self.series_models = self.SERIES_MODELS.copy()
+
+        self.stacking_models = [self.STACKING_MODEL]
+        assert len(self.stacking_models) == 1, f"Expected exactly 1 stacking model, got {len(self.stacking_models)}"
+        self.best_model = self.STACKING_MODEL
+
+        self._oof_scores: list[dict] = []
+        self._probability_columns: list[str] | None = None
+
+        self._fallback_path: Path = self._model_dir / "fallback.pkl"
+
+    # ----------------- utils -----------------
+
+    def _get_feature_seed(self) -> int:
+        return int(self.feature_seed.integers(0, 2**31 - 1, dtype=np.int32))
+
+    def log(self, message: str, level: int, start_time=None, current_time=None):
+        if self.verbose >= level:
+            if start_time is not None:
+                if current_time is None:
+                    current_time = perf_counter()
+                print(f"[{current_time - start_time:.2f}s] {message}")
+            else:
+                print(message)
+
+    def _require_tmpdir(self) -> Path:
+        if self._tmpdir is None:
+            raise RuntimeError("Temporary directory not available.")
+        return self._tmpdir
+
+    def cleanup(self):
+        if self._base_dir.exists():
+            shutil.rmtree(self._base_dir)
+
+    def _feature_input(self, ft: str, X: np.ndarray) -> np.ndarray:
+        return X.astype(np.float64) if ft == "rdst" else X
+
+    # ----------------- aeon API -----------------
+
+    def _predict_proba(self, X):
+        if self._fallback_path.exists():
+            fallback = read_model("fallback", str(self._model_dir))
+            return fallback.predict_proba(X)
+        return self.predict_proba_per_model(X)[self.best_model]
+
+    def _predict(self, X):
+        if self._fallback_path.exists():
+            fallback = read_model("fallback", str(self._model_dir))
+            return fallback.predict(X)
+        probas = self._predict_proba(X)
+        return self.classes_[np.argmax(probas, axis=1)]
+
+    # ----------------- prediction row helpers -----------------
+
+    def add_probabilities(self, probas, classes, model_name, level, indices=None):
+        preds = []
+        row_indices = np.arange(len(probas)) if indices is None else np.asarray(indices)
+        for idx, row in zip(row_indices, probas):
+            for scls, prob in zip(classes, row):
+                preds.append(
+                    {
+                        "index": int(idx),
+                        "model": model_name,
+                        "level": level,
+                        "class": scls.item(),
+                        "probability": prob.item(),
+                    }
+                )
+        return preds
+
+    # ----------------- OOF persistence -----------------
+
+    def _save_model_predictions(self, predictions, model_name, n_samples, level):
+        model_preds = [p for p in predictions if p["model"] == model_name]
+        if not model_preds:
+            return predictions
+        classes = sorted({p["class"] for p in model_preds})
+        class_to_idx = {c: i for i, c in enumerate(classes)}
+        prob_array = np.full((n_samples, len(classes)), np.nan, dtype=np.float64)
+        for p in model_preds:
+            prob_array[p["index"], class_to_idx[p["class"]]] = p["probability"]
+        d = str(self._require_tmpdir())
+        save_array(prob_array, f"pred_{model_name}", d)
+        save_array(np.array([level] + classes, dtype=object), f"pred_{model_name}_meta", d)
+        return [p for p in predictions if p["model"] != model_name]
+
+    def _load_model_predictions(self, model_name):
+        d = str(self._require_tmpdir())
+        prob_array = read_array(f"pred_{model_name}", d)
+        meta = read_array(f"pred_{model_name}_meta", d, allow_pickle=True, mmap_mode=None)
+        level = int(meta[0])
+        classes = list(meta[1:])
+        return prob_array, level, classes
+
+    def _compute_oof_accuracy(self, y, model_name) -> float:
+        prob_array, _level, classes = self._load_model_predictions(model_name)
+        valid = ~np.isnan(prob_array).any(axis=1)
+        if not np.any(valid):
+            return 0.0
+        pred_idx = np.argmax(prob_array[valid], axis=1)
+        preds = np.asarray(classes, dtype=object)[pred_idx]
+        return float(accuracy_score(y[np.where(valid)[0]], preds))
+
+    def _build_probability_array(self, n_samples: int):
+        d = self._require_tmpdir()
+        prob_files = sorted(p for p in d.glob("pred_*.npy") if not p.name.endswith("_meta.npy"))
+        cols, names = [], []
+        for path in prob_files:
+            model_name = path.stem[5:]  # strip pred_
+            prob_array, level, classes = self._load_model_predictions(model_name)
+            if level != 0:
+                continue
+            for i, cls in enumerate(classes):
+                names.append(f"{level}_{model_name}_{cls}")
+                cols.append(prob_array[:, i])
+        if not cols:
+            return None
+        order = sorted(range(len(names)), key=names.__getitem__)
+        self._probability_columns = [names[i] for i in order]
+        return np.column_stack([cols[i] for i in order])
+
+    # ----------------- features: train transformers + compute arrays -----------------
+
+    def train_feature_transformers(self, X: np.ndarray, fit_start_time=None) -> None:
+        os.makedirs(self._model_dir, exist_ok=True)
+        for ft in self.features_list:
+            transformer = get_feature_transformer(ft.feature_name, seed=ft.feature_seed, n_jobs=self.n_jobs)
+            transformer.fit(X)
+            save_model(transformer, f"transformer_{ft.get_feature_id()}", self._model_dir)
+
+    def compute_features(self, X: np.ndarray, directory: str, start_time=None) -> None:
+        compute_start = perf_counter()
+        for ft in self.features_list:
+            t0 = perf_counter()
+            # Xin = self._feature_input(ft, X)
+            transformer = read_model(f"transformer_{ft.get_feature_id()}", self._model_dir)
+            Xt = transformer.transform(X)
+            size_mb = Xt.nbytes / (1024 * 1024)
+            shape = Xt.shape
+            save_array(Xt, f"Xt_{ft.get_feature_id()}", directory, dtype=np.float64)
+            self.log(
+                f"Computed {ft.get_feature_id()} features {shape} ({size_mb:.2f} MB) in {perf_counter() - t0:.4f}s",
+                level=1,
+                start_time=compute_start if start_time is None else start_time,
+            )
+
+    # ----------------- fallback -----------------
+
+    def _fit_fallback(self, X, y, fit_start_time):
+        self.log("Falling back to MultiRocketHydraClassifier", level=1, start_time=fit_start_time)
+        fallback = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
+        fallback.fit(X, y)
+        save_model(fallback, "fallback", str(self._model_dir))
+        self.log("Fallback model trained successfully", level=1, start_time=fit_start_time)
+
+    # ----------------- training -----------------
+
+    def _fit(self, X, y):
+        self.features_list = []
+        for m in self.feature_models:
+            if m == "multirockethydra-bestk-p-ridgecv":
+                f1 = FeatureSpec(feature_name="multirocket", feature_seed=self._get_feature_seed())
+                f2 = FeatureSpec(feature_name="hydra", feature_seed=self._get_feature_seed())
+                self.features_list.append(f1)
+                self.features_list.append(f2)
+            elif m == "quant-etc":
+                f = FeatureSpec(feature_name="quant")
+                self.features_list.append(f)
+            elif m == "rdst-p-ridgecv":
+                f = FeatureSpec(feature_name="rdst", feature_seed=self._get_feature_seed())
+                self.features_list.append(f)
+            else:
+                raise ValueError(f"Unknown feature model {m}")
+    
+        fit_start = perf_counter()
+        self.log(f"Starting fit, run_dir={self._base_dir}, n_jobs={self.n_jobs}", level=1, start_time=fit_start)
+
+        os.makedirs(self._model_dir, exist_ok=True)
+        os.makedirs(self._tmpdir, exist_ok=True)
+
+        t0 = perf_counter()
+        save_array(X, "X", str(self._tmpdir), dtype=np.float64)
+        save_array(y, "y", str(self._tmpdir))
+        self.log(f"Saved X and y to disk in {perf_counter() - t0:.2f}s", level=2, start_time=fit_start)
+
+        _, counts = np.unique(y, return_counts=True)
+        if np.any(counts < 2):
+            self.log("Some classes have fewer than 2 instances, fold training not possible", level=1, start_time=fit_start)
+            self._fit_fallback(X, y, fit_start)
+            return
+
+        if self.cv_splits is None:
+            self.cv_splits = []
+
+        # Features: train transformers then compute arrays (same compute_features used in predict)
+
+        mp_ctx = multiprocessing.get_context("spawn")
+
+        try:
+            with ProcessPoolExecutor(max_workers=self.n_jobs, mp_context=mp_ctx) as executor:
+                warm = [executor.submit(_noop) for _ in range(self.n_jobs)]
+                predictions = []
+                # feature_specs = {ft: 0 for ft in self.FEATURE_TYPES}
+
+                self.train_feature_transformers(X, fit_start_time=fit_start)
+                self.compute_features(X, str(self._tmpdir), start_time=fit_start)
+                splits = generate_folds(X, y, n_splits=self.k_folds, n_repetitions=1, random_state=self._get_feature_seed())
+
+                # -------- level 0 --------
+                tasks = []
+                for model_name in (self.series_models + self.feature_models):
+                    is_series = model_name in self.series_models
+                    for fold_no, (train_idx, val_idx) in enumerate(splits):
+                        tasks.append(
+                            (
+                                fold_no,
+                                model_name,
+                                is_series,
+                                train_idx,
+                                val_idx,
+                                self._get_feature_seed(),
+                                str(self._tmpdir),
+                                self.features_list,
+                                str(self._model_dir),
+                                0,
+                            )
+                        )
+
+                n_workers = min(self.n_jobs, len(tasks))
+                self.log(f"Starting training with {n_workers} workers for {len(tasks)} models", level=2, start_time=fit_start)
+
+                futures = {executor.submit(_train_one_model_v10, *t): t for t in tasks}
+                model_groups = defaultdict(list)
+
+                for future in as_completed(futures):
+                    task = futures[future]
+                    fold_number = task[0]
+                    model_name_task = task[1]
+                    try:
+                        train_idx, val_idx, proba, classes_, model_size, train_dur, model_name_result, fold_number = future.result()
+                    except Exception as e:
+                        raise RuntimeError(f"Worker failed during training {model_name_task} fold {fold_number}: {e}") from e
+
+                    self.log(
+                        f"Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number} "
+                        f"({model_size / (1024 * 1024):.2f} MB)",
+                        level=2,
+                        start_time=fit_start,
+                    )
+
+                    predictions.extend(
+                        self.add_probabilities(
+                            probas=proba,
+                            classes=classes_,
+                            model_name=model_name_result,
+                            level=0,
+                            indices=val_idx,
+                        )
+                    )
+
+                    model_groups[model_name_result].append(fold_number)
+                    if len(model_groups[model_name_result]) == self.k_folds:
+                        self.log(f"Completed training for model {model_name_result}", level=2, start_time=fit_start)
+                        del model_groups[model_name_result]
+
+                        predictions = self._save_model_predictions(predictions, model_name_result, n_samples=X.shape[0], level=0)
+                        oof_acc = self._compute_oof_accuracy(y, model_name_result)
+                        self._oof_scores.append({"model": model_name_result, "level": 0, "oof_accuracy": oof_acc})
+                        self.log(f"OOF acc (base) {model_name_result}: {oof_acc}", level=1, start_time=fit_start)
+
+                # -------- stacking --------
+                self.log("Starting stacking model training", level=2, start_time=fit_start)
+                prob_array = self._build_probability_array(n_samples=X.shape[0])
+                if prob_array is None or np.isnan(prob_array).any():
+                    self.log("NaN values detected in probability array, skipping stacking", level=2, start_time=fit_start)
+                    self._fit_fallback(X, y, fit_start)
+                    return
+
+                save_array(prob_array, "Xt_probabilities", str(self._tmpdir))
+                # stacking_specs = {"probabilities": None}
+
+                stack_tasks = []
+                for model_name in self.stacking_models:
+                    is_series = model_name in self.series_models
+                    for fold_no, (train_idx, val_idx) in enumerate(splits):
+                        stack_tasks.append(
+                            (
+                                fold_no,
+                                model_name,
+                                is_series,
+                                train_idx,
+                                val_idx,
+                                self._get_feature_seed(),
+                                str(self._tmpdir),
+                                [FeatureSpec(feature_name="probabilities")],
+                                str(self._model_dir),
+                                0,
+                            )
+                        )
+
+                n_workers = min(self.n_jobs, len(stack_tasks))
+                self.log(f"Starting stacking training with {n_workers} workers for {len(stack_tasks)} models", level=2, start_time=fit_start)
+
+                futures = {executor.submit(_train_one_model_v10, *t): t for t in stack_tasks}
+                model_groups = defaultdict(list)
+
+                for future in as_completed(futures):
+                    task = futures[future]
+                    fold_number = task[0]
+                    model_name_task = task[1]
+                    try:
+                        train_idx, val_idx, proba, classes_, model_size, train_dur, model_name_result, fold_number = future.result()
+                    except Exception as e:
+                        raise RuntimeError(f"Worker failed during stacking training {model_name_task} fold {fold_number}: {e}") from e
+
+                    self.log(
+                        f"Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number} "
+                        f"({model_size / (1024 * 1024):.2f} MB)",
+                        level=2,
+                        start_time=fit_start,
+                    )
+
+                    predictions.extend(
+                        self.add_probabilities(
+                            probas=proba,
+                            classes=classes_,
+                            model_name=model_name_result,
+                            level=1,
+                            indices=val_idx,
+                        )
+                    )
+
+                    model_groups[model_name_result].append(fold_number)
+                    if len(model_groups[model_name_result]) == self.k_folds:
+                        self.log(f"Completed training for model {model_name_result}", level=2, start_time=fit_start)
+                        del model_groups[model_name_result]
+
+                        predictions = self._save_model_predictions(predictions, model_name_result, n_samples=X.shape[0], level=1)
+                        oof_acc = self._compute_oof_accuracy(y, model_name_result)
+                        self._oof_scores.append({"model": model_name_result, "level": 1, "oof_accuracy": oof_acc})
+                        self.log(f"OOF acc (stack) {model_name_result}: {oof_acc}", level=1, start_time=fit_start)
+
+                self.log("Fit complete", level=1, start_time=fit_start)
+
+        finally:
+            if not self.keep_features and self._tmpdir and self._tmpdir.exists():
+                cleanup_start = perf_counter()
+                shutil.rmtree(self._tmpdir)
+                self.log(f"Cleaned up tmpdir in {perf_counter() - cleanup_start:.2f}s", level=2, start_time=fit_start)
+                self._tmpdir = None
+            if self.keep_features and self._tmpdir:
+                self.features_training_dir_ = str(self._tmpdir)
+            self.log("Executor shutdown complete", level=2, start_time=fit_start)
+
+    # ----------------- inspection helpers -----------------
+
+    def _get_training_dir(self) -> str:
+        d = getattr(self, "features_training_dir_", None) or (str(self._tmpdir) if self._tmpdir else None)
+        if not self.keep_features or not d or not os.path.exists(d):
+            raise RuntimeError(
+                f"Not available. Set keep_features=True before fitting. keep_features={self.keep_features}, dir={d}"
+            )
+        return d
+
+    def get_oof_predictions(self) -> pl.DataFrame:
+        d = self._get_training_dir()
+        frames = []
+        for f in sorted(os.listdir(d)):
+            if f.startswith("pred_") and f.endswith(".npy") and not f.endswith("_meta.npy"):
+                model_name = f[5:-4]
+                prob_array = read_array(f"pred_{model_name}", d)
+                meta = read_array(f"pred_{model_name}_meta", d, allow_pickle=True, mmap_mode=None)
+                level, classes = int(meta[0]), list(meta[1:])
+                schema = [f"{model_name}|{cls}" for cls in classes]
+                frames.append(pl.DataFrame(prob_array, schema=schema))
+        return pl.DataFrame() if not frames else pl.concat(frames, how="horizontal")
+
+    def get_features(self) -> pl.DataFrame:
+        d = self._get_training_dir()
+        frames = []
+        for f in sorted(os.listdir(d)):
+            if f.startswith("Xt_") and f.endswith(".npy") and f != "Xt_probabilities.npy":
+                key = f[3:-4]
+                arr = read_array(f[:-4], d)
+                schema = [f"{key}|{i}" for i in range(arr.shape[1])]
+                frames.append(pl.DataFrame(arr, schema=schema))
+        return pl.DataFrame() if not frames else pl.concat(frames, how="horizontal")
+
+    def summary(self) -> list[dict]:
+        return self._oof_scores
+
+    # ----------------- inference -----------------
+
+    def predict_proba_per_model(self, X: np.ndarray) -> dict[str, np.ndarray]:
+        predict_start = perf_counter()
+        self.log("Starting prediction", level=1, start_time=predict_start)
+
+        mp_ctx = multiprocessing.get_context("spawn")
+        features_infer = self._base_dir / "features_inference"
+        features_stack = self._base_dir / "features"
+
+        os.makedirs(features_infer, exist_ok=True)
+        self._tmpdir = features_infer
+
+        try:
+            with ProcessPoolExecutor(max_workers=self.n_jobs, mp_context=mp_ctx) as executor:
+                warm = [executor.submit(_noop) for _ in range(self.n_jobs)]
+
+                # compute features (transform-only; transformers already trained)
+                save_array(X, "X", str(features_infer))
+                self.compute_features(X, str(features_infer), start_time=predict_start)
+                self.log("Computed and saved features for prediction", level=1, start_time=predict_start)
+
+                predictions = []
+                # feature_specs = {ft: 0 for ft in self.FEATURE_TYPES}
+                # ---- level 0 predictions ----
+                tasks = []
+                for model_name in reversed(self.feature_models + self.series_models):
+                    is_series = model_name in self.series_models
+                    for fold in range(self.k_folds):
+                        tasks.append(
+                            (
+                                model_name,
+                                model_name,
+                                is_series,
+                                str(features_infer),
+                                self.features_list,
+                                str(self._model_dir),
+                                0,
+                                fold,
+                            )
+                        )
+
+                self.log(
+                    f"Starting prediction with {self.n_jobs} workers for {len(tasks)} first-level models",
+                    level=1,
+                    start_time=predict_start,
+                )
+
+                futures = {executor.submit(_predict_one_model_v10, *t): t for t in tasks}
+                for future in as_completed(futures):
+                    task = futures[future]
+                    model_name_task = task[0]
+                    try:
+                        proba, classes_, predict_dur, model_name_res = future.result()
+                    except Exception as e:
+                        raise RuntimeError(f"Worker failed during prediction {model_name_task}: {e}") from e
+
+                    self.log(f"Predicted {model_name_res} in {predict_dur:.4f}s", level=2, start_time=predict_start)
+                    predictions.extend(self.add_probabilities(proba, classes_, model_name_res, level=0))
+
+                self.log("Completed all first-level model predictions", level=1, start_time=predict_start)
+
+                # ---- build stacking matrix ----
+                if features_infer.exists():
+                    shutil.rmtree(features_infer)
+                os.makedirs(features_stack, exist_ok=True)
+                self._tmpdir = features_stack
+
+                df0 = (
+                    pl.DataFrame(predictions)
+                    .pivot(values="probability", index="index", on=["level", "model", "class"], aggregate_function="mean")
+                    .sort("index")
+                )
+                prob_cols = sorted(c for c in df0.columns if c != "index")
+                prob_array = df0.select(prob_cols).to_numpy()
+
+                save_array(X, "X", str(features_stack))
+                save_array(prob_array, "Xt_probabilities", str(features_stack))
+
+                # ---- stacking predictions ----
+                stack_tasks = []
+                for model_name in self.stacking_models:
+                    is_series = model_name in self.series_models
+                    for fold in range(self.k_folds):
+                        stack_tasks.append(
+                            (
+                                model_name,
+                                model_name,
+                                is_series,
+                                str(features_stack),
+                                [FeatureSpec(feature_name="probabilities")],
+                                str(self._model_dir),
+                                0,
+                                fold,
+                            )
+                        )
+
+                self.log(
+                    f"Starting prediction with {self.n_jobs} workers for {len(stack_tasks)} stacking models",
+                    level=1,
+                    start_time=predict_start,
+                )
+
+                futures = {executor.submit(_predict_one_model_v10, *t): t for t in stack_tasks}
+                for future in as_completed(futures):
+                    task = futures[future]
+                    model_name_task = task[0]
+                    try:
+                        proba, classes_, predict_dur, model_name_res = future.result()
+                    except Exception as e:
+                        raise RuntimeError(f"Worker failed during stacking prediction {model_name_task}: {e}") from e
+
+                    self.log(f"Predicted {model_name_res} in {predict_dur:.4f}s", level=2, start_time=predict_start)
+                    predictions.extend(self.add_probabilities(proba, classes_, model_name_res, level=1))
+
+            self.log("Completed all stacking model predictions", level=1, start_time=predict_start)
+
+            all_df = (
+                pl.DataFrame(predictions)
+                .pivot(values="probability", index="index", on=["level", "model", "class"], aggregate_function="mean")
+                .sort("index")
+            )
+
+            model_names = list(self.feature_models + self.series_models + self.stacking_models)
+            out = {}
+            for model_name in model_names:
+                cols = sorted(c for c in all_df.columns if c != "index" and model_name in c)
+                out[model_name] = all_df.select(cols).to_numpy()
+            return out
+
+        finally:
+            for d in (features_infer, features_stack):
+                if d.exists():
+                    shutil.rmtree(d)
+            self._tmpdir = None
+            self.log("Executor shutdown complete", level=1, start_time=predict_start)
+
+    def predict_per_model(self, X: np.ndarray) -> dict[str, np.ndarray]:
+        proba_per_model = self.predict_proba_per_model(X)
+        return {name: self.classes_[np.argmax(proba, axis=1)] for name, proba in proba_per_model.items()}
+
 
 class LokyStackerV8Base(LokyStackerV7):
     def __init__(self, random_state=None, n_repetitions=1, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
