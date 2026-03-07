@@ -935,27 +935,31 @@ class FeatureSpec:
 
 @dataclass(frozen=True)
 class ModelSpec:
-    model_id: str
     model_name: str
     model_seed: int
     is_series: bool
     level: int
     features: Tuple[FeatureSpec, ...]
 
+    def get_model_id(self):
+        return f'{self.model_name}_s_{self.model_seed}'
+
 def _load_feature_dict_v10(directory, feature_specs):
     """Load feature arrays using read_array with (feat_type, repetition) specs."""
     feature_dict = {}
     for feat_spec in feature_specs:
+        if feat_spec.feature_name == "raw":
+            continue
         feat_id = feat_spec.get_feature_id()
         feature_dict[feat_spec.feature_name] = read_array(f"Xt_{feat_id}", directory)
     return feature_dict
 
-def _predict_one_model_v10(display_name, model_name, is_series, directory, feature_specs, model_dir, repetition, fold):
-    """Prediction function for V7 - loads model from disk, loads data via read_array."""
+def _predict_one_model_v10(model_id, model_name, is_series, directory, feature_specs, model_dir, fold):
+    """Prediction function - loads model from disk, loads data via read_array."""
     X = read_array("X", directory)
     feature_dict = _load_feature_dict_v10(directory, feature_specs)
 
-    scaler, clf = read_model(model_name, model_dir, repetition, fold)
+    scaler, clf = read_model(model_id, model_dir, None, fold)
     start_predict = perf_counter()
 
     if is_series:
@@ -965,11 +969,11 @@ def _predict_one_model_v10(display_name, model_name, is_series, directory, featu
         proba = clf.predict_proba(X_scaled)
 
     predict_dur = perf_counter() - start_predict
-    return (proba, clf.classes_, predict_dur, display_name)
+    return (proba, clf.classes_, predict_dur, model_id)
 
-def _train_one_model_v10(fold_number, model_name, is_series, train_idx, val_idx, model_seed,
-                         directory, feature_specs, model_dir, repetition):
-    """Training function for V7 - loads data via read_array, saves model to disk."""
+def _train_one_model_v10(fold_number, model_id, model_name, is_series, train_idx, val_idx, model_seed,
+                         directory, feature_specs, model_dir):
+    """Training function - loads data via read_array, saves model to disk."""
     X = read_array("X", directory)
     y = read_array("y", directory)
     feature_dict = _load_feature_dict_v10(directory, feature_specs)
@@ -980,24 +984,90 @@ def _train_one_model_v10(fold_number, model_name, is_series, train_idx, val_idx,
     if is_series:
         clf.fit(X[train_idx], y[train_idx])
         proba = clf.predict_proba(X[val_idx])
-        _, model_size = save_model((None, clf), model_name, model_dir, repetition, fold_number)
+        _, model_size = save_model((None, clf), model_id, model_dir, None, fold_number)
     else:
         clf.fit(scaler.fit_transform(feature_dict, idx=train_idx), y[train_idx])
         proba = clf.predict_proba(scaler.transform(feature_dict, idx=val_idx))
-        _, model_size = save_model((scaler, clf), model_name, model_dir, repetition, fold_number)
+        _, model_size = save_model((scaler, clf), model_id, model_dir, None, fold_number)
 
     train_dur = perf_counter() - start_train
-    return (train_idx, val_idx, proba, clf.classes_, model_size, train_dur, model_name, fold_number)
+    return (train_idx, val_idx, proba, clf.classes_, model_size, train_dur, model_id, fold_number)
 
 class LokyStackerV10Base(BaseClassifier):
     _tags = {"capability:multivariate": True}
 
-    FEATURE_MODELS = ["multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv"]
+    DEFAULT_MODEL_NAMES = [
+        "multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv", "rstsf",
+    ]
     SERIES_MODELS = ["rstsf"]
     STACKING_MODEL = "probability-ridgecv"
-    FEATURE_TYPES = ["quant", "multirocket", "hydra", "rdst"]
 
-    def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0):
+    def _get_feature_names(self, model_name: str) -> tuple[str, ...]:
+        """Return required feature type names for a model."""
+        if model_name in ("multirockethydra-bestk-p-ridgecv", "multirockethydra-p-ridgecv", "multirockethydra-ridgecv"):
+            return ("multirocket", "hydra")
+        elif model_name == "quant-etc":
+            return ("quant",)
+        elif model_name in ("rdst-p-ridgecv", "rdst-ridgecv"):
+            return ("rdst",)
+        elif model_name == "rstsf":
+            return ("raw",)
+        else:
+            raise ValueError(f"Unknown model {model_name}")
+
+    def _make_feature_spec(self, feature_name: str, group_rng: np.random.Generator) -> FeatureSpec:
+        """Create a single FeatureSpec. Seedless for deterministic transforms like quant."""
+        if feature_name in ("quant", "raw"):
+            return FeatureSpec(feature_name=feature_name)
+        return FeatureSpec(feature_name=feature_name, feature_seed=int(group_rng.integers(0, 2**31 - 1)))
+
+    def build_model_specs(self, model_names: list[str]) -> list[ModelSpec]:
+        """Build ModelSpec list from a flat list of model names.
+
+        Models are accumulated into groups that share feature seeds.
+        A duplicate model name starts a new group.
+        """
+        # Split flat list into groups: a new group starts when a name is repeated
+        groups: list[list[str]] = []
+        seen: set[str] = set()
+        for name in model_names:
+            if name in seen:
+                groups.append([])
+                seen = set()
+            if not groups:
+                groups.append([])
+            groups[-1].append(name)
+            seen.add(name)
+
+        all_models: list[ModelSpec] = []
+        for group in groups:
+            group_rng = np.random.default_rng(self._get_feature_seed())
+
+            # Build FeatureSpecs per group, deduped by feature name within group
+            group_features: dict[str, FeatureSpec] = {}
+            for model_name in group:
+                for ft_name in self._get_feature_names(model_name):
+                    if ft_name not in group_features:
+                        group_features[ft_name] = self._make_feature_spec(ft_name, group_rng)
+
+            for model_name in group:
+                is_series = model_name in self.series_models
+                features = tuple(
+                    group_features[ft_name] for ft_name in self._get_feature_names(model_name)
+                )
+                spec = ModelSpec(
+                    model_name=model_name,
+                    model_seed=self._get_feature_seed(),
+                    is_series=is_series,
+                    level=0,
+                    features=features,
+                )
+                all_models.append(spec)
+
+        return all_models
+
+    def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0,
+                 model_names=None):
         super().__init__()
         self.k_folds = int(k_folds)
         self.random_state = random_state
@@ -1013,12 +1083,22 @@ class LokyStackerV10Base(BaseClassifier):
         self._model_dir = self._base_dir / "models"
         self._tmpdir: Path | None = self._base_dir / "features_training"
 
-        self.feature_models = self.FEATURE_MODELS.copy()
+        self.model_names = model_names
         self.series_models = self.SERIES_MODELS.copy()
-
         self.stacking_models = [self.STACKING_MODEL]
-        assert len(self.stacking_models) == 1, f"Expected exactly 1 stacking model, got {len(self.stacking_models)}"
         self.best_model = self.STACKING_MODEL
+
+        # Build model specs from flat list; derive unique features
+        self.model_specs = self.build_model_specs(
+            self.model_names if self.model_names is not None else self.DEFAULT_MODEL_NAMES
+        )
+        all_features: dict[str, FeatureSpec] = {}
+        for spec in self.model_specs:
+            for ft in spec.features:
+                fid = ft.get_feature_id()
+                if fid not in all_features:
+                    all_features[fid] = ft
+        self.features_list = list(all_features.values())
 
         self._oof_scores: list[dict] = []
         self._probability_columns: list[str] | None = None
@@ -1140,6 +1220,8 @@ class LokyStackerV10Base(BaseClassifier):
     def train_feature_transformers(self, X: np.ndarray, fit_start_time=None) -> None:
         os.makedirs(self._model_dir, exist_ok=True)
         for ft in self.features_list:
+            if ft.feature_name == "raw":
+                continue
             transformer = get_feature_transformer(ft.feature_name, seed=ft.feature_seed, n_jobs=self.n_jobs)
             transformer.fit(X)
             save_model(transformer, f"transformer_{ft.get_feature_id()}", self._model_dir)
@@ -1147,8 +1229,9 @@ class LokyStackerV10Base(BaseClassifier):
     def compute_features(self, X: np.ndarray, directory: str, start_time=None) -> None:
         compute_start = perf_counter()
         for ft in self.features_list:
+            if ft.feature_name == "raw":
+                continue
             t0 = perf_counter()
-            # Xin = self._feature_input(ft, X)
             transformer = read_model(f"transformer_{ft.get_feature_id()}", self._model_dir)
             Xt = transformer.transform(X)
             size_mb = Xt.nbytes / (1024 * 1024)
@@ -1172,22 +1255,6 @@ class LokyStackerV10Base(BaseClassifier):
     # ----------------- training -----------------
 
     def _fit(self, X, y):
-        self.features_list = []
-        for m in self.feature_models:
-            if m == "multirockethydra-bestk-p-ridgecv":
-                f1 = FeatureSpec(feature_name="multirocket", feature_seed=self._get_feature_seed())
-                f2 = FeatureSpec(feature_name="hydra", feature_seed=self._get_feature_seed())
-                self.features_list.append(f1)
-                self.features_list.append(f2)
-            elif m == "quant-etc":
-                f = FeatureSpec(feature_name="quant")
-                self.features_list.append(f)
-            elif m == "rdst-p-ridgecv":
-                f = FeatureSpec(feature_name="rdst", feature_seed=self._get_feature_seed())
-                self.features_list.append(f)
-            else:
-                raise ValueError(f"Unknown feature model {m}")
-    
         fit_start = perf_counter()
         self.log(f"Starting fit, run_dir={self._base_dir}, n_jobs={self.n_jobs}", level=1, start_time=fit_start)
 
@@ -1208,15 +1275,12 @@ class LokyStackerV10Base(BaseClassifier):
         if self.cv_splits is None:
             self.cv_splits = []
 
-        # Features: train transformers then compute arrays (same compute_features used in predict)
-
         mp_ctx = multiprocessing.get_context("spawn")
 
         try:
             with ProcessPoolExecutor(max_workers=self.n_jobs, mp_context=mp_ctx) as executor:
                 warm = [executor.submit(_noop) for _ in range(self.n_jobs)]
                 predictions = []
-                # feature_specs = {ft: 0 for ft in self.FEATURE_TYPES}
 
                 self.train_feature_transformers(X, fit_start_time=fit_start)
                 self.compute_features(X, str(self._tmpdir), start_time=fit_start)
@@ -1224,21 +1288,22 @@ class LokyStackerV10Base(BaseClassifier):
 
                 # -------- level 0 --------
                 tasks = []
-                for model_name in (self.series_models + self.feature_models):
-                    is_series = model_name in self.series_models
+                for spec in self.model_specs:
+                    fold_rng = np.random.default_rng(spec.model_seed)
                     for fold_no, (train_idx, val_idx) in enumerate(splits):
+                        fold_seed = int(fold_rng.integers(0, 2**31 - 1))
                         tasks.append(
                             (
                                 fold_no,
-                                model_name,
-                                is_series,
+                                spec.get_model_id(),
+                                spec.model_name,
+                                spec.is_series,
                                 train_idx,
                                 val_idx,
-                                self._get_feature_seed(),
+                                fold_seed,
                                 str(self._tmpdir),
-                                self.features_list,
+                                list(spec.features),
                                 str(self._model_dir),
-                                0,
                             )
                         )
 
@@ -1251,14 +1316,14 @@ class LokyStackerV10Base(BaseClassifier):
                 for future in as_completed(futures):
                     task = futures[future]
                     fold_number = task[0]
-                    model_name_task = task[1]
+                    model_id_task = task[1]
                     try:
-                        train_idx, val_idx, proba, classes_, model_size, train_dur, model_name_result, fold_number = future.result()
+                        train_idx, val_idx, proba, classes_, model_size, train_dur, model_id_result, fold_number = future.result()
                     except Exception as e:
-                        raise RuntimeError(f"Worker failed during training {model_name_task} fold {fold_number}: {e}") from e
+                        raise RuntimeError(f"Worker failed during training {model_id_task} fold {fold_number}: {e}") from e
 
                     self.log(
-                        f"Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number} "
+                        f"Trained {model_id_result} in {train_dur:.4f}s for f-{fold_number} "
                         f"({model_size / (1024 * 1024):.2f} MB)",
                         level=2,
                         start_time=fit_start,
@@ -1268,21 +1333,21 @@ class LokyStackerV10Base(BaseClassifier):
                         self.add_probabilities(
                             probas=proba,
                             classes=classes_,
-                            model_name=model_name_result,
+                            model_name=model_id_result,
                             level=0,
                             indices=val_idx,
                         )
                     )
 
-                    model_groups[model_name_result].append(fold_number)
-                    if len(model_groups[model_name_result]) == self.k_folds:
-                        self.log(f"Completed training for model {model_name_result}", level=2, start_time=fit_start)
-                        del model_groups[model_name_result]
+                    model_groups[model_id_result].append(fold_number)
+                    if len(model_groups[model_id_result]) == self.k_folds:
+                        self.log(f"Completed training for model {model_id_result}", level=2, start_time=fit_start)
+                        del model_groups[model_id_result]
 
-                        predictions = self._save_model_predictions(predictions, model_name_result, n_samples=X.shape[0], level=0)
-                        oof_acc = self._compute_oof_accuracy(y, model_name_result)
-                        self._oof_scores.append({"model": model_name_result, "level": 0, "oof_accuracy": oof_acc})
-                        self.log(f"OOF acc (base) {model_name_result}: {oof_acc}", level=1, start_time=fit_start)
+                        predictions = self._save_model_predictions(predictions, model_id_result, n_samples=X.shape[0], level=0)
+                        oof_acc = self._compute_oof_accuracy(y, model_id_result)
+                        self._oof_scores.append({"model": model_id_result, "level": 0, "oof_accuracy": oof_acc})
+                        self.log(f"OOF acc (base) {model_id_result}: {oof_acc}", level=1, start_time=fit_start)
 
                 # -------- stacking --------
                 self.log("Starting stacking model training", level=2, start_time=fit_start)
@@ -1297,20 +1362,21 @@ class LokyStackerV10Base(BaseClassifier):
 
                 stack_tasks = []
                 for model_name in self.stacking_models:
-                    is_series = model_name in self.series_models
+                    stack_fold_rng = np.random.default_rng(self._get_feature_seed())
                     for fold_no, (train_idx, val_idx) in enumerate(splits):
+                        stack_fold_seed = int(stack_fold_rng.integers(0, 2**31 - 1))
                         stack_tasks.append(
                             (
                                 fold_no,
+                                model_name,  # model_id = model_name for stacking
                                 model_name,
-                                is_series,
+                                False,
                                 train_idx,
                                 val_idx,
-                                self._get_feature_seed(),
+                                stack_fold_seed,
                                 str(self._tmpdir),
                                 [FeatureSpec(feature_name="probabilities")],
                                 str(self._model_dir),
-                                0,
                             )
                         )
 
@@ -1323,14 +1389,14 @@ class LokyStackerV10Base(BaseClassifier):
                 for future in as_completed(futures):
                     task = futures[future]
                     fold_number = task[0]
-                    model_name_task = task[1]
+                    model_id_task = task[1]
                     try:
-                        train_idx, val_idx, proba, classes_, model_size, train_dur, model_name_result, fold_number = future.result()
+                        train_idx, val_idx, proba, classes_, model_size, train_dur, model_id_result, fold_number = future.result()
                     except Exception as e:
-                        raise RuntimeError(f"Worker failed during stacking training {model_name_task} fold {fold_number}: {e}") from e
+                        raise RuntimeError(f"Worker failed during stacking training {model_id_task} fold {fold_number}: {e}") from e
 
                     self.log(
-                        f"Trained {model_name_result} in {train_dur:.4f}s for f-{fold_number} "
+                        f"Trained {model_id_result} in {train_dur:.4f}s for f-{fold_number} "
                         f"({model_size / (1024 * 1024):.2f} MB)",
                         level=2,
                         start_time=fit_start,
@@ -1340,21 +1406,21 @@ class LokyStackerV10Base(BaseClassifier):
                         self.add_probabilities(
                             probas=proba,
                             classes=classes_,
-                            model_name=model_name_result,
+                            model_name=model_id_result,
                             level=1,
                             indices=val_idx,
                         )
                     )
 
-                    model_groups[model_name_result].append(fold_number)
-                    if len(model_groups[model_name_result]) == self.k_folds:
-                        self.log(f"Completed training for model {model_name_result}", level=2, start_time=fit_start)
-                        del model_groups[model_name_result]
+                    model_groups[model_id_result].append(fold_number)
+                    if len(model_groups[model_id_result]) == self.k_folds:
+                        self.log(f"Completed training for model {model_id_result}", level=2, start_time=fit_start)
+                        del model_groups[model_id_result]
 
-                        predictions = self._save_model_predictions(predictions, model_name_result, n_samples=X.shape[0], level=1)
-                        oof_acc = self._compute_oof_accuracy(y, model_name_result)
-                        self._oof_scores.append({"model": model_name_result, "level": 1, "oof_accuracy": oof_acc})
-                        self.log(f"OOF acc (stack) {model_name_result}: {oof_acc}", level=1, start_time=fit_start)
+                        predictions = self._save_model_predictions(predictions, model_id_result, n_samples=X.shape[0], level=1)
+                        oof_acc = self._compute_oof_accuracy(y, model_id_result)
+                        self._oof_scores.append({"model": model_id_result, "level": 1, "oof_accuracy": oof_acc})
+                        self.log(f"OOF acc (stack) {model_id_result}: {oof_acc}", level=1, start_time=fit_start)
 
                 self.log("Fit complete", level=1, start_time=fit_start)
 
@@ -1428,21 +1494,18 @@ class LokyStackerV10Base(BaseClassifier):
                 self.log("Computed and saved features for prediction", level=1, start_time=predict_start)
 
                 predictions = []
-                # feature_specs = {ft: 0 for ft in self.FEATURE_TYPES}
                 # ---- level 0 predictions ----
                 tasks = []
-                for model_name in reversed(self.feature_models + self.series_models):
-                    is_series = model_name in self.series_models
+                for spec in reversed(self.model_specs):
                     for fold in range(self.k_folds):
                         tasks.append(
                             (
-                                model_name,
-                                model_name,
-                                is_series,
+                                spec.get_model_id(),
+                                spec.model_name,
+                                spec.is_series,
                                 str(features_infer),
-                                self.features_list,
+                                list(spec.features),
                                 str(self._model_dir),
-                                0,
                                 fold,
                             )
                         )
@@ -1456,14 +1519,14 @@ class LokyStackerV10Base(BaseClassifier):
                 futures = {executor.submit(_predict_one_model_v10, *t): t for t in tasks}
                 for future in as_completed(futures):
                     task = futures[future]
-                    model_name_task = task[0]
+                    model_id_task = task[0]
                     try:
-                        proba, classes_, predict_dur, model_name_res = future.result()
+                        proba, classes_, predict_dur, model_id_res = future.result()
                     except Exception as e:
-                        raise RuntimeError(f"Worker failed during prediction {model_name_task}: {e}") from e
+                        raise RuntimeError(f"Worker failed during prediction {model_id_task}: {e}") from e
 
-                    self.log(f"Predicted {model_name_res} in {predict_dur:.4f}s", level=2, start_time=predict_start)
-                    predictions.extend(self.add_probabilities(proba, classes_, model_name_res, level=0))
+                    self.log(f"Predicted {model_id_res} in {predict_dur:.4f}s", level=2, start_time=predict_start)
+                    predictions.extend(self.add_probabilities(proba, classes_, model_id_res, level=0))
 
                 self.log("Completed all first-level model predictions", level=1, start_time=predict_start)
 
@@ -1487,17 +1550,15 @@ class LokyStackerV10Base(BaseClassifier):
                 # ---- stacking predictions ----
                 stack_tasks = []
                 for model_name in self.stacking_models:
-                    is_series = model_name in self.series_models
                     for fold in range(self.k_folds):
                         stack_tasks.append(
                             (
+                                model_name,  # model_id = model_name for stacking
                                 model_name,
-                                model_name,
-                                is_series,
+                                False,
                                 str(features_stack),
                                 [FeatureSpec(feature_name="probabilities")],
                                 str(self._model_dir),
-                                0,
                                 fold,
                             )
                         )
@@ -1511,14 +1572,14 @@ class LokyStackerV10Base(BaseClassifier):
                 futures = {executor.submit(_predict_one_model_v10, *t): t for t in stack_tasks}
                 for future in as_completed(futures):
                     task = futures[future]
-                    model_name_task = task[0]
+                    model_id_task = task[0]
                     try:
-                        proba, classes_, predict_dur, model_name_res = future.result()
+                        proba, classes_, predict_dur, model_id_res = future.result()
                     except Exception as e:
-                        raise RuntimeError(f"Worker failed during stacking prediction {model_name_task}: {e}") from e
+                        raise RuntimeError(f"Worker failed during stacking prediction {model_id_task}: {e}") from e
 
-                    self.log(f"Predicted {model_name_res} in {predict_dur:.4f}s", level=2, start_time=predict_start)
-                    predictions.extend(self.add_probabilities(proba, classes_, model_name_res, level=1))
+                    self.log(f"Predicted {model_id_res} in {predict_dur:.4f}s", level=2, start_time=predict_start)
+                    predictions.extend(self.add_probabilities(proba, classes_, model_id_res, level=1))
 
             self.log("Completed all stacking model predictions", level=1, start_time=predict_start)
 
@@ -1528,11 +1589,11 @@ class LokyStackerV10Base(BaseClassifier):
                 .sort("index")
             )
 
-            model_names = list(self.feature_models + self.series_models + self.stacking_models)
+            model_ids = [spec.get_model_id() for spec in self.model_specs] + self.stacking_models
             out = {}
-            for model_name in model_names:
-                cols = sorted(c for c in all_df.columns if c != "index" and model_name in c)
-                out[model_name] = all_df.select(cols).to_numpy()
+            for model_id in model_ids:
+                cols = sorted(c for c in all_df.columns if c != "index" and model_id in c)
+                out[model_id] = all_df.select(cols).to_numpy()
             return out
 
         finally:

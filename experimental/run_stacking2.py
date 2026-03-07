@@ -31,6 +31,7 @@ from tscglue.models import (
     LokyStackerV8AutoBestStacking,
     LokyStackerV8AutoBestBase,
     LokyStackerV8AutoBest,
+    LokyStackerV10Base,
     LokyStackerV7Filter_M,
     LokyStackerV7Filter_Q,
     LokyStackerV7Filter_R,
@@ -198,6 +199,13 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return MultiRocketHydraClassifier(random_state=random_state, n_jobs=n_jobs)
     elif model_name == "mymrhydrav2":
         return MultiRocketHydraClassifier(random_state=random_state + 1000, n_jobs=n_jobs)
+    elif model_name == "loky-stacker-v10-base":
+        return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v10-base-2x":
+        return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10, model_names=[
+            "multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv", "rstsf",
+            "multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv", "rstsf",
+        ])
     elif model_name in _FILTER_VARIANTS:
         return _FILTER_VARIANTS[model_name](random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name.startswith("mr-hydra-kbest-"):
@@ -237,6 +245,8 @@ ALL_MODELS = [
     "loky-stacker-v9-base-r2",
     "loky-stacker-v9-base-r3",
     "loky-stacker-v9-base-r5",
+    "loky-stacker-v10-base",
+    "loky-stacker-v10-base-2x",
     "loky-stacker-v7-soft-et",
     "loky-stacker-v7-soft-ridge",
     "loky-stacker-v7-soft-rf",
@@ -357,7 +367,7 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets, storage, 
             }
 
             hash_val = pl.DataFrame([stats]).hash_rows(seed=42, seed_1=1, seed_2=2, seed_3=3).item()
-            # file = f"{write_dir}/{hash_val}.parquet"
+
             file_name = f"{hash_val}.parquet"
             if cache.exists(file_name):
                 print(f"[{k}/{n}] Skipping: Dataset={dataset}, Fold={fold}, Model={model_name}")
@@ -377,7 +387,6 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets, storage, 
             stats["test_accuracy"] = acc
 
             df_stat = pl.DataFrame([stats])
-            # df_stat.write_parquet(file)
             cache.add(df_stat, file_name)
         except Exception as e:
             print(f"Error processing Dataset={dataset}, Fold={fold}, Model={model_name}: {e}")
