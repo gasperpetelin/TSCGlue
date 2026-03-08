@@ -202,10 +202,11 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
     elif model_name == "loky-stacker-v10-base":
         return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v10-base-2x":
-        return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10, model_names=[
-            "multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv", "rstsf",
-            "multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv", "rstsf",
-        ])
+        _base = ["multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv", "rstsf"]
+        return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10, model_names=_base * 2)
+    elif model_name == "loky-stacker-v10-base-5x":
+        _base = ["multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv", "rstsf"]
+        return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10, model_names=_base * 5)
     elif model_name in _FILTER_VARIANTS:
         return _FILTER_VARIANTS[model_name](random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name.startswith("mr-hydra-kbest-"):
@@ -247,6 +248,7 @@ ALL_MODELS = [
     "loky-stacker-v9-base-r5",
     "loky-stacker-v10-base",
     "loky-stacker-v10-base-2x",
+    "loky-stacker-v10-base-5x",
     "loky-stacker-v7-soft-et",
     "loky-stacker-v7-soft-ridge",
     "loky-stacker-v7-soft-rf",
