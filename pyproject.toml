@@ -40,6 +40,9 @@ notebooks = [
     "transformers",
     "accelerate",
     "chronos-forecasting",
+    "mantis-tsfm",
+    "catboost",
+    "lightgbm",
 ]
 
 [build-system]
