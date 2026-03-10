@@ -4,7 +4,6 @@ import os
 
 import numpy as np
 import polars as pl
-# import tensorflow as tf
 from aeon.datasets import load_classification
 from sklearn.model_selection import KFold, StratifiedKFold
 

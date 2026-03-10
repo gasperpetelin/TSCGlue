@@ -18,7 +18,7 @@ from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.classification.dummy import DummyClassifier
 from aeon.classification.feature_based import Catch22Classifier
 from tscglue.data_loader import DATA_DIR, load_fold
-from tscglue.models_tsfm import Chronos2Classifier
+from tscglue.models_tsfm import Chronos2Classifier, ALL_TSFM_MODELS, make_tsfm_model
 from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier
 from tscglue.models import (
     LokyStackerV7,
@@ -207,8 +207,40 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
     elif model_name == "loky-stacker-v10-base-5x":
         _base = ["multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv", "rstsf"]
         return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10, model_names=_base * 5)
+    elif model_name == "loky-stacker-v10-base-r3":
+        return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10, n_repetitions=3)
     elif model_name in _FILTER_VARIANTS:
         return _FILTER_VARIANTS[model_name](random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
+    elif model_name == "mantis-ridgecv":
+        return make_tsfm_model("mantis-ridgecv", random_state=random_state)
+    elif model_name == "mantis-rf":
+        return make_tsfm_model("mantis-rf", random_state=random_state)
+    elif model_name == "mantis-et":
+        return make_tsfm_model("mantis-et", random_state=random_state)
+    elif model_name == "mantis-hgb":
+        return make_tsfm_model("mantis-hgb", random_state=random_state)
+    elif model_name == "mantis-lgbm":
+        return make_tsfm_model("mantis-lgbm", random_state=random_state)
+    elif model_name == "chronos2-ridgecv":
+        return make_tsfm_model("chronos2-ridgecv", random_state=random_state)
+    elif model_name == "chronos2-rf":
+        return make_tsfm_model("chronos2-rf", random_state=random_state)
+    elif model_name == "chronos2-et":
+        return make_tsfm_model("chronos2-et", random_state=random_state)
+    elif model_name == "chronos2-hgb":
+        return make_tsfm_model("chronos2-hgb", random_state=random_state)
+    elif model_name == "chronos2-lgbm":
+        return make_tsfm_model("chronos2-lgbm", random_state=random_state)
+    elif model_name == "mantis+chronos2-ridgecv":
+        return make_tsfm_model("mantis+chronos2-ridgecv", random_state=random_state)
+    elif model_name == "mantis+chronos2-rf":
+        return make_tsfm_model("mantis+chronos2-rf", random_state=random_state)
+    elif model_name == "mantis+chronos2-et":
+        return make_tsfm_model("mantis+chronos2-et", random_state=random_state)
+    elif model_name == "mantis+chronos2-hgb":
+        return make_tsfm_model("mantis+chronos2-hgb", random_state=random_state)
+    elif model_name == "mantis+chronos2-lgbm":
+        return make_tsfm_model("mantis+chronos2-lgbm", random_state=random_state)
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([
@@ -249,10 +281,26 @@ ALL_MODELS = [
     "loky-stacker-v10-base",
     "loky-stacker-v10-base-2x",
     "loky-stacker-v10-base-5x",
+    "loky-stacker-v10-base-r3",
     "loky-stacker-v7-soft-et",
     "loky-stacker-v7-soft-ridge",
     "loky-stacker-v7-soft-rf",
     "chronos2",
+    "mantis-ridgecv",
+    "mantis-rf",
+    "mantis-et",
+    "mantis-hgb",
+    "mantis-lgbm",
+    "chronos2-ridgecv",
+    "chronos2-rf",
+    "chronos2-et",
+    "chronos2-hgb",
+    "chronos2-lgbm",
+    "mantis+chronos2-ridgecv",
+    "mantis+chronos2-rf",
+    "mantis+chronos2-et",
+    "mantis+chronos2-hgb",
+    "mantis+chronos2-lgbm",
     "mydummy",
     "mycatch22",
     "TSCGlue-3-3-26",

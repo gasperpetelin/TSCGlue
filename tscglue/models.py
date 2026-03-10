@@ -940,9 +940,14 @@ class ModelSpec:
     is_series: bool
     level: int
     features: Tuple[FeatureSpec, ...]
+    fold_seeds: tuple[int, ...]
 
     def get_model_id(self):
         return f'{self.model_name}_s_{self.model_seed}'
+
+    @property
+    def n_repetitions(self) -> int:
+        return len(self.fold_seeds)
 
 def _load_feature_dict_v10(directory, feature_specs):
     """Load feature arrays using read_array with (feat_type, repetition) specs."""
@@ -1055,25 +1060,32 @@ class LokyStackerV10Base(BaseClassifier):
                 features = tuple(
                     group_features[ft_name] for ft_name in self._get_feature_names(model_name)
                 )
+                model_seed = self._get_feature_seed()
+                fold_seed_rng = np.random.default_rng(model_seed)
+                fold_seeds = tuple(
+                    int(fold_seed_rng.integers(0, 2**31 - 1)) for _ in range(self.n_repetitions)
+                )
                 spec = ModelSpec(
                     model_name=model_name,
-                    model_seed=self._get_feature_seed(),
+                    model_seed=model_seed,
                     is_series=is_series,
                     level=0,
                     features=features,
+                    fold_seeds=fold_seeds,
                 )
                 all_models.append(spec)
 
         return all_models
 
     def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0,
-                 model_names=None):
+                 model_names=None, n_repetitions=1):
         super().__init__()
         self.k_folds = int(k_folds)
         self.random_state = random_state
         self.n_jobs = int(n_jobs)
         self.keep_features = bool(keep_features)
         self.verbose = int(verbose)
+        self.n_repetitions = int(n_repetitions)
 
         self.cv_splits = None
         self.feature_seed = np.random.default_rng(random_state)
@@ -1172,9 +1184,14 @@ class LokyStackerV10Base(BaseClassifier):
             return predictions
         classes = sorted({p["class"] for p in model_preds})
         class_to_idx = {c: i for i, c in enumerate(classes)}
-        prob_array = np.full((n_samples, len(classes)), np.nan, dtype=np.float64)
+        prob_sum = np.zeros((n_samples, len(classes)), dtype=np.float64)
+        prob_count = np.zeros((n_samples, len(classes)), dtype=np.int32)
         for p in model_preds:
-            prob_array[p["index"], class_to_idx[p["class"]]] = p["probability"]
+            idx = p["index"]
+            cidx = class_to_idx[p["class"]]
+            prob_sum[idx, cidx] += p["probability"]
+            prob_count[idx, cidx] += 1
+        prob_array = np.where(prob_count > 0, prob_sum / prob_count, np.nan)
         d = str(self._require_tmpdir())
         save_array(prob_array, f"pred_{model_name}", d)
         save_array(np.array([level] + classes, dtype=object), f"pred_{model_name}_meta", d)
@@ -1284,28 +1301,33 @@ class LokyStackerV10Base(BaseClassifier):
 
                 self.train_feature_transformers(X, fit_start_time=fit_start)
                 self.compute_features(X, str(self._tmpdir), start_time=fit_start)
-                splits = generate_folds(X, y, n_splits=self.k_folds, n_repetitions=1, random_state=self._get_feature_seed())
+                stacker_fold_seed = self._get_feature_seed()
 
                 # -------- level 0 --------
+                expected_folds = {spec.get_model_id(): self.k_folds * spec.n_repetitions for spec in self.model_specs}
                 tasks = []
                 for spec in self.model_specs:
                     fold_rng = np.random.default_rng(spec.model_seed)
-                    for fold_no, (train_idx, val_idx) in enumerate(splits):
-                        fold_seed = int(fold_rng.integers(0, 2**31 - 1))
-                        tasks.append(
-                            (
-                                fold_no,
-                                spec.get_model_id(),
-                                spec.model_name,
-                                spec.is_series,
-                                train_idx,
-                                val_idx,
-                                fold_seed,
-                                str(self._tmpdir),
-                                list(spec.features),
-                                str(self._model_dir),
+                    fold_counter = 0
+                    for fold_seed in spec.fold_seeds:
+                        rep_splits = generate_folds(X, y, n_splits=self.k_folds, n_repetitions=1, random_state=fold_seed)
+                        for _, (train_idx, val_idx) in enumerate(rep_splits):
+                            fold_model_seed = int(fold_rng.integers(0, 2**31 - 1))
+                            tasks.append(
+                                (
+                                    fold_counter,
+                                    spec.get_model_id(),
+                                    spec.model_name,
+                                    spec.is_series,
+                                    train_idx,
+                                    val_idx,
+                                    fold_model_seed,
+                                    str(self._tmpdir),
+                                    list(spec.features),
+                                    str(self._model_dir),
+                                )
                             )
-                        )
+                            fold_counter += 1
 
                 n_workers = min(self.n_jobs, len(tasks))
                 self.log(f"Starting training with {n_workers} workers for {len(tasks)} models", level=2, start_time=fit_start)
@@ -1340,7 +1362,7 @@ class LokyStackerV10Base(BaseClassifier):
                     )
 
                     model_groups[model_id_result].append(fold_number)
-                    if len(model_groups[model_id_result]) == self.k_folds:
+                    if len(model_groups[model_id_result]) == expected_folds[model_id_result]:
                         self.log(f"Completed training for model {model_id_result}", level=2, start_time=fit_start)
                         del model_groups[model_id_result]
 
@@ -1358,12 +1380,12 @@ class LokyStackerV10Base(BaseClassifier):
                     return
 
                 save_array(prob_array, "Xt_probabilities", str(self._tmpdir))
-                # stacking_specs = {"probabilities": None}
 
+                stacker_splits = generate_folds(X, y, n_splits=self.k_folds, n_repetitions=1, random_state=stacker_fold_seed)
                 stack_tasks = []
                 for model_name in self.stacking_models:
                     stack_fold_rng = np.random.default_rng(self._get_feature_seed())
-                    for fold_no, (train_idx, val_idx) in enumerate(splits):
+                    for fold_no, (train_idx, val_idx) in enumerate(stacker_splits):
                         stack_fold_seed = int(stack_fold_rng.integers(0, 2**31 - 1))
                         stack_tasks.append(
                             (
@@ -1497,7 +1519,7 @@ class LokyStackerV10Base(BaseClassifier):
                 # ---- level 0 predictions ----
                 tasks = []
                 for spec in reversed(self.model_specs):
-                    for fold in range(self.k_folds):
+                    for fold in range(self.k_folds * spec.n_repetitions):
                         tasks.append(
                             (
                                 spec.get_model_id(),

@@ -4,14 +4,17 @@ import inspect
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from chronos import BaseChronosPipeline
-from sklearn.discriminant_analysis import StandardScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeClassifierCV
-import numpy as np
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, HistGradientBoostingClassifier
+from sklearn.pipeline import make_pipeline
 from sklearn.base import BaseEstimator, TransformerMixin
 from threadpoolctl import threadpool_limits
 from sklearn.utils.extmath import softmax
+from lightgbm import LGBMClassifier
 
 # TODO it is duplicated here. remove in the future.
 class RidgeClassifierCVDecisionProba(RidgeClassifierCV):
@@ -156,3 +159,82 @@ class Chronos2Classifier:
         Xt = self.compute_chronos2_embeddings_local(X)
         Xt = self.scaler_.transform(Xt)
         return self.clf_.predict_proba(Xt)
+
+
+# --- Embedding extractors ---
+
+def _mantis_embed(X: np.ndarray) -> np.ndarray:
+    from mantis.architecture import MantisV2
+    from mantis.trainer import MantisTrainer
+    network = MantisV2(device='cpu')
+    network = network.from_pretrained("paris-noah/MantisV2")
+    model = MantisTrainer(device='cpu', network=network)
+    X_r = F.interpolate(
+        torch.tensor(X, dtype=torch.float), size=512, mode='linear', align_corners=False
+    ).numpy()
+    return model.transform(X_r)
+
+
+def _chronos2_embed(X: np.ndarray, batch_size: int = 64) -> np.ndarray:
+    pipeline = BaseChronosPipeline.from_pretrained("amazon/chronos-2", device_map="cpu")
+    all_embs = []
+    for i in range(0, len(X), batch_size):
+        batch = [torch.from_numpy(x.squeeze(0)).float() for x in X[i:i+batch_size]]
+        embeddings, _ = pipeline.embed(batch)
+        vecs = [e[0, -2, :].detach().cpu().numpy() for e in embeddings]
+        all_embs.append(np.stack(vecs))
+    return np.vstack(all_embs)
+
+
+EMBEDDING_FUNCS = {
+    "mantis": _mantis_embed,
+    "chronos2": _chronos2_embed,
+    "mantis+chronos2": lambda X: np.hstack([_mantis_embed(X), _chronos2_embed(X)]),
+}
+
+CLASSIFIERS = {
+    "ridgecv": lambda rs: RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10)),
+    "rf": lambda rs: RandomForestClassifier(n_estimators=500, random_state=rs, n_jobs=-1),
+    "et": lambda rs: ExtraTreesClassifier(n_estimators=500, random_state=rs, n_jobs=-1),
+    "hgb": lambda rs: HistGradientBoostingClassifier(max_iter=500, random_state=rs),
+    "lgbm": lambda rs: LGBMClassifier(n_estimators=500, random_state=rs, verbose=-1),
+}
+
+
+class EmbeddingClassifier:
+    def __init__(self, embedding_name, classifier_name, random_state=42):
+        self.embedding_name = embedding_name
+        self.classifier_name = classifier_name
+        self.random_state = random_state
+
+    def _embed(self, X):
+        return EMBEDDING_FUNCS[self.embedding_name](X)
+
+    def fit(self, X, y):
+        Xt = self._embed(X)
+        self.pipe_ = make_pipeline(StandardScaler(), CLASSIFIERS[self.classifier_name](self.random_state))
+        self.pipe_.fit(Xt, y)
+        return self
+
+    def predict(self, X):
+        Xt = self._embed(X)
+        return self.pipe_.predict(Xt)
+
+    def predict_proba(self, X):
+        Xt = self._embed(X)
+        return self.pipe_.predict_proba(Xt)
+
+
+# Generate all embedding + classifier combinations as named classes
+ALL_TSFM_MODELS = {}
+for _emb_name in EMBEDDING_FUNCS:
+    for _clf_name in CLASSIFIERS:
+        _model_name = f"{_emb_name}-{_clf_name}"
+        ALL_TSFM_MODELS[_model_name] = (_emb_name, _clf_name)
+
+
+def make_tsfm_model(model_name: str, random_state: int = 42) -> EmbeddingClassifier:
+    if model_name not in ALL_TSFM_MODELS:
+        raise ValueError(f"Unknown tsfm model: {model_name}. Available: {list(ALL_TSFM_MODELS.keys())}")
+    emb_name, clf_name = ALL_TSFM_MODELS[model_name]
+    return EmbeddingClassifier(emb_name, clf_name, random_state=random_state)
