@@ -1,4 +1,4 @@
-.PHONY: help install-uv setup list clean tests format download-ucr
+.PHONY: help install-uv setup list clean tests format download-ucr download-models
 .ONESHELL:
 
 help:   ## Show available commands
@@ -27,6 +27,9 @@ format: ## Format the code with isort and ruff
 	uv run --extra dev isort . --profile black
 	uv run --extra dev ruff format .
 	uv run --extra dev ruff check . --fix
+
+download-models: ## Pre-download HF models (Mantis, Chronos-2) for offline/SLURM use
+	uv run python -c "from tscglue.models_tsfm import download_models; download_models()"
 
 download-ucr: ## Download and unzip UCR archive (all folds) into data/
 	mkdir -p data

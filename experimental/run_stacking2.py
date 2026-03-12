@@ -241,6 +241,8 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return make_tsfm_model("mantis+chronos2-hgb", random_state=random_state)
     elif model_name == "mantis+chronos2-lgbm":
         return make_tsfm_model("mantis+chronos2-lgbm", random_state=random_state)
+    elif model_name == "mantis+chronos2+diff-ridgecv":
+        return make_tsfm_model("mantis+chronos2-ridgecv", random_state=random_state, use_diff=True)
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([
@@ -301,6 +303,7 @@ ALL_MODELS = [
     "mantis+chronos2-et",
     "mantis+chronos2-hgb",
     "mantis+chronos2-lgbm",
+    "mantis+chronos2+diff-ridgecv",
     "mydummy",
     "mycatch22",
     "TSCGlue-3-3-26",
