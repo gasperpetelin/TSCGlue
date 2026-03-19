@@ -78,7 +78,13 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
                 ("clf", clf),
             ]
         )
-        self.classifier_.fit(X, y)
+        # Suppress f_classif "Features are constant" warnings: after CV fold splitting
+        # and scaling, some features have near-zero variance that passes VarianceThreshold
+        # but f_classif still treats as constant. These features are harmless (never selected).
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self.classifier_.fit(X, y)
 
         # sklearn convention: expose classes_
         inner = self.classifier_.named_steps["clf"]
@@ -127,6 +133,11 @@ def get_model_v6(name, seed=None, n_jobs=1):
         scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
         clf = RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 20))
         return scaler, clf
+    elif name == "probability-tabicl":
+        from tabicl import TabICLClassifier
+        scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
+        clf = TabICLClassifier(device="cuda", random_state=seed, n_jobs=1, kv_cache=False)
+        return scaler, clf
     elif name == "probability-et":
         scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
         clf = ExtraTreesClassifier(
@@ -140,6 +151,15 @@ def get_model_v6(name, seed=None, n_jobs=1):
     elif name == "multirockethydra-bestk-p-ridgecv":
         scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
         clf = AutoSelectKBestClassifier()
+        return scaler, clf
+    elif name == "fm-dummy":
+        from sklearn.dummy import DummyClassifier
+        scaler = DictMultiScaler(scalers={"mantis": NoScaler(), "chronos2": NoScaler()})
+        clf = DummyClassifier(strategy="prior")
+        return scaler, clf
+    elif name == "fm-p-ridgecv":
+        scaler = DictMultiScaler(scalers={"mantis": StandardScaler(), "chronos2": StandardScaler()})
+        clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10))
         return scaler, clf
     elif name == "rstsf":
         return None, RSTSF(random_state=seed, n_jobs=n_jobs, n_estimators=100)
@@ -239,6 +259,12 @@ def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1):
             return QUANTTransformer()
         case "hydra":
             return HydraTransformer(n_jobs=n_jobs, random_state=seed)
+        case "mantis":
+            from tscglue.models_tsfm import MantisEmbedding
+            return MantisEmbedding()
+        case "chronos2":
+            from tscglue.models_tsfm import Chronos2Embedding
+            return Chronos2Embedding()
         case _:
             raise ValueError(f"Unknown feature transformer type: {feature_type}")
 
@@ -1017,12 +1043,14 @@ class LokyStackerV10Base(BaseClassifier):
             return ("rdst",)
         elif model_name == "rstsf":
             return ("raw",)
+        elif model_name in ("fm-dummy", "fm-p-ridgecv"):
+            return ("mantis", "chronos2")
         else:
             raise ValueError(f"Unknown model {model_name}")
 
     def _make_feature_spec(self, feature_name: str, group_rng: np.random.Generator) -> FeatureSpec:
         """Create a single FeatureSpec. Seedless for deterministic transforms like quant."""
-        if feature_name in ("quant", "raw"):
+        if feature_name in ("quant", "raw", "mantis", "chronos2"):
             return FeatureSpec(feature_name=feature_name)
         return FeatureSpec(feature_name=feature_name, feature_seed=int(group_rng.integers(0, 2**31 - 1)))
 
@@ -1628,6 +1656,16 @@ class LokyStackerV10Base(BaseClassifier):
     def predict_per_model(self, X: np.ndarray) -> dict[str, np.ndarray]:
         proba_per_model = self.predict_proba_per_model(X)
         return {name: self.classes_[np.argmax(proba, axis=1)] for name, proba in proba_per_model.items()}
+
+
+class LokyStackerV10TabICL(LokyStackerV10Base):
+    STACKING_MODEL = "probability-tabicl"
+
+
+class LokyStackerV10FM(LokyStackerV10Base):
+    """LokyStackerV10Base + mantis/chronos2 foundation model features with RidgeCV."""
+
+    DEFAULT_MODEL_NAMES = LokyStackerV10Base.DEFAULT_MODEL_NAMES + ["fm-p-ridgecv"]
 
 
 class LokyStackerV8Base(LokyStackerV7):

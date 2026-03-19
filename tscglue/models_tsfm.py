@@ -186,6 +186,81 @@ def _chronos2_embed(X: np.ndarray, batch_size: int = 64) -> np.ndarray:
     return np.vstack(all_embs)
 
 
+class Chronos2Embedding(BaseEstimator, TransformerMixin):
+    """Extracts Chronos [REG] token embeddings.
+
+    Chronos-2 (decoder-only): [REG] at [-2]
+    Chronos-Bolt (encoder-decoder): [REG] at [-1]
+    """
+    def __init__(self, model_id="amazon/chronos-2", batch_size=256, device="cpu", include_diff=True):
+        self.model_id = model_id
+        self.batch_size = batch_size
+        self.device = device
+        self.include_diff = include_diff
+
+    @property
+    def _is_bolt(self):
+        return "bolt" in self.model_id
+
+    def fit(self, X, y=None):
+        return self
+
+    def _embed(self, X):
+        pipeline = BaseChronosPipeline.from_pretrained(self.model_id, device_map=self.device)
+        reg_idx = -1 if self._is_bolt else -2
+
+        all_embs = []
+        for i in range(0, len(X), self.batch_size):
+            batch = [torch.from_numpy(x.squeeze(0)).float() for x in X[i:i+self.batch_size]]
+            embeddings, _ = pipeline.embed(batch)
+
+            if self._is_bolt:
+                vecs = embeddings[:, reg_idx, :].detach().cpu().float().numpy()
+            else:
+                vecs = np.stack([e[0, reg_idx, :].detach().cpu().float().numpy() for e in embeddings])
+
+            all_embs.append(vecs)
+
+        return np.vstack(all_embs)
+
+    def transform(self, X):
+        emb = self._embed(X)
+        if self.include_diff:
+            diff_emb = self._embed(np.diff(X, axis=-1))
+            return np.hstack([emb, diff_emb])
+        return emb
+
+
+class MantisEmbedding(BaseEstimator, TransformerMixin):
+    """Extracts MantisV2 frozen embeddings (256d). Resizes input to 512 timesteps."""
+
+    def __init__(self, device="cpu", include_diff=True):
+        self.device = device
+        self.include_diff = include_diff
+
+    def fit(self, X, y=None):
+        return self
+
+    def _embed(self, X):
+        from mantis.architecture import MantisV2
+        from mantis.trainer import MantisTrainer
+
+        network = MantisV2(device=self.device)
+        network = network.from_pretrained("paris-noah/MantisV2")
+        model = MantisTrainer(device=self.device, network=network)
+        X_r = F.interpolate(
+            torch.tensor(X, dtype=torch.float), size=512, mode='linear', align_corners=False
+        ).numpy()
+        return model.transform(X_r)
+
+    def transform(self, X):
+        emb = self._embed(X)
+        if self.include_diff:
+            diff_emb = self._embed(np.diff(X, axis=-1))
+            return np.hstack([emb, diff_emb])
+        return emb
+
+
 EMBEDDING_FUNCS = {
     "mantis": _mantis_embed,
     "chronos2": _chronos2_embed,
@@ -201,14 +276,24 @@ CLASSIFIERS = {
 }
 
 
+def _diff_series(X: np.ndarray) -> np.ndarray:
+    """First difference along time axis. (n, 1, length) -> (n, 1, length-1)."""
+    return np.diff(X, axis=-1)
+
+
 class EmbeddingClassifier:
-    def __init__(self, embedding_name, classifier_name, random_state=42):
+    def __init__(self, embedding_name, classifier_name, random_state=42, use_diff=False):
         self.embedding_name = embedding_name
         self.classifier_name = classifier_name
         self.random_state = random_state
+        self.use_diff = use_diff
 
     def _embed(self, X):
-        return EMBEDDING_FUNCS[self.embedding_name](X)
+        raw = EMBEDDING_FUNCS[self.embedding_name](X)
+        if not self.use_diff:
+            return raw
+        diffed = EMBEDDING_FUNCS[self.embedding_name](_diff_series(X))
+        return np.hstack([raw, diffed])
 
     def fit(self, X, y):
         Xt = self._embed(X)
@@ -233,8 +318,66 @@ for _emb_name in EMBEDDING_FUNCS:
         ALL_TSFM_MODELS[_model_name] = (_emb_name, _clf_name)
 
 
-def make_tsfm_model(model_name: str, random_state: int = 42) -> EmbeddingClassifier:
+def download_models():
+    """Pre-download all HF models to local cache (run before offline/SLURM)."""
+    from mantis.architecture import MantisV2
+    device = 'cpu'
+    network = MantisV2(device=device)
+    network.from_pretrained("paris-noah/MantisV2")
+    print("Cached: paris-noah/MantisV2")
+
+    BaseChronosPipeline.from_pretrained("amazon/chronos-2")
+    print("Cached: amazon/chronos-2")
+
+    for bolt in ["amazon/chronos-bolt-tiny", "amazon/chronos-bolt-mini",
+                 "amazon/chronos-bolt-small", "amazon/chronos-bolt-base"]:
+        BaseChronosPipeline.from_pretrained(bolt)
+        print(f"Cached: {bolt}")
+
+    from huggingface_hub import hf_hub_download
+    ckpt = hf_hub_download(repo_id="jingang/TabICL", filename="tabicl-classifier-v2-20260212.ckpt")
+    print(f"Cached: jingang/TabICL -> {ckpt}")
+
+
+class TabICLTimeSeriesClassifier(BaseEstimator):
+    """TabICLv2 on tabularized time series (aeon 3D -> 2D via Tabularizer)."""
+
+    def __init__(self, random_state=42, device="cpu", n_jobs=1, kv_cache=True, batch_size=None):
+        self.random_state = random_state
+        self.device = device
+        self.n_jobs = n_jobs
+        self.kv_cache = kv_cache
+        self.batch_size = batch_size
+
+    def _make_pipe(self):
+        from aeon.transformations.collection import Tabularizer
+        from tabicl import TabICLClassifier
+
+        return make_pipeline(
+            Tabularizer(),
+            TabICLClassifier(
+                device=self.device,
+                random_state=self.random_state,
+                n_jobs=self.n_jobs,
+                kv_cache=self.kv_cache,
+                batch_size=self.batch_size,
+            ),
+        )
+
+    def fit(self, X, y):
+        self.pipe_ = self._make_pipe()
+        self.pipe_.fit(X, y)
+        return self
+
+    def predict(self, X):
+        return self.pipe_.predict(X)
+
+    def predict_proba(self, X):
+        return self.pipe_.predict_proba(X)
+
+
+def make_tsfm_model(model_name: str, random_state: int = 42, use_diff: bool = False) -> EmbeddingClassifier:
     if model_name not in ALL_TSFM_MODELS:
         raise ValueError(f"Unknown tsfm model: {model_name}. Available: {list(ALL_TSFM_MODELS.keys())}")
     emb_name, clf_name = ALL_TSFM_MODELS[model_name]
-    return EmbeddingClassifier(emb_name, clf_name, random_state=random_state)
+    return EmbeddingClassifier(emb_name, clf_name, random_state=random_state, use_diff=use_diff)

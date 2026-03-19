@@ -1,4 +1,5 @@
 import os
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 import re
 import random
 from itertools import product
@@ -18,7 +19,7 @@ from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.classification.dummy import DummyClassifier
 from aeon.classification.feature_based import Catch22Classifier
 from tscglue.data_loader import DATA_DIR, load_fold
-from tscglue.models_tsfm import Chronos2Classifier, ALL_TSFM_MODELS, make_tsfm_model
+from tscglue.models_tsfm import Chronos2Classifier, ALL_TSFM_MODELS, make_tsfm_model, TabICLTimeSeriesClassifier
 from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier
 from tscglue.models import (
     LokyStackerV7,
@@ -32,6 +33,8 @@ from tscglue.models import (
     LokyStackerV8AutoBestBase,
     LokyStackerV8AutoBest,
     LokyStackerV10Base,
+    LokyStackerV10FM,
+    LokyStackerV10TabICL,
     LokyStackerV7Filter_M,
     LokyStackerV7Filter_Q,
     LokyStackerV7Filter_R,
@@ -199,6 +202,10 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return MultiRocketHydraClassifier(random_state=random_state, n_jobs=n_jobs)
     elif model_name == "mymrhydrav2":
         return MultiRocketHydraClassifier(random_state=random_state + 1000, n_jobs=n_jobs)
+    elif model_name == "loky-stacker-v10-tabicl":
+        return LokyStackerV10TabICL(random_state=random_state, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v10-fm":
+        return LokyStackerV10FM(random_state=random_state, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v10-base":
         return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v10-base-2x":
@@ -243,6 +250,8 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return make_tsfm_model("mantis+chronos2-lgbm", random_state=random_state)
     elif model_name == "mantis+chronos2+diff-ridgecv":
         return make_tsfm_model("mantis+chronos2-ridgecv", random_state=random_state, use_diff=True)
+    elif model_name == "tabicl":
+        return TabICLTimeSeriesClassifier(random_state=random_state, device="cuda")
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([
@@ -281,6 +290,8 @@ ALL_MODELS = [
     "loky-stacker-v9-base-r3",
     "loky-stacker-v9-base-r5",
     "loky-stacker-v10-base",
+    "loky-stacker-v10-tabicl",
+    "loky-stacker-v10-fm",
     "loky-stacker-v10-base-2x",
     "loky-stacker-v10-base-5x",
     "loky-stacker-v10-base-r3",
@@ -304,6 +315,7 @@ ALL_MODELS = [
     "mantis+chronos2-hgb",
     "mantis+chronos2-lgbm",
     "mantis+chronos2+diff-ridgecv",
+    "tabicl",
     "mydummy",
     "mycatch22",
     "TSCGlue-3-3-26",
