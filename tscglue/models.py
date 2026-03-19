@@ -100,52 +100,72 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
 
 def get_model_v6(name, seed=None, n_jobs=1):
     """Returns (DictMultiScaler, classifier) for feature/stacking models, or (None, pipe) for series models."""
-    if name == "multirockethydra-ridgecv":
-        scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
-        clf = RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 10))
-        return scaler, clf
-    elif name == "multirockethydra-p-ridgecv":
-        scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
-        clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10))
-        return scaler, clf
-    elif name == "quant-etc":
-        scaler = DictMultiScaler(scalers={"quant": NoScaler()})
-        clf = ExtraTreesClassifier(
-            n_estimators=200, max_features=0.1, criterion="entropy",
-            random_state=seed, n_jobs=n_jobs,
-        )
-        return scaler, clf
-    elif name == "rdst-ridgecv":
-        scaler = DictMultiScaler(scalers={"rdst": StandardScaler()})
-        clf = RidgeClassifierCVIndicator(alphas=np.logspace(-4, 4, 20))
-        return scaler, clf
-    elif name == "rdst-p-ridgecv":
-        scaler = DictMultiScaler(scalers={"rdst": StandardScaler()})
-        clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-4, 4, 20))
-        return scaler, clf
-    elif name == "probability-ridgecv":
-        scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
-        clf = RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 20))
-        return scaler, clf
-    elif name == "probability-et":
-        scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
-        clf = ExtraTreesClassifier(
-            n_estimators=1000, random_state=seed, n_jobs=n_jobs,
-        )
-        return scaler, clf
-    elif name == "probability-rf":
-        scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
-        clf = RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=-1)
-        return scaler, clf
-    elif name == "multirockethydra-bestk-p-ridgecv":
-        scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
-        clf = AutoSelectKBestClassifier()
-        return scaler, clf
-    elif name == "rstsf":
-        return None, RSTSF(random_state=seed, n_jobs=n_jobs, n_estimators=100)
-    else:
-        raise ValueError(f"Unknown model name: {name}")
+    match name:
+        case "multirockethydra-ridgecv":
+            scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
+            clf = RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 10))
+            return scaler, clf
 
+        case "multirockethydra-p-ridgecv":
+            scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
+            clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10))
+            return scaler, clf
+
+        case "quant-etc":
+            scaler = DictMultiScaler(scalers={"quant": NoScaler()})
+            clf = ExtraTreesClassifier(
+                n_estimators=200, max_features=0.1, criterion="entropy",
+                random_state=seed, n_jobs=n_jobs,
+            )
+            return scaler, clf
+
+        case "rdst-ridgecv":
+            scaler = DictMultiScaler(scalers={"rdst": StandardScaler()})
+            clf = RidgeClassifierCVIndicator(alphas=np.logspace(-4, 4, 20))
+            return scaler, clf
+
+        case "rdst-p-ridgecv":
+            scaler = DictMultiScaler(scalers={"rdst": StandardScaler()})
+            clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-4, 4, 20))
+            return scaler, clf
+
+        case "probability-ridgecv":
+            scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
+            clf = RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 20))
+            return scaler, clf
+
+        case "probability-et":
+            scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
+            clf = ExtraTreesClassifier(
+                n_estimators=1000, random_state=seed, n_jobs=n_jobs,
+            )
+            return scaler, clf
+
+        case "probability-rf":
+            scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
+            clf = RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=-1)
+            return scaler, clf
+
+        case "multirockethydra-bestk-p-ridgecv":
+            scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
+            clf = AutoSelectKBestClassifier()
+            return scaler, clf
+
+        case "rstsf":
+            return None, RSTSF(random_state=seed, n_jobs=n_jobs, n_estimators=100)
+
+        case "failed":
+            return None, Failed(random_state=seed, n_jobs=n_jobs, n_estimators=100)
+
+        case _:
+            raise ValueError(f"Unknown model name: {name}")
+
+class Failed(RSTSF):
+    def _fit(self, X, y):
+        raise RuntimeError()
+
+    def predict_proba(self, X):
+        return np.zeros((len(X), 2))
 
 
 def _load_feature_dict_v7(directory, feature_specs):
@@ -1002,14 +1022,14 @@ class LokyStackerV10Base(BaseClassifier):
     _tags = {"capability:multivariate": True}
 
     DEFAULT_MODEL_NAMES = [
-        "multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv", "rstsf",
+        "multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv", "rstsf", "failed",
     ]
     SERIES_MODELS = ["rstsf"]
     STACKING_MODEL = "probability-ridgecv"
 
     def _get_feature_names(self, model_name: str) -> tuple[str, ...]:
         """Return required feature type names for a model."""
-        if model_name in ("multirockethydra-bestk-p-ridgecv", "multirockethydra-p-ridgecv", "multirockethydra-ridgecv"):
+        if model_name in ("multirockethydra-bestk-p-ridgecv", "multirockethydra-p-ridgecv", "multirockethydra-ridgecv", "failed"):
             return ("multirocket", "hydra")
         elif model_name == "quant-etc":
             return ("quant",)
@@ -1214,20 +1234,28 @@ class LokyStackerV10Base(BaseClassifier):
         preds = np.asarray(classes, dtype=object)[pred_idx]
         return float(accuracy_score(y[np.where(valid)[0]], preds))
 
-    def _build_probability_array(self, n_samples: int):
+    def _build_probability_array(self, n_samples: int, failed_models=None):
         d = self._require_tmpdir()
         prob_files = sorted(p for p in d.glob("pred_*.npy") if not p.name.endswith("_meta.npy"))
         cols, names = [], []
         for path in prob_files:
             model_name = path.stem[5:]  # strip pred_
+
+            if failed_models and model_name in failed_models:
+                self.log(f"Filtering out failed model {model_name} from stacking matrix", level=2)
+                continue
+
             prob_array, level, classes = self._load_model_predictions(model_name)
             if level != 0:
                 continue
+
             for i, cls in enumerate(classes):
                 names.append(f"{level}_{model_name}_{cls}")
                 cols.append(prob_array[:, i])
+
         if not cols:
             return None
+
         order = sorted(range(len(names)), key=names.__getitem__)
         self._probability_columns = [names[i] for i in order]
         return np.column_stack([cols[i] for i in order])
@@ -1335,14 +1363,22 @@ class LokyStackerV10Base(BaseClassifier):
                 futures = {executor.submit(_train_one_model_v10, *t): t for t in tasks}
                 model_groups = defaultdict(list)
 
+                failed_models = set()
                 for future in as_completed(futures):
                     task = futures[future]
                     fold_number = task[0]
                     model_id_task = task[1]
+                    # TODO: handle cases where atleast one model from fold failed
+
                     try:
                         train_idx, val_idx, proba, classes_, model_size, train_dur, model_id_result, fold_number = future.result()
                     except Exception as e:
-                        raise RuntimeError(f"Worker failed during training {model_id_task} fold {fold_number}: {e}") from e
+                        if model_id_task not in failed_models:
+                            failed_models.add(model_id_task)
+                            print(f"WARNING: Model {model_id_task} failed on fold {fold_number}")
+                            # TODO: cancel queued jobs for model
+                        continue
+                        # raise RuntimeError(f"Worker failed during training {model_id_task} fold {fold_number}: {e}") from e
 
                     self.log(
                         f"Trained {model_id_result} in {train_dur:.4f}s for f-{fold_number} "
@@ -1373,7 +1409,7 @@ class LokyStackerV10Base(BaseClassifier):
 
                 # -------- stacking --------
                 self.log("Starting stacking model training", level=2, start_time=fit_start)
-                prob_array = self._build_probability_array(n_samples=X.shape[0])
+                prob_array = self._build_probability_array(n_samples=X.shape[0], failed_models=failed_models)
                 if prob_array is None or np.isnan(prob_array).any():
                     self.log("NaN values detected in probability array, skipping stacking", level=2, start_time=fit_start)
                     self._fit_fallback(X, y, fit_start)
@@ -1455,7 +1491,7 @@ class LokyStackerV10Base(BaseClassifier):
             if self.keep_features and self._tmpdir:
                 self.features_training_dir_ = str(self._tmpdir)
             self.log("Executor shutdown complete", level=2, start_time=fit_start)
-
+            self.failed_models_ = failed_models
     # ----------------- inspection helpers -----------------
 
     def _get_training_dir(self) -> str:
@@ -1519,6 +1555,12 @@ class LokyStackerV10Base(BaseClassifier):
                 # ---- level 0 predictions ----
                 tasks = []
                 for spec in reversed(self.model_specs):
+                    model_id = spec.get_model_id()
+
+                    if hasattr(self, 'failed_models_') and model_id in self.failed_models_:
+                        self.log(f"Skipping prediction for {model_id} (marked as failed during fit)", level=1)
+                        continue
+
                     for fold in range(self.k_folds * spec.n_repetitions):
                         tasks.append(
                             (
