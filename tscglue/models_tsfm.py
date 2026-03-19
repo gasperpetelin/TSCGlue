@@ -320,23 +320,30 @@ for _emb_name in EMBEDDING_FUNCS:
 
 def download_models():
     """Pre-download all HF models to local cache (run before offline/SLURM)."""
-    from mantis.architecture import MantisV2
-    device = 'cpu'
-    network = MantisV2(device=device)
-    network.from_pretrained("paris-noah/MantisV2")
-    print("Cached: paris-noah/MantisV2")
+    import time
+    from huggingface_hub import snapshot_download, hf_hub_download
 
-    BaseChronosPipeline.from_pretrained("amazon/chronos-2")
-    print("Cached: amazon/chronos-2")
+    repos = [
+        "paris-noah/MantisV2",
+        "amazon/chronos-2",
+        "amazon/chronos-bolt-tiny",
+        "amazon/chronos-bolt-mini",
+        "amazon/chronos-bolt-small",
+        "amazon/chronos-bolt-base",
+    ]
 
-    for bolt in ["amazon/chronos-bolt-tiny", "amazon/chronos-bolt-mini",
-                 "amazon/chronos-bolt-small", "amazon/chronos-bolt-base"]:
-        BaseChronosPipeline.from_pretrained(bolt)
-        print(f"Cached: {bolt}")
+    for i, repo in enumerate(repos, 1):
+        print(f"[{i}/{len(repos) + 1}] Downloading {repo} ...", flush=True)
+        t0 = time.time()
+        snapshot_download(repo)
+        print(f"[{i}/{len(repos) + 1}] Cached {repo} in {time.time() - t0:.1f}s", flush=True)
 
-    from huggingface_hub import hf_hub_download
+    print(f"[{len(repos) + 1}/{len(repos) + 1}] Downloading jingang/TabICL ...", flush=True)
+    t0 = time.time()
     ckpt = hf_hub_download(repo_id="jingang/TabICL", filename="tabicl-classifier-v2-20260212.ckpt")
-    print(f"Cached: jingang/TabICL -> {ckpt}")
+    print(f"[{len(repos) + 1}/{len(repos) + 1}] Cached jingang/TabICL -> {ckpt} in {time.time() - t0:.1f}s", flush=True)
+
+    print("All models cached.", flush=True)
 
 
 class TabICLTimeSeriesClassifier(BaseEstimator):
