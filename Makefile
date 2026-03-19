@@ -29,7 +29,7 @@ format: ## Format the code with isort and ruff
 	uv run --extra dev ruff check . --fix
 
 download-models: ## Pre-download HF models (Mantis, Chronos-2) for offline/SLURM use
-	uv run python -c "from tscglue.models_tsfm import download_models; download_models()"
+	uv run --no-sync python -c "from tscglue.models_tsfm import download_models; download_models()"
 
 download-ucr: ## Download and unzip UCR archive (all folds) into data/
 	mkdir -p data
