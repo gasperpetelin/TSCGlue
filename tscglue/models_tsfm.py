@@ -349,12 +349,19 @@ def download_models():
 class TabICLTimeSeriesClassifier(BaseEstimator):
     """TabICLv2 on tabularized time series (aeon 3D -> 2D via Tabularizer)."""
 
-    def __init__(self, random_state=42, device="cpu", n_jobs=1, kv_cache=True, batch_size=None):
+    def __init__(self, random_state=42, device="cpu", n_jobs=1, kv_cache=True, batch_size=None, include_diff=False):
         self.random_state = random_state
         self.device = device
         self.n_jobs = n_jobs
         self.kv_cache = kv_cache
         self.batch_size = batch_size
+        self.include_diff = include_diff
+
+    def _prepare_X(self, X):
+        if not self.include_diff:
+            return X
+        X_diff = np.diff(X, axis=-1)
+        return np.concatenate([X, X_diff], axis=-1)
 
     def _make_pipe(self):
         from aeon.transformations.collection import Tabularizer
@@ -373,14 +380,14 @@ class TabICLTimeSeriesClassifier(BaseEstimator):
 
     def fit(self, X, y):
         self.pipe_ = self._make_pipe()
-        self.pipe_.fit(X, y)
+        self.pipe_.fit(self._prepare_X(X), y)
         return self
 
     def predict(self, X):
-        return self.pipe_.predict(X)
+        return self.pipe_.predict(self._prepare_X(X))
 
     def predict_proba(self, X):
-        return self.pipe_.predict_proba(X)
+        return self.pipe_.predict_proba(self._prepare_X(X))
 
 
 def make_tsfm_model(model_name: str, random_state: int = 42, use_diff: bool = False) -> EmbeddingClassifier:

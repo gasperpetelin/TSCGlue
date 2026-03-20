@@ -18,7 +18,8 @@ dependencies = [
     "imblearn",
     "click",
     "pyarrow",
-    "statsmodels"
+    "statsmodels",
+    "tabicl"
 ]
 
 [project.optional-dependencies]

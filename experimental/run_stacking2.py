@@ -252,6 +252,8 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return make_tsfm_model("mantis+chronos2-ridgecv", random_state=random_state, use_diff=True)
     elif model_name == "tabicl":
         return TabICLTimeSeriesClassifier(random_state=random_state, device="cuda")
+    elif model_name == "tabicl-diff":
+        return TabICLTimeSeriesClassifier(random_state=random_state, device="cuda", include_diff=True)
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([
@@ -316,6 +318,7 @@ ALL_MODELS = [
     "mantis+chronos2-lgbm",
     "mantis+chronos2+diff-ridgecv",
     "tabicl",
+    "tabicl-diff",
     "mydummy",
     "mycatch22",
     "TSCGlue-3-3-26",
