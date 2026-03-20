@@ -136,7 +136,7 @@ def get_model_v6(name, seed=None, n_jobs=1):
     elif name == "probability-tabicl":
         from tabicl import TabICLClassifier
         scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
-        clf = TabICLClassifier(device="cuda", random_state=seed, n_jobs=1, kv_cache=False)
+        clf = TabICLClassifier(device="cpu", random_state=seed, n_jobs=1, kv_cache=False)
         return scaler, clf
     elif name == "probability-et":
         scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
