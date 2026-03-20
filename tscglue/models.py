@@ -1098,7 +1098,7 @@ class LokyStackerV10Base(BaseClassifier):
         return all_models
 
     def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0,
-                 model_names=None, n_repetitions=1):
+                 model_names=None, n_repetitions=1, exception_on_model_fail=True):
         super().__init__()
         self.k_folds = int(k_folds)
         self.random_state = random_state
@@ -1106,6 +1106,7 @@ class LokyStackerV10Base(BaseClassifier):
         self.keep_features = bool(keep_features)
         self.verbose = int(verbose)
         self.n_repetitions = int(n_repetitions)
+        self.exception_on_model_fail = bool(exception_on_model_fail)
 
         self.cv_splits = None
         self.feature_seed = np.random.default_rng(random_state)
@@ -1368,17 +1369,26 @@ class LokyStackerV10Base(BaseClassifier):
                     task = futures[future]
                     fold_number = task[0]
                     model_id_task = task[1]
-                    # TODO: handle cases where atleast one model from fold failed
-
                     try:
                         train_idx, val_idx, proba, classes_, model_size, train_dur, model_id_result, fold_number = future.result()
                     except Exception as e:
+                        if self.exception_on_model_fail:
+                            self.log(f"CRITICAL: Model {model_id_task} failed on f-{fold_number}", level=0,
+                                     start_time=fit_start)
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            raise
                         if model_id_task not in failed_models:
                             failed_models.add(model_id_task)
-                            print(f"WARNING: Model {model_id_task} failed on fold {fold_number}")
-                            # TODO: cancel queued jobs for model
+                            self.log(f"WARNING: Model {model_id_task} failed on fold {fold_number}", level=2,
+                                     start_time=fit_start)
+                            cancelled_count = 0
+                            for f, t in futures.items():
+                                if t[1] == model_id_task and not f.done():
+                                    if f.cancel():
+                                        cancelled_count += 1
+                            if cancelled_count > 0:
+                                self.log(f"Cancelled {cancelled_count} queued folds for {model_id_task}", level=2, start_time=fit_start)
                         continue
-                        # raise RuntimeError(f"Worker failed during training {model_id_task} fold {fold_number}: {e}") from e
 
                     self.log(
                         f"Trained {model_id_result} in {train_dur:.4f}s for f-{fold_number} "
