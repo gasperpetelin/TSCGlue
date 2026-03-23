@@ -8,18 +8,17 @@ dependencies = [
     "polars",
     "scikit-learn",
     "tqdm",
-    "aeon[dl]>=1.3.0",
-    "tensorflow>=2.14",
     "seaborn",
     "torch",
-    "torchvision",
+    "aeon",
     "pytorch-lightning",
     "huggingface-hub",
     "imblearn",
     "click",
     "pyarrow",
     "statsmodels",
-    "tabicl"
+    "tabicl",
+    "tsfresh"
 ]
 
 [project.optional-dependencies]

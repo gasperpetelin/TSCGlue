@@ -197,33 +197,54 @@ class Chronos2Embedding(BaseEstimator, TransformerMixin):
         self.batch_size = batch_size
         self.device = device
         self.include_diff = include_diff
+        self._pipeline = None
 
     @property
     def _is_bolt(self):
         return "bolt" in self.model_id
 
+    def _get_pipeline(self):
+        if self._pipeline is None:
+            from time import perf_counter
+            t0 = perf_counter()
+            self._pipeline = BaseChronosPipeline.from_pretrained(self.model_id, device_map=self.device)
+        return self._pipeline
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['_pipeline'] = None
+        return state
+
     def fit(self, X, y=None):
         return self
 
     def _embed(self, X):
-        pipeline = BaseChronosPipeline.from_pretrained(self.model_id, device_map=self.device)
-        reg_idx = -1 if self._is_bolt else -2
+        import os
+        from time import perf_counter
+        t0 = perf_counter()
+        pipeline = self._get_pipeline()
+        t1 = perf_counter()
+        with torch.inference_mode():
+            reg_idx = -1 if self._is_bolt else -2
+            all_embs = []
+            for i in range(0, len(X), self.batch_size):
+                tb = perf_counter()
+                batch = [torch.from_numpy(x.squeeze(0)).float() for x in X[i:i+self.batch_size]]
+                t_prep = perf_counter()
+                embeddings, _ = pipeline.embed(batch)
+                t_emb = perf_counter()
 
-        all_embs = []
-        for i in range(0, len(X), self.batch_size):
-            batch = [torch.from_numpy(x.squeeze(0)).float() for x in X[i:i+self.batch_size]]
-            embeddings, _ = pipeline.embed(batch)
-
-            if self._is_bolt:
-                vecs = embeddings[:, reg_idx, :].detach().cpu().float().numpy()
-            else:
-                vecs = np.stack([e[0, reg_idx, :].detach().cpu().float().numpy() for e in embeddings])
-
-            all_embs.append(vecs)
-
-        return np.vstack(all_embs)
+                if self._is_bolt:
+                    vecs = embeddings[:, reg_idx, :].detach().cpu().float().numpy()
+                else:
+                    vecs = np.stack([e[0, reg_idx, :].detach().cpu().float().numpy() for e in embeddings])
+                all_embs.append(vecs)
+            result = np.vstack(all_embs)
+        return result
 
     def transform(self, X):
+        from time import perf_counter
+        t0 = perf_counter()
         emb = self._embed(X)
         if self.include_diff:
             diff_emb = self._embed(np.diff(X, axis=-1))

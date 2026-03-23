@@ -161,6 +161,11 @@ def get_model_v6(name, seed=None, n_jobs=1):
         scaler = DictMultiScaler(scalers={"mantis": StandardScaler(), "chronos2": StandardScaler()})
         clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10))
         return scaler, clf
+    elif name == "tsfresh-rotf":
+        from aeon.classification.sklearn import RotationForestClassifier
+        scaler = DictMultiScaler(scalers={"tsfresh": NoScaler()})
+        clf = RotationForestClassifier(n_estimators=200, n_jobs=n_jobs, random_state=seed)
+        return scaler, clf
     elif name == "rstsf":
         return None, RSTSF(random_state=seed, n_jobs=n_jobs, n_estimators=100)
     else:
@@ -265,11 +270,40 @@ def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1):
         case "chronos2":
             from tscglue.models_tsfm import Chronos2Embedding
             return Chronos2Embedding()
+        case "tsfresh":
+            from aeon.transformations.collection.feature_based import TSFresh
+            return TSFresh(default_fc_parameters="efficient", n_jobs=n_jobs)
         case _:
             raise ValueError(f"Unknown feature transformer type: {feature_type}")
 
 def _noop():
     return None
+
+def _run_in_subprocess(target, args):
+    """Run target(*args) in a fresh spawned subprocess.
+
+    Uses 'spawn' context to avoid inheriting state (e.g. GPU memory, open file
+    descriptors, TensorFlow/PyTorch globals) from the parent process, which can
+    cause hangs or incorrect behaviour with foundation-model transformers.
+    """
+    mp_ctx = multiprocessing.get_context("spawn")
+    p = mp_ctx.Process(target=target, args=args)
+    p.start()
+    p.join()
+    if p.exitcode != 0:
+        raise RuntimeError(f"Subprocess failed with exit code {p.exitcode}")
+
+def _fit_transformer_in_subprocess(feature_name, feature_seed, n_jobs, X_path, model_dir, feature_id):
+    X = np.load(X_path, allow_pickle=True)
+    transformer = get_feature_transformer(feature_name, seed=feature_seed, n_jobs=n_jobs)
+    transformer.fit(X)
+    save_model(transformer, f"transformer_{feature_id}", model_dir)
+
+def _transform_in_subprocess(feature_id, X_path, model_dir, output_dir):
+    X = np.load(X_path, allow_pickle=True)
+    transformer = read_model(f"transformer_{feature_id}", model_dir)
+    Xt = transformer.transform(X)
+    save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=np.float64)
 
 class LokyStackerV7(BaseClassifier):
     _tags = {"capability:multivariate": True}
@@ -807,7 +841,7 @@ class LokyStackerV7(BaseClassifier):
 
                 # Build tasks from known model structure
                 tasks = []
-                for model_name in reversed(self.feature_models + self.series_models):
+                for model_name in self.feature_models + self.series_models:
                     is_series = model_name in self.series_models
                     for rep in range(self.n_repetitions):
                         tagged_name = f"{model_name}_r{rep}"
@@ -1045,12 +1079,14 @@ class LokyStackerV10Base(BaseClassifier):
             return ("raw",)
         elif model_name in ("fm-dummy", "fm-p-ridgecv"):
             return ("mantis", "chronos2")
+        elif model_name == "tsfresh-rotf":
+            return ("tsfresh",)
         else:
             raise ValueError(f"Unknown model {model_name}")
 
     def _make_feature_spec(self, feature_name: str, group_rng: np.random.Generator) -> FeatureSpec:
         """Create a single FeatureSpec. Seedless for deterministic transforms like quant."""
-        if feature_name in ("quant", "raw", "mantis", "chronos2"):
+        if feature_name in ("quant", "raw", "mantis", "chronos2", "tsfresh"):
             return FeatureSpec(feature_name=feature_name)
         return FeatureSpec(feature_name=feature_name, feature_seed=int(group_rng.integers(0, 2**31 - 1)))
 
@@ -1142,6 +1178,7 @@ class LokyStackerV10Base(BaseClassifier):
 
         self._oof_scores: list[dict] = []
         self._probability_columns: list[str] | None = None
+        self.neki: list[dict] = []
 
         self._fallback_path: Path = self._model_dir / "fallback.pkl"
 
@@ -1264,26 +1301,34 @@ class LokyStackerV10Base(BaseClassifier):
 
     def train_feature_transformers(self, X: np.ndarray, fit_start_time=None) -> None:
         os.makedirs(self._model_dir, exist_ok=True)
-        for ft in self.features_list:
-            if ft.feature_name == "raw":
-                continue
-            transformer = get_feature_transformer(ft.feature_name, seed=ft.feature_seed, n_jobs=self.n_jobs)
-            transformer.fit(X)
-            save_model(transformer, f"transformer_{ft.get_feature_id()}", self._model_dir)
-
-    def compute_features(self, X: np.ndarray, directory: str, start_time=None) -> None:
-        compute_start = perf_counter()
+        X_path = str(self._tmpdir / "X.npy")
         for ft in self.features_list:
             if ft.feature_name == "raw":
                 continue
             t0 = perf_counter()
-            transformer = read_model(f"transformer_{ft.get_feature_id()}", self._model_dir)
-            Xt = transformer.transform(X)
+            _run_in_subprocess(
+                _fit_transformer_in_subprocess,
+                (ft.feature_name, ft.feature_seed, self.n_jobs,
+                 X_path, str(self._model_dir), ft.get_feature_id()),
+            )
+            self.log(f"Fitted transformer {ft.get_feature_id()} in {perf_counter()-t0:.2f}s",
+                     level=1, start_time=fit_start_time)
+
+    def compute_features(self, X: np.ndarray, directory: str, start_time=None) -> None:
+        compute_start = perf_counter()
+        X_path = f"{directory}/X.npy"
+        for ft in self.features_list:
+            if ft.feature_name == "raw":
+                continue
+            t0 = perf_counter()
+            _run_in_subprocess(
+                _transform_in_subprocess,
+                (ft.get_feature_id(), X_path, str(self._model_dir), directory),
+            )
+            Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
             size_mb = Xt.nbytes / (1024 * 1024)
-            shape = Xt.shape
-            save_array(Xt, f"Xt_{ft.get_feature_id()}", directory, dtype=np.float64)
             self.log(
-                f"Computed {ft.get_feature_id()} features {shape} ({size_mb:.2f} MB) in {perf_counter() - t0:.4f}s",
+                f"Computed {ft.get_feature_id()} features {Xt.shape} ({size_mb:.2f} MB) in {perf_counter() - t0:.4f}s",
                 level=1,
                 start_time=compute_start if start_time is None else start_time,
             )
@@ -1379,15 +1424,15 @@ class LokyStackerV10Base(BaseClassifier):
                         start_time=fit_start,
                     )
 
-                    predictions.extend(
-                        self.add_probabilities(
-                            probas=proba,
-                            classes=classes_,
-                            model_name=model_id_result,
-                            level=0,
-                            indices=val_idx,
-                        )
+                    new_preds = self.add_probabilities(
+                        probas=proba,
+                        classes=classes_,
+                        model_name=model_id_result,
+                        level=0,
+                        indices=val_idx,
                     )
+                    predictions.extend(new_preds)
+                    self.neki.extend(new_preds)
 
                     model_groups[model_id_result].append(fold_number)
                     if len(model_groups[model_id_result]) == expected_folds[model_id_result]:
@@ -1452,15 +1497,15 @@ class LokyStackerV10Base(BaseClassifier):
                         start_time=fit_start,
                     )
 
-                    predictions.extend(
-                        self.add_probabilities(
-                            probas=proba,
-                            classes=classes_,
-                            model_name=model_id_result,
-                            level=1,
-                            indices=val_idx,
-                        )
+                    new_preds = self.add_probabilities(
+                        probas=proba,
+                        classes=classes_,
+                        model_name=model_id_result,
+                        level=1,
+                        indices=val_idx,
                     )
+                    predictions.extend(new_preds)
+                    self.neki.extend(new_preds)
 
                     model_groups[model_id_result].append(fold_number)
                     if len(model_groups[model_id_result]) == self.k_folds:
@@ -1546,7 +1591,7 @@ class LokyStackerV10Base(BaseClassifier):
                 predictions = []
                 # ---- level 0 predictions ----
                 tasks = []
-                for spec in reversed(self.model_specs):
+                for spec in self.model_specs:
                     for fold in range(self.k_folds * spec.n_repetitions):
                         tasks.append(
                             (
@@ -1666,6 +1711,12 @@ class LokyStackerV10FM(LokyStackerV10Base):
     """LokyStackerV10Base + mantis/chronos2 foundation model features with RidgeCV."""
 
     DEFAULT_MODEL_NAMES = LokyStackerV10Base.DEFAULT_MODEL_NAMES + ["fm-p-ridgecv"]
+
+
+class LokyStackerV10FMTSFresh(LokyStackerV10FM):
+    """LokyStackerV10FM + TSFresh efficient features with RotationForest."""
+
+    DEFAULT_MODEL_NAMES = LokyStackerV10FM.DEFAULT_MODEL_NAMES + ["tsfresh-rotf"]
 
 
 class LokyStackerV8Base(LokyStackerV7):
@@ -2229,7 +2280,7 @@ class LokyStackerV9Base(BaseClassifier):
 
                 # Build tasks from known model structure
                 tasks = []
-                for model_name in reversed(self.feature_models + self.series_models):
+                for model_name in self.feature_models + self.series_models:
                     is_series = model_name in self.series_models
                     #for rep in range(self.n_repetitions):
                     rep=0

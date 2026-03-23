@@ -34,6 +34,7 @@ from tscglue.models import (
     LokyStackerV8AutoBest,
     LokyStackerV10Base,
     LokyStackerV10FM,
+    LokyStackerV10FMTSFresh,
     LokyStackerV10TabICL,
     LokyStackerV7Filter_M,
     LokyStackerV7Filter_Q,
@@ -206,6 +207,8 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return LokyStackerV10TabICL(random_state=random_state, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v10-fm":
         return LokyStackerV10FM(random_state=random_state, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v10-fm-tsfresh":
+        return LokyStackerV10FMTSFresh(random_state=random_state, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v10-base":
         return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v10-base-2x":
@@ -294,6 +297,7 @@ ALL_MODELS = [
     "loky-stacker-v10-base",
     "loky-stacker-v10-tabicl",
     "loky-stacker-v10-fm",
+    "loky-stacker-v10-fm-tsfresh",
     "loky-stacker-v10-base-2x",
     "loky-stacker-v10-base-5x",
     "loky-stacker-v10-base-r3",
