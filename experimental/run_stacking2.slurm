@@ -21,4 +21,5 @@
 set -x
 export PYTHONUNBUFFERED=1
 export HF_HUB_OFFLINE=1
+export PYTHONFAULTHANDLER=1
 uv run --no-sync run_stacking2.py --storage disk -j 4 -f $SLURM_ARRAY_TASK_ID "$@"

@@ -254,12 +254,22 @@ def read_model(name, directory, repetition=None, fold=None):
     with open(path, 'rb') as f:
         return pickle.load(f)
 
+class RDSTFloat64(RandomDilatedShapeletTransform):
+    """RDST wrapper that casts input to float64 (numba requires it)."""
+
+    def _fit(self, X, y=None):
+        return super()._fit(np.asarray(X, dtype=np.float64), y)
+
+    def _transform(self, X, y=None):
+        return super()._transform(np.asarray(X, dtype=np.float64), y)
+
+
 def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1):
     match feature_type:
         case "multirocket":
             return MultiRocket(n_jobs=n_jobs, random_state=seed)
         case "rdst":
-            return RandomDilatedShapeletTransform(n_jobs=n_jobs, random_state=seed)
+            return RDSTFloat64(n_jobs=n_jobs, random_state=seed)
         case "quant":
             return QUANTTransformer()
         case "hydra":
@@ -286,7 +296,7 @@ def _run_in_subprocess(target, args):
     descriptors, TensorFlow/PyTorch globals) from the parent process, which can
     cause hangs or incorrect behaviour with foundation-model transformers.
     """
-    mp_ctx = multiprocessing.get_context("spawn")
+    mp_ctx = multiprocessing.get_context("forkserver")
     p = mp_ctx.Process(target=target, args=args)
     p.start()
     p.join()
@@ -299,11 +309,22 @@ def _fit_transformer_in_subprocess(feature_name, feature_seed, n_jobs, X_path, m
     transformer.fit(X)
     save_model(transformer, f"transformer_{feature_id}", model_dir)
 
-def _transform_in_subprocess(feature_id, X_path, model_dir, output_dir):
+def _transform_in_subprocess(feature_id, X_path, model_dir, output_dir, dtype=np.float64):
     X = np.load(X_path, allow_pickle=True)
     transformer = read_model(f"transformer_{feature_id}", model_dir)
+    t0 = perf_counter()
     Xt = transformer.transform(X)
-    save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=np.float64)
+    print(f"[subprocess] transform {feature_id}: {perf_counter() - t0:.4f}s")
+    save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
+
+def _fit_transform_in_subprocess(feature_name, feature_seed, n_jobs, X_path, model_dir, output_dir, feature_id, dtype=np.float64):
+    X = np.load(X_path, allow_pickle=True)
+    transformer = get_feature_transformer(feature_name, seed=feature_seed, n_jobs=n_jobs)
+    t0 = perf_counter()
+    Xt = transformer.fit_transform(X)
+    print(f"[subprocess] fit_transform {feature_id}: {perf_counter() - t0:.4f}s")
+    save_model(transformer, f"transformer_{feature_id}", model_dir)
+    save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
 
 class LokyStackerV7(BaseClassifier):
     _tags = {"capability:multivariate": True}
@@ -1142,7 +1163,7 @@ class LokyStackerV10Base(BaseClassifier):
         return all_models
 
     def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0,
-                 model_names=None, n_repetitions=1):
+                 model_names=None, n_repetitions=1, feature_dtype=None):
         super().__init__()
         self.k_folds = int(k_folds)
         self.random_state = random_state
@@ -1150,6 +1171,7 @@ class LokyStackerV10Base(BaseClassifier):
         self.keep_features = bool(keep_features)
         self.verbose = int(verbose)
         self.n_repetitions = int(n_repetitions)
+        self.feature_dtype = np.dtype(feature_dtype) if feature_dtype is not None else None
 
         self.cv_splits = None
         self.feature_seed = np.random.default_rng(random_state)
@@ -1299,20 +1321,27 @@ class LokyStackerV10Base(BaseClassifier):
 
     # ----------------- features: train transformers + compute arrays -----------------
 
-    def train_feature_transformers(self, X: np.ndarray, fit_start_time=None) -> None:
+    def fit_transform_features(self, X: np.ndarray, fit_start_time=None) -> None:
+        """Fit transformers and compute features in a single subprocess per transformer."""
         os.makedirs(self._model_dir, exist_ok=True)
+        directory = str(self._tmpdir)
         X_path = str(self._tmpdir / "X.npy")
         for ft in self.features_list:
             if ft.feature_name == "raw":
                 continue
             t0 = perf_counter()
             _run_in_subprocess(
-                _fit_transformer_in_subprocess,
+                _fit_transform_in_subprocess,
                 (ft.feature_name, ft.feature_seed, self.n_jobs,
-                 X_path, str(self._model_dir), ft.get_feature_id()),
+                 X_path, str(self._model_dir), directory, ft.get_feature_id(), self.feature_dtype),
             )
-            self.log(f"Fitted transformer {ft.get_feature_id()} in {perf_counter()-t0:.2f}s",
-                     level=1, start_time=fit_start_time)
+            Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
+            size_mb = Xt.nbytes / (1024 * 1024)
+            self.log(
+                f"Fit+transformed {ft.get_feature_id()} features {Xt.shape} ({size_mb:.2f} MB) dtype={Xt.dtype} in {perf_counter() - t0:.4f}s",
+                level=1,
+                start_time=fit_start_time,
+            )
 
     def compute_features(self, X: np.ndarray, directory: str, start_time=None) -> None:
         compute_start = perf_counter()
@@ -1323,12 +1352,12 @@ class LokyStackerV10Base(BaseClassifier):
             t0 = perf_counter()
             _run_in_subprocess(
                 _transform_in_subprocess,
-                (ft.get_feature_id(), X_path, str(self._model_dir), directory),
+                (ft.get_feature_id(), X_path, str(self._model_dir), directory, self.feature_dtype),
             )
             Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
             size_mb = Xt.nbytes / (1024 * 1024)
             self.log(
-                f"Computed {ft.get_feature_id()} features {Xt.shape} ({size_mb:.2f} MB) in {perf_counter() - t0:.4f}s",
+                f"Computed {ft.get_feature_id()} features {Xt.shape} ({size_mb:.2f} MB) dtype={Xt.dtype} in {perf_counter() - t0:.4f}s",
                 level=1,
                 start_time=compute_start if start_time is None else start_time,
             )
@@ -1346,15 +1375,17 @@ class LokyStackerV10Base(BaseClassifier):
 
     def _fit(self, X, y):
         fit_start = perf_counter()
+        if self.feature_dtype is None:
+            self.feature_dtype = np.asarray(X).dtype
         self.log(f"Starting fit, run_dir={self._base_dir}, n_jobs={self.n_jobs}", level=1, start_time=fit_start)
 
         os.makedirs(self._model_dir, exist_ok=True)
         os.makedirs(self._tmpdir, exist_ok=True)
 
         t0 = perf_counter()
-        save_array(X, "X", str(self._tmpdir), dtype=np.float64)
+        save_array(X, "X", str(self._tmpdir), dtype=self.feature_dtype)
         save_array(y, "y", str(self._tmpdir))
-        self.log(f"Saved X and y to disk in {perf_counter() - t0:.2f}s", level=2, start_time=fit_start)
+        self.log(f"Saved X and y to disk in {perf_counter() - t0:.2f}s (dtype={self.feature_dtype})", level=2, start_time=fit_start)
 
         _, counts = np.unique(y, return_counts=True)
         if np.any(counts < 2):
@@ -1365,15 +1396,14 @@ class LokyStackerV10Base(BaseClassifier):
         if self.cv_splits is None:
             self.cv_splits = []
 
-        mp_ctx = multiprocessing.get_context("spawn")
+        mp_ctx = multiprocessing.get_context("forkserver")
 
         try:
             with ProcessPoolExecutor(max_workers=self.n_jobs, mp_context=mp_ctx) as executor:
                 warm = [executor.submit(_noop) for _ in range(self.n_jobs)]
                 predictions = []
 
-                self.train_feature_transformers(X, fit_start_time=fit_start)
-                self.compute_features(X, str(self._tmpdir), start_time=fit_start)
+                self.fit_transform_features(X, fit_start_time=fit_start)
                 stacker_fold_seed = self._get_feature_seed()
 
                 # -------- level 0 --------
@@ -1572,7 +1602,7 @@ class LokyStackerV10Base(BaseClassifier):
         predict_start = perf_counter()
         self.log("Starting prediction", level=1, start_time=predict_start)
 
-        mp_ctx = multiprocessing.get_context("spawn")
+        mp_ctx = multiprocessing.get_context("forkserver")
         features_infer = self._base_dir / "features_inference"
         features_stack = self._base_dir / "features"
 
@@ -1584,7 +1614,7 @@ class LokyStackerV10Base(BaseClassifier):
                 warm = [executor.submit(_noop) for _ in range(self.n_jobs)]
 
                 # compute features (transform-only; transformers already trained)
-                save_array(X, "X", str(features_infer))
+                save_array(X, "X", str(features_infer), dtype=self.feature_dtype)
                 self.compute_features(X, str(features_infer), start_time=predict_start)
                 self.log("Computed and saved features for prediction", level=1, start_time=predict_start)
 
@@ -1639,7 +1669,7 @@ class LokyStackerV10Base(BaseClassifier):
                 prob_cols = sorted(c for c in df0.columns if c != "index")
                 prob_array = df0.select(prob_cols).to_numpy()
 
-                save_array(X, "X", str(features_stack))
+                save_array(X, "X", str(features_stack), dtype=self.feature_dtype)
                 save_array(prob_array, "Xt_probabilities", str(features_stack))
 
                 # ---- stacking predictions ----
@@ -2527,7 +2557,7 @@ def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
         all_folds.extend(folds)
     return all_folds
 
-class TSCGlue(LokyStackerV8Base):
+class TSCGlue(LokyStackerV10FM):
     def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0):
         super().__init__(random_state=random_state, n_repetitions=1, k_folds=k_folds, n_jobs=n_jobs, keep_features=False, verbose=verbose)
 
