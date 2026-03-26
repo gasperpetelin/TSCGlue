@@ -10,7 +10,7 @@ dependencies = [
     "tqdm",
     "seaborn",
     "torch",
-    "aeon",
+    "aeon>=1.3.0",
     "pytorch-lightning",
     "huggingface-hub",
     "imblearn",
