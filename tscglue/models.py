@@ -1298,8 +1298,11 @@ class LokyStackerV10Base(BaseClassifier):
         if not np.any(valid):
             return 0.0
         pred_idx = np.argmax(prob_array[valid], axis=1)
-        preds = np.asarray(classes, dtype=object)[pred_idx]
-        return float(accuracy_score(y[np.where(valid)[0]], preds))
+        preds = np.asarray(classes)[pred_idx]
+        y_true = y[np.where(valid)[0]]
+        y_true_str = np.asarray(y_true, dtype=str)
+        preds_str = np.asarray(preds, dtype=str)
+        return float(accuracy_score(y_true_str, preds_str))
 
     def _build_probability_array(self, n_samples: int):
         d = self._require_tmpdir()

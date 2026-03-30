@@ -58,3 +58,30 @@ def test_model_on_multivariate():
     assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
 
     print(f"Test passed with accuracy: {accuracy:.4f}")
+
+
+def test_label_dtype():
+    """Test if model can handle both string and int dtypes for labels."""
+    X_train, y_train, X_test, y_test = utils.load_dataset("BasicMotions")
+
+    try:
+        model = LokyStackerV10Base(random_state=270, n_repetitions=1, k_folds=10, n_jobs=8)
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        accuracy = accuracy_score(y_test, y_pred)
+        print(f"Test for string passed with accuracy: {accuracy:.4f}")
+    except Exception as e:
+        print(f"Test for string failed with error: {e}")
+
+    labels, y_train_int = np.unique(y_train, return_inverse=True)
+    y_test_int = np.array([np.where(labels == x)[0][0] for x in y_test])
+
+    try:
+        model = LokyStackerV10Base(random_state=270, n_repetitions=1, k_folds=10, n_jobs=8)
+        model.fit(X_train, y_train_int)
+        y_pred = model.predict(X_test)
+        accuracy = accuracy_score(y_test_int, y_pred)
+        print(f"Test for integer passed with accuracy: {accuracy:.4f}")
+    except Exception as e:
+        print(f"Test for integer failed with error: {e}")
+
