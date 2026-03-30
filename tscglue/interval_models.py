@@ -1,6 +1,6 @@
 """RSTSF variants: RandomIntervals and UnsupervisedIntervals + GaussianRandomProjection."""
 
-__all__ = ["UnsupervisedIntervals", "RSTSFRandom", "RSTSFUnsupervised"]
+__all__ = ["UnsupervisedIntervals", "RSTSFRandom", "RSTSFUnsupervised", "RSTSFCombined"]
 
 import inspect
 
@@ -573,3 +573,151 @@ class RSTSFUnsupervised(BaseClassifier):
     @classmethod
     def _get_test_params(cls, parameter_set="default"):
         return {"n_estimators": 2, "n_intervals": 1}
+
+
+class RSTSFCombined(BaseClassifier):
+    """RSTSF-style classifier combining RandomIntervals and UnsupervisedIntervals.
+
+    For each of the 4 series representations (original, first differences,
+    periodogram, AR coefficients), extracts features from both RandomIntervals
+    and UnsupervisedIntervals. The unsupervised features are first projected
+    with GaussianRandomProjection, then concatenated with the random interval
+    features before fitting the classifier.
+
+    Parameters
+    ----------
+    n_estimators : int, default=200
+        Number of trees when estimator is None (ExtraTreesClassifier).
+        Ignored if estimator is provided.
+    n_intervals_random : int, default=600
+        Number of random intervals per series representation.
+    n_intervals_unsupervised : int, default=50
+        Number of unsupervised interval-generation runs per series representation.
+    min_interval_length : int, default=3
+        Minimum length of extracted intervals.
+    n_components : int or "auto", default="auto"
+        Number of GaussianRandomProjection components applied to the
+        unsupervised features before concatenation.
+    estimator : sklearn estimator or None, default=None
+        Classifier fitted on the combined features. None defaults to
+        ExtraTreesClassifier (entropy, balanced, sqrt). Feature pruning via
+        tree importance is only applied when estimator is None.
+    random_state : None, int or RandomState, default=None
+    n_jobs : int, default=1
+    """
+
+    _tags = {
+        "capability:multivariate": True,
+        "capability:multithreading": True,
+        "algorithm_type": "interval",
+        "python_dependencies": "statsmodels",
+    }
+
+    def __init__(
+        self,
+        n_estimators=200,
+        n_intervals_random=600,
+        n_intervals_unsupervised=50,
+        min_interval_length=3,
+        n_components="auto",
+        estimator=None,
+        random_state=None,
+        n_jobs=1,
+    ):
+        self.n_estimators = n_estimators
+        self.n_intervals_random = n_intervals_random
+        self.n_intervals_unsupervised = n_intervals_unsupervised
+        self.min_interval_length = min_interval_length
+        self.n_components = n_components
+        self.estimator = estimator
+        self.random_state = random_state
+        self.n_jobs = n_jobs
+        super().__init__()
+
+    def _fit(self, X, y):
+        self.n_cases_, self.n_channels_, self.n_timepoints_ = X.shape
+        self._n_jobs = check_n_jobs(self.n_jobs)
+
+        transforms, self._series_transformers = _make_series_transforms(X)
+
+        self._ri_transformers = []
+        self._ui_transformers = []
+        Xt_rand = np.empty((X.shape[0], 0))
+        Xt_unsup = np.empty((X.shape[0], 0))
+        ri_lengths = []
+
+        for t in transforms:
+            ri = RandomIntervals(
+                n_intervals=self.n_intervals_random,
+                min_interval_length=self.min_interval_length,
+                n_jobs=self._n_jobs,
+                random_state=self.random_state,
+            )
+            ri_features = ri.fit_transform(t)
+            Xt_rand = np.hstack((Xt_rand, ri_features))
+            self._ri_transformers.append(ri)
+            ri_lengths.append(ri_features.shape[1])
+
+            ui = UnsupervisedIntervals(
+                n_intervals=self.n_intervals_unsupervised,
+                min_interval_length=self.min_interval_length,
+                n_jobs=self._n_jobs,
+                random_state=self.random_state,
+            )
+            Xt_unsup = np.hstack((Xt_unsup, ui.fit_transform(t)))
+            self._ui_transformers.append(ui)
+
+        self.rp_ = GaussianRandomProjection(
+            n_components=self.n_components,
+            random_state=self.random_state,
+        )
+        Xt_unsup_proj = self.rp_.fit_transform(Xt_unsup)
+
+        Xt = np.hstack((Xt_rand, Xt_unsup_proj))
+
+        use_et = self.estimator is None
+        self.clf_ = (
+            _build_et(self.n_estimators, self._n_jobs, self.random_state)
+            if use_et
+            else clone(self.estimator)
+        )
+        self.clf_.fit(Xt, y)
+
+        if use_et:
+            n_rand_total = Xt_rand.shape[1]
+            relevant_features = np.unique(
+                [f for tree in self.clf_.estimators_ for f in tree.tree_.feature[tree.tree_.feature >= 0]]
+            )
+            # only prune the random interval features (unsupervised are projected)
+            rand_relevant = relevant_features[relevant_features < n_rand_total]
+            features_to_transform = [False] * n_rand_total
+            for i in rand_relevant:
+                features_to_transform[i] = True
+            count = 0
+            for r in range(len(transforms)):
+                self._ri_transformers[r].set_features_to_transform(
+                    features_to_transform[count : count + ri_lengths[r]],
+                    raise_error=False,
+                )
+                count += ri_lengths[r]
+
+        return self
+
+    def _predict(self, X):
+        return self.clf_.predict(self._predict_transform(X))
+
+    def _predict_proba(self, X):
+        return self.clf_.predict_proba(self._predict_transform(X))
+
+    def _predict_transform(self, X):
+        transforms = [X] + [t.transform(X) for t in self._series_transformers]
+        Xt_rand = np.empty((X.shape[0], 0))
+        Xt_unsup = np.empty((X.shape[0], 0))
+        for i, t in enumerate(transforms):
+            Xt_rand = np.hstack((Xt_rand, self._ri_transformers[i].transform(t)))
+            Xt_unsup = np.hstack((Xt_unsup, self._ui_transformers[i].transform(t)))
+        return np.hstack((Xt_rand, self.rp_.transform(Xt_unsup)))
+
+    @classmethod
+    def _get_test_params(cls, parameter_set="default"):
+        return {"n_estimators": 2, "n_intervals_random": 5, "n_intervals_unsupervised": 1}

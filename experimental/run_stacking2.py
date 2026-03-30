@@ -21,7 +21,7 @@ from aeon.classification.feature_based import Catch22Classifier
 from tscglue.data_loader import DATA_DIR, load_fold
 from tscglue.models_tsfm import Chronos2Classifier, ALL_TSFM_MODELS, make_tsfm_model, TabICLTimeSeriesClassifier
 from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier, MultiRocketTypedClassifier
-from tscglue.interval_models import RSTSFRandom, RSTSFUnsupervised
+from tscglue.interval_models import RSTSFRandom, RSTSFUnsupervised, RSTSFCombined
 from tscglue.models_tsfm import RidgeClassifierCVDecisionProba
 from tscglue.models import (
     LokyStackerV7,
@@ -273,6 +273,10 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return RSTSFUnsupervised(n_estimators=200, n_intervals=50, random_state=random_state, n_jobs=n_jobs)
     elif model_name == "rstsf-unsupervised-ridge":
         return RSTSFUnsupervised(n_estimators=200, n_intervals=50, estimator=RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10)), random_state=random_state, n_jobs=n_jobs)
+    elif model_name == "rstsf-combined":
+        return RSTSFCombined(n_estimators=200, n_intervals_random=600, n_intervals_unsupervised=50, random_state=random_state, n_jobs=n_jobs)
+    elif model_name == "rstsf-combined-ridge":
+        return RSTSFCombined(n_estimators=200, n_intervals_random=600, n_intervals_unsupervised=50, estimator=RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10)), random_state=random_state, n_jobs=n_jobs)
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([
@@ -352,6 +356,8 @@ ALL_MODELS = [
     "rstsf-random-ridge",
     "rstsf-unsupervised",
     "rstsf-unsupervised-ridge",
+    "rstsf-combined",
+    "rstsf-combined-ridge",
     #*_FILTER_VARIANTS,
 ]
 
