@@ -20,7 +20,7 @@ from aeon.classification.dummy import DummyClassifier
 from aeon.classification.feature_based import Catch22Classifier
 from tscglue.data_loader import DATA_DIR, load_fold
 from tscglue.models_tsfm import Chronos2Classifier, ALL_TSFM_MODELS, make_tsfm_model, TabICLTimeSeriesClassifier
-from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier, MultiRocketTypedClassifier
+from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier, MultiRocketTypedClassifier, MultiRocketGRPClassifier
 from tscglue.interval_models import RSTSFRandom, RSTSFUnsupervised, RSTSFCombined
 from tscglue.models_tsfm import RidgeClassifierCVDecisionProba
 from tscglue.models import (
@@ -265,6 +265,8 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return MultiRocketTypedClassifier(dtype="float32", n_jobs=n_jobs, random_state=random_state)
     elif model_name == "multirocket-f16":
         return MultiRocketTypedClassifier(dtype="float16", n_jobs=n_jobs, random_state=random_state)
+    elif model_name == "multirocket-grp":
+        return MultiRocketGRPClassifier(n_jobs=n_jobs, random_state=random_state)
     elif model_name == "rstsf-random":
         return RSTSFRandom(n_estimators=200, n_intervals=600, random_state=random_state, n_jobs=n_jobs)
     elif model_name == "rstsf-random-ridge":
@@ -352,6 +354,7 @@ ALL_MODELS = [
     "multirocket-f64",
     "multirocket-f32",
     "multirocket-f16",
+    "multirocket-grp",
     "rstsf-random",
     "rstsf-random-ridge",
     "rstsf-unsupervised",

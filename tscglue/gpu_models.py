@@ -5,11 +5,12 @@ import torch
 import pytorch_lightning as pl
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
 from sklearn.linear_model import RidgeClassifierCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.random_projection import GaussianRandomProjection
 from sklearn.utils.validation import check_is_fitted
 
 from aeon.classification import BaseClassifier
@@ -265,6 +266,62 @@ class MRHydraClassifier(BaseClassifier):
         Xt = np.concatenate((Xt_hydra, Xt_multirocket), axis=1)
 
         return self.classifier_.predict(Xt)
+
+
+class MultiRocketGRPClassifier(BaseClassifier):
+    """MultiRocket with GaussianRandomProjection dimensionality reduction.
+
+    Extracts MultiRocket features, applies StandardScaler, then projects to a
+    lower dimension with GaussianRandomProjection before fitting a classifier.
+    Mirrors the unsupervised reduction approach used in RSTSFUnsupervised.
+
+    Parameters
+    ----------
+    n_components : int or "auto", default="auto"
+        Number of GRP components. "auto" uses the Johnson-Lindenstrauss lemma.
+    estimator : sklearn estimator or None, default=None
+        Classifier fitted on the projected features. None defaults to
+        RidgeClassifierCV(alphas=logspace(-3, 3, 10)).
+    n_jobs : int, default=1
+    random_state : None, int or RandomState, default=None
+    """
+
+    _tags = {
+        "capability:multivariate": True,
+        "capability:multithreading": True,
+        "algorithm_type": "convolution",
+    }
+
+    def __init__(self, n_components="auto", estimator=None, n_jobs=1, random_state=None):
+        self.n_components = n_components
+        self.estimator = estimator
+        self.n_jobs = n_jobs
+        self.random_state = random_state
+        super().__init__()
+
+    def _fit(self, X, y):
+        self._n_jobs = check_n_jobs(self.n_jobs)
+        self._transform = MultiRocket(n_jobs=self._n_jobs, random_state=self.random_state)
+        Xt = self._transform.fit_transform(X)
+        self._scaler = StandardScaler()
+        Xt = self._scaler.fit_transform(Xt)
+        self._rp = GaussianRandomProjection(
+            n_components=self.n_components, random_state=self.random_state
+        )
+        Xt = self._rp.fit_transform(Xt)
+        self._clf = (
+            RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))
+            if self.estimator is None
+            else clone(self.estimator)
+        )
+        self._clf.fit(Xt, y)
+        return self
+
+    def _predict(self, X) -> np.ndarray:
+        Xt = self._transform.transform(X)
+        Xt = self._scaler.transform(Xt)
+        Xt = self._rp.transform(Xt)
+        return self._clf.predict(Xt)
 
 
 class MultiRocketTypedClassifier(BaseClassifier):
