@@ -267,6 +267,51 @@ class MRHydraClassifier(BaseClassifier):
         return self.classifier_.predict(Xt)
 
 
+class MultiRocketTypedClassifier(BaseClassifier):
+    """MultiRocket with explicit dtype cast before StandardScaler.
+
+    Parameters
+    ----------
+    dtype : str or numpy dtype, default=None
+        If given, features are cast to this dtype before scaling.
+        E.g. 'float32', 'float16', 'float64' / None (no cast).
+    """
+
+    _tags = {
+        "capability:multivariate": True,
+        "capability:multithreading": True,
+        "algorithm_type": "convolution",
+    }
+
+    def __init__(self, dtype=None, n_jobs=1, random_state=None):
+        self.dtype = dtype
+        self.n_jobs = n_jobs
+        self.random_state = random_state
+        super().__init__()
+
+    def _cast(self, X):
+        if self.dtype is not None:
+            return X.astype(self.dtype)
+        return X
+
+    def _fit(self, X, y):
+        self._n_jobs = check_n_jobs(self.n_jobs)
+        self._transform = MultiRocket(n_jobs=self._n_jobs, random_state=self.random_state)
+        Xt = self._transform.fit_transform(X)
+        Xt = self._cast(Xt)
+        self._scaler = StandardScaler()
+        Xt = self._scaler.fit_transform(Xt)
+        self._clf = RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))
+        self._clf.fit(Xt, y)
+        return self
+
+    def _predict(self, X) -> np.ndarray:
+        Xt = self._transform.transform(X)
+        Xt = self._cast(Xt)
+        Xt = self._scaler.transform(Xt)
+        return self._clf.predict(Xt)
+
+
 def _optimal_k(n_train, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
     return int(k_min + (k_max - k_min) / (1 + np.exp(-steepness * (n_train - midpoint))))
 
