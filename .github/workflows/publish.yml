@@ -57,10 +57,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish to TestPyPI
+      - name: Publish to PyPI
         # CRITICAL: We skip this if the version already exists on PyPI
         # because TestPyPI will reject the upload and fail the workflow.
         if: steps.tag_check.outputs.EXISTS == 'false'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          repository-url: https://test.pypi.org/legacy/
+          # repository-url: https://test.pypi.org/legacy/
+          print-hash: true
