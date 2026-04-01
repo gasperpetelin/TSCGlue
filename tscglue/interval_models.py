@@ -1,6 +1,6 @@
 """RSTSF variants: RandomIntervals and UnsupervisedIntervals + GaussianRandomProjection."""
 
-__all__ = ["UnsupervisedIntervals", "RSTSFRandom", "RSTSFUnsupervised", "RSTSFCombined"]
+__all__ = ["UnsupervisedIntervals", "RSTSFRandom", "RSTSFUnsupervised", "RSTSFCombined", "RSTSFUnsupervisedPerRep"]
 
 import inspect
 
@@ -532,7 +532,7 @@ class RSTSFUnsupervised(BaseClassifier):
 
         Xt = np.empty((X.shape[0], 0))
         self._transformers = []
-        for t in transforms:
+        for i, t in enumerate(transforms):
             ui = UnsupervisedIntervals(
                 n_intervals=self.n_intervals,
                 min_interval_length=self.min_interval_length,
@@ -540,14 +540,24 @@ class RSTSFUnsupervised(BaseClassifier):
                 random_state=self.random_state,
             )
             features = ui.fit_transform(t)
+            print(f"[RSTSFUnsupervised] rep {i} features: {features.shape} ({features.nbytes / 1024**2:.1f} MB)")
             Xt = np.hstack((Xt, features))
             self._transformers.append(ui)
 
+        print(f"[RSTSFUnsupervised] Xt before GRP: {Xt.shape} ({Xt.nbytes / 1024**2:.1f} MB)")
+        n_components = self.n_components
+        if n_components == "auto":
+            from sklearn.random_projection import johnson_lindenstrauss_min_dim
+            n_components = min(
+                johnson_lindenstrauss_min_dim(Xt.shape[0], eps=0.1),
+                Xt.shape[1],
+            )
         self.rp_ = GaussianRandomProjection(
-            n_components=self.n_components,
+            n_components=n_components,
             random_state=self.random_state,
         )
         Xt = self.rp_.fit_transform(Xt)
+        print(f"[RSTSFUnsupervised] Xt after GRP: {Xt.shape} ({Xt.nbytes / 1024**2:.1f} MB)")
 
         self.clf_ = (
             _build_et(self.n_estimators, self._n_jobs, self.random_state)
@@ -646,7 +656,7 @@ class RSTSFCombined(BaseClassifier):
         Xt_unsup = np.empty((X.shape[0], 0))
         ri_lengths = []
 
-        for t in transforms:
+        for i, t in enumerate(transforms):
             ri = RandomIntervals(
                 n_intervals=self.n_intervals_random,
                 min_interval_length=self.min_interval_length,
@@ -654,6 +664,7 @@ class RSTSFCombined(BaseClassifier):
                 random_state=self.random_state,
             )
             ri_features = ri.fit_transform(t)
+            print(f"[RSTSFCombined] rep {i} rand features: {ri_features.shape} ({ri_features.nbytes / 1024**2:.1f} MB)")
             Xt_rand = np.hstack((Xt_rand, ri_features))
             self._ri_transformers.append(ri)
             ri_lengths.append(ri_features.shape[1])
@@ -664,14 +675,26 @@ class RSTSFCombined(BaseClassifier):
                 n_jobs=self._n_jobs,
                 random_state=self.random_state,
             )
-            Xt_unsup = np.hstack((Xt_unsup, ui.fit_transform(t)))
+            ui_features = ui.fit_transform(t)
+            print(f"[RSTSFCombined] rep {i} unsup features: {ui_features.shape} ({ui_features.nbytes / 1024**2:.1f} MB)")
+            Xt_unsup = np.hstack((Xt_unsup, ui_features))
             self._ui_transformers.append(ui)
 
+        print(f"[RSTSFCombined] Xt_rand before concat: {Xt_rand.shape} ({Xt_rand.nbytes / 1024**2:.1f} MB)")
+        print(f"[RSTSFCombined] Xt_unsup before GRP: {Xt_unsup.shape} ({Xt_unsup.nbytes / 1024**2:.1f} MB)")
+        n_components = self.n_components
+        if n_components == "auto":
+            from sklearn.random_projection import johnson_lindenstrauss_min_dim
+            n_components = min(
+                johnson_lindenstrauss_min_dim(Xt_unsup.shape[0], eps=0.1),
+                Xt_unsup.shape[1],
+            )
         self.rp_ = GaussianRandomProjection(
-            n_components=self.n_components,
+            n_components=n_components,
             random_state=self.random_state,
         )
         Xt_unsup_proj = self.rp_.fit_transform(Xt_unsup)
+        print(f"[RSTSFCombined] Xt_unsup after GRP: {Xt_unsup_proj.shape} ({Xt_unsup_proj.nbytes / 1024**2:.1f} MB)")
 
         Xt = np.hstack((Xt_rand, Xt_unsup_proj))
 
@@ -721,3 +744,162 @@ class RSTSFCombined(BaseClassifier):
     @classmethod
     def _get_test_params(cls, parameter_set="default"):
         return {"n_estimators": 2, "n_intervals_random": 5, "n_intervals_unsupervised": 1}
+
+
+def _resolve_n_components(n_components, n_samples, n_features):
+    """Resolve n_components for GRP, capping at n_features when "auto"."""
+    if n_components != "auto":
+        return n_components
+    from sklearn.random_projection import johnson_lindenstrauss_min_dim
+    return int(min(johnson_lindenstrauss_min_dim(n_samples, eps=0.1), n_features))
+
+
+class RSTSFUnsupervisedPerRep(BaseClassifier):
+    """RSTSFUnsupervised with a single GRP and sample-batched projection.
+
+    Identical algorithm to RSTSFUnsupervised (4 series representations →
+    UnsupervisedIntervals → single GaussianRandomProjection → ExtraTreesClassifier)
+    but avoids materialising the full (n_samples × total_features) matrix by
+    processing ``batch_size`` samples at a time:
+
+      for each batch of rows:
+          compute all 4 series representations
+          concatenate interval features
+          transform through GRP
+          store projected batch
+
+    The GRP is first fitted on a single-sample probe (only the feature-count
+    matters for generating the random projection matrix), with ``n_components``
+    capped at ``n_features`` when ``"auto"`` to avoid the JL-lemma overshoot
+    error on small datasets.
+
+    Parameters
+    ----------
+    n_estimators : int, default=200
+        Number of trees when estimator is None (ExtraTreesClassifier).
+    n_intervals : int, default=50
+        UnsupervisedIntervals runs per series representation.
+    min_interval_length : int, default=3
+        Minimum length of extracted intervals.
+    n_components : int or "auto", default="auto"
+        GRP output dimension.  ``"auto"`` uses the Johnson-Lindenstrauss lemma
+        capped at the input feature count.
+    batch_size : int, default=50
+        Number of samples processed per projection batch.
+    estimator : sklearn estimator or None, default=None
+        Classifier fitted on the projected features.
+    random_state : None, int or RandomState, default=None
+    n_jobs : int, default=1
+    """
+
+    _tags = {
+        "capability:multivariate": True,
+        "capability:multithreading": True,
+        "algorithm_type": "interval",
+        "python_dependencies": "statsmodels",
+    }
+
+    def __init__(
+        self,
+        n_estimators=200,
+        n_intervals=50,
+        min_interval_length=3,
+        n_components="auto",
+        batch_size=50,
+        estimator=None,
+        random_state=None,
+        n_jobs=1,
+    ):
+        self.n_estimators = n_estimators
+        self.n_intervals = n_intervals
+        self.min_interval_length = min_interval_length
+        self.n_components = n_components
+        self.batch_size = batch_size
+        self.estimator = estimator
+        self.random_state = random_state
+        self.n_jobs = n_jobs
+        super().__init__()
+
+    def _fit(self, X, y):
+        self.n_cases_, self.n_channels_, self.n_timepoints_ = X.shape
+        self._n_jobs = check_n_jobs(self.n_jobs)
+
+        # Build series transformers without transforming the full dataset all at once.
+        lags = int(12 * (X.shape[2] / 100.0) ** 0.25)
+        self._series_transformers = [
+            FunctionTransformer(func=first_order_differences_3d, validate=False),
+            PeriodogramTransformer(),
+            ARCoefficientTransformer(order=lags, replace_nan=True),
+        ]
+
+        # Fit each UI one representation at a time so only one full-dataset
+        # transform is in memory at once.
+        self._transformers = []
+        for i, rep in enumerate([None] + self._series_transformers):
+            t = rep.fit_transform(X) if rep is not None else X
+            ui = UnsupervisedIntervals(
+                n_intervals=self.n_intervals,
+                min_interval_length=self.min_interval_length,
+                n_jobs=self._n_jobs,
+                random_state=self.random_state,
+            )
+            ui.fit(t)
+            self._transformers.append(ui)
+            if rep is not None:
+                del t  # free transform before computing the next rep
+
+        # Probe one sample to determine feature count, then fit GRP.
+        probe = self._transform_batch(X[:1])
+        n_features = probe.shape[1]
+        n_comp = _resolve_n_components(self.n_components, self.n_cases_, n_features)
+        self.rp_ = GaussianRandomProjection(n_components=n_comp, random_state=self.random_state)
+        self.rp_.fit(probe)  # only shape matters; projection matrix is random
+        n_batches = (self.n_cases_ + self.batch_size - 1) // self.batch_size
+        print(f"[RSTSFUnsupervisedPerRep] n_features={n_features} -> n_components={n_comp}, n_batches={n_batches}")
+
+        # For each batch: compute series representations, extract features, project.
+        projected_batches = []
+        for start in range(0, self.n_cases_, self.batch_size):
+            sl = slice(start, start + self.batch_size)
+            batch_features = self._transform_batch(X[sl])
+            batch_idx = start // self.batch_size
+            projected = self.rp_.transform(batch_features)
+            print(f"[RSTSFUnsupervisedPerRep] fit batch {batch_idx+1}/{n_batches}  samples={batch_features.shape[0]}  {batch_features.shape} ({batch_features.nbytes / 1024**2:.1f} MB) -> {projected.shape} ({projected.nbytes / 1024**2:.1f} MB)")
+            projected_batches.append(projected)
+        Xt = np.vstack(projected_batches)
+        print(f"[RSTSFUnsupervisedPerRep] fit done: Xt={Xt.shape} ({Xt.nbytes / 1024**2:.1f} MB)")
+
+        self.clf_ = (
+            _build_et(self.n_estimators, self._n_jobs, self.random_state)
+            if self.estimator is None
+            else clone(self.estimator)
+        )
+        self.clf_.fit(Xt, y)
+        return self
+
+    def _transform_batch(self, X_batch):
+        """Compute all series representations and UI features for a batch of samples."""
+        reps = [X_batch] + [t.transform(X_batch) for t in self._series_transformers]
+        return np.hstack([self._transformers[i].transform(r) for i, r in enumerate(reps)])
+
+    def _predict(self, X):
+        return self.clf_.predict(self._predict_transform(X))
+
+    def _predict_proba(self, X):
+        return self.clf_.predict_proba(self._predict_transform(X))
+
+    def _predict_transform(self, X):
+        n_samples = X.shape[0]
+        n_batches = (n_samples + self.batch_size - 1) // self.batch_size
+        projected_batches = []
+        for start in range(0, n_samples, self.batch_size):
+            sl = slice(start, start + self.batch_size)
+            batch_features = self._transform_batch(X[sl])
+            batch_idx = start // self.batch_size
+            print(f"[RSTSFUnsupervisedPerRep] predict batch {batch_idx+1}/{n_batches}  features={batch_features.shape} ({batch_features.nbytes / 1024**2:.1f} MB)")
+            projected_batches.append(self.rp_.transform(batch_features))
+        return np.vstack(projected_batches)
+
+    @classmethod
+    def _get_test_params(cls, parameter_set="default"):
+        return {"n_estimators": 2, "n_intervals": 1}

@@ -24,55 +24,13 @@ from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestCla
 from tscglue.interval_models import RSTSFRandom, RSTSFUnsupervised, RSTSFCombined
 from tscglue.models_tsfm import RidgeClassifierCVDecisionProba
 from tscglue.models import (
-    LokyStackerV7,
-    LokyStackerV7SoftET,
-    LokyStackerV9Base,
-    LokyStackerV7SoftFilterRidge,
-    LokyStackerV7SoftRidge,
-    LokyStackerV7SoftRF,
-    LokyStackerV8Base,
-    LokyStackerV8AutoBestStacking,
-    LokyStackerV8AutoBestBase,
-    LokyStackerV8AutoBest,
     LokyStackerV10Base,
     LokyStackerV10FM,
     LokyStackerV10FMTSFresh,
     LokyStackerV10TabICL,
-    LokyStackerV7Filter_M,
-    LokyStackerV7Filter_Q,
-    LokyStackerV7Filter_R,
-    LokyStackerV7Filter_S,
-    LokyStackerV7Filter_MQ,
-    LokyStackerV7Filter_MR,
-    LokyStackerV7Filter_MS,
-    LokyStackerV7Filter_QR,
-    LokyStackerV7Filter_QS,
-    LokyStackerV7Filter_RS,
-    LokyStackerV7Filter_MQR,
-    LokyStackerV7Filter_MQS,
-    LokyStackerV7Filter_MRS,
-    LokyStackerV7Filter_QRS,
-    LokyStackerV7Filter_MQRS,
     TSCGlue,
 )
 
-_FILTER_VARIANTS = {
-    "loky-filter-M":    LokyStackerV7Filter_M,
-    "loky-filter-Q":    LokyStackerV7Filter_Q,
-    "loky-filter-R":    LokyStackerV7Filter_R,
-    "loky-filter-S":    LokyStackerV7Filter_S,
-    "loky-filter-MQ":   LokyStackerV7Filter_MQ,
-    "loky-filter-MR":   LokyStackerV7Filter_MR,
-    "loky-filter-MS":   LokyStackerV7Filter_MS,
-    "loky-filter-QR":   LokyStackerV7Filter_QR,
-    "loky-filter-QS":   LokyStackerV7Filter_QS,
-    "loky-filter-RS":   LokyStackerV7Filter_RS,
-    "loky-filter-MQR":  LokyStackerV7Filter_MQR,
-    "loky-filter-MQS":  LokyStackerV7Filter_MQS,
-    "loky-filter-MRS":  LokyStackerV7Filter_MRS,
-    "loky-filter-QRS":  LokyStackerV7Filter_QRS,
-    "loky-filter-MQRS": LokyStackerV7Filter_MQRS,
-}
 
 import boto3
 from botocore.exceptions import ClientError
@@ -163,34 +121,6 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return MRHydraClassifier(estimator=e, n_jobs=n_jobs, random_state=random_state)
     elif model_name == "mr-hydra-contained-auto":
         return MultiRocketHydraSelectKBestClassifier(k=None, n_jobs=n_jobs, random_state=random_state)
-    elif model_name == "loky-stacker-v7":
-        return LokyStackerV7(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v7-soft-et":
-        return LokyStackerV7SoftET(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v7-soft-ridge":
-        return LokyStackerV7SoftRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v7-soft-rf":
-        return LokyStackerV7SoftRF(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v7-soft-filter-ridge":
-        return LokyStackerV7SoftFilterRidge(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    elif model_name in ("loky-stacker-v8-base", "loky-stacker-v8-base-r1"):
-        return LokyStackerV8Base(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v8-base-r3":
-        return LokyStackerV8Base(random_state=random_state, n_repetitions=3, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v8-auto-best-stacking":
-        return LokyStackerV8AutoBestStacking(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v8-auto-best-base":
-        return LokyStackerV8AutoBestBase(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v8-auto-best":
-        return LokyStackerV8AutoBest(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v9-base-r1":
-        return LokyStackerV9Base(random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v9-base-r2":
-        return LokyStackerV9Base(random_state=random_state, n_repetitions=2, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v9-base-r3":
-        return LokyStackerV9Base(random_state=random_state, n_repetitions=3, n_jobs=n_jobs, verbose=10)
-    elif model_name == "loky-stacker-v9-base-r5":
-        return LokyStackerV9Base(random_state=random_state, n_repetitions=5, n_jobs=n_jobs, verbose=10)
     elif model_name == "chronos2":
         return Chronos2Classifier()
     elif model_name == "mydummy":
@@ -221,8 +151,6 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10, model_names=_base * 5)
     elif model_name == "loky-stacker-v10-base-r3":
         return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10, n_repetitions=3)
-    elif model_name in _FILTER_VARIANTS:
-        return _FILTER_VARIANTS[model_name](random_state=random_state, n_repetitions=1, n_jobs=n_jobs, verbose=10)
     elif model_name == "mantis-ridgecv":
         return make_tsfm_model("mantis-ridgecv", random_state=random_state)
     elif model_name == "mantis-rf":
@@ -305,17 +233,6 @@ ALL_MODELS = [
     "mr-hydra-kbest-30000",
     "mr-hydra-kbest-auto",
     "mr-hydra-contained-auto",
-    "loky-stacker-v7",
-    "loky-stacker-v7-soft-filter-ridge",
-    "loky-stacker-v8-base-r1",
-    "loky-stacker-v8-base-r3",
-    "loky-stacker-v8-auto-best-stacking",
-    "loky-stacker-v8-auto-best-base",
-    "loky-stacker-v8-auto-best",
-    "loky-stacker-v9-base-r1",
-    "loky-stacker-v9-base-r2",
-    "loky-stacker-v9-base-r3",
-    "loky-stacker-v9-base-r5",
     "loky-stacker-v10-base",
     "loky-stacker-v10-tabicl",
     "loky-stacker-v10-fm",
@@ -323,9 +240,6 @@ ALL_MODELS = [
     "loky-stacker-v10-base-2x",
     "loky-stacker-v10-base-5x",
     "loky-stacker-v10-base-r3",
-    "loky-stacker-v7-soft-et",
-    "loky-stacker-v7-soft-ridge",
-    "loky-stacker-v7-soft-rf",
     "chronos2",
     "mantis-ridgecv",
     "mantis-rf",
