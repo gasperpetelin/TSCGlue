@@ -1,6 +1,6 @@
 """RSTSF variants: RandomIntervals and UnsupervisedIntervals + GaussianRandomProjection."""
 
-__all__ = ["UnsupervisedIntervals", "RSTSFRandom", "RSTSFUnsupervised", "RSTSFCombined", "RSTSFUnsupervisedPerRep"]
+__all__ = ["UnsupervisedIntervals", "RSTSFRandom", "RSTSFUnsupervised", "RSTSFUnsupervisedRaw", "RSTSFCombined", "RSTSFUnsupervisedPerRep"]
 
 import inspect
 
@@ -8,7 +8,7 @@ import numpy as np
 from joblib import Parallel, delayed
 from sklearn.base import clone
 from sklearn.ensemble import ExtraTreesClassifier
-from sklearn.preprocessing import FunctionTransformer
+from sklearn.preprocessing import FunctionTransformer, StandardScaler
 from sklearn.random_projection import GaussianRandomProjection
 from sklearn.utils import check_random_state
 
@@ -514,6 +514,7 @@ class RSTSFUnsupervised(BaseClassifier):
         estimator=None,
         random_state=None,
         n_jobs=1,
+        verbose=False,
     ):
         self.n_estimators = n_estimators
         self.n_intervals = n_intervals
@@ -522,6 +523,7 @@ class RSTSFUnsupervised(BaseClassifier):
         self.estimator = estimator
         self.random_state = random_state
         self.n_jobs = n_jobs
+        self.verbose = verbose
         super().__init__()
 
     def _fit(self, X, y):
@@ -540,11 +542,13 @@ class RSTSFUnsupervised(BaseClassifier):
                 random_state=self.random_state,
             )
             features = ui.fit_transform(t)
-            print(f"[RSTSFUnsupervised] rep {i} features: {features.shape} ({features.nbytes / 1024**2:.1f} MB)")
+            if self.verbose:
+                print(f"[RSTSFUnsupervised] rep {i} features: {features.shape} ({features.nbytes / 1024**2:.1f} MB)")
             Xt = np.hstack((Xt, features))
             self._transformers.append(ui)
 
-        print(f"[RSTSFUnsupervised] Xt before GRP: {Xt.shape} ({Xt.nbytes / 1024**2:.1f} MB)")
+        if self.verbose:
+            print(f"[RSTSFUnsupervised] Xt before GRP: {Xt.shape} ({Xt.nbytes / 1024**2:.1f} MB)")
         n_components = self.n_components
         if n_components == "auto":
             from sklearn.random_projection import johnson_lindenstrauss_min_dim
@@ -557,7 +561,8 @@ class RSTSFUnsupervised(BaseClassifier):
             random_state=self.random_state,
         )
         Xt = self.rp_.fit_transform(Xt)
-        print(f"[RSTSFUnsupervised] Xt after GRP: {Xt.shape} ({Xt.nbytes / 1024**2:.1f} MB)")
+        if self.verbose:
+            print(f"[RSTSFUnsupervised] Xt after GRP: {Xt.shape} ({Xt.nbytes / 1024**2:.1f} MB)")
 
         self.clf_ = (
             _build_et(self.n_estimators, self._n_jobs, self.random_state)
@@ -583,6 +588,94 @@ class RSTSFUnsupervised(BaseClassifier):
     @classmethod
     def _get_test_params(cls, parameter_set="default"):
         return {"n_estimators": 2, "n_intervals": 1}
+
+
+class RSTSFUnsupervisedRaw(BaseClassifier):
+    """RSTSF-style classifier using UnsupervisedIntervals with RidgeCV, no GRP.
+
+    Applies UnsupervisedIntervals to the same 4 series representations as RSTSF
+    (original, first differences, periodogram, AR coefficients), concatenates all
+    features, and trains a RidgeClassifierCV directly on the raw feature matrix
+    without any dimensionality reduction.
+
+    Parameters
+    ----------
+    n_intervals : int, default=50
+        Number of interval-generation runs per series representation.
+    min_interval_length : int, default=3
+        Minimum length of extracted intervals.
+    random_state : None, int or RandomState, default=None
+    n_jobs : int, default=1
+    verbose : bool, default=False
+    """
+
+    _tags = {
+        "capability:multivariate": True,
+        "capability:multithreading": True,
+        "algorithm_type": "interval",
+        "python_dependencies": "statsmodels",
+    }
+
+    def __init__(
+        self,
+        n_intervals=50,
+        min_interval_length=3,
+        random_state=None,
+        n_jobs=1,
+        verbose=False,
+    ):
+        self.n_intervals = n_intervals
+        self.min_interval_length = min_interval_length
+        self.random_state = random_state
+        self.n_jobs = n_jobs
+        self.verbose = verbose
+        super().__init__()
+
+    def _fit(self, X, y):
+        self.n_cases_, self.n_channels_, self.n_timepoints_ = X.shape
+        self._n_jobs = check_n_jobs(self.n_jobs)
+
+        transforms, self._series_transformers = _make_series_transforms(X)
+
+        Xt = np.empty((X.shape[0], 0))
+        self._transformers = []
+        for i, t in enumerate(transforms):
+            ui = UnsupervisedIntervals(
+                n_intervals=self.n_intervals,
+                min_interval_length=self.min_interval_length,
+                n_jobs=self._n_jobs,
+                random_state=self.random_state,
+            )
+            features = ui.fit_transform(t)
+            if self.verbose:
+                print(f"[RSTSFUnsupervisedRaw] rep {i} features: {features.shape} ({features.nbytes / 1024**2:.1f} MB)")
+            Xt = np.hstack((Xt, features))
+            self._transformers.append(ui)
+
+        if self.verbose:
+            print(f"[RSTSFUnsupervisedRaw] Xt: {Xt.shape} ({Xt.nbytes / 1024**2:.1f} MB)")
+        self.scaler_ = StandardScaler()
+        Xt = self.scaler_.fit_transform(Xt)
+        self.clf_ = _build_ridge()
+        self.clf_.fit(Xt, y)
+        return self
+
+    def _predict(self, X):
+        return self.clf_.predict(self._predict_transform(X))
+
+    def _predict_proba(self, X):
+        return self.clf_.predict_proba(self._predict_transform(X))
+
+    def _predict_transform(self, X):
+        transforms = [X] + [t.transform(X) for t in self._series_transformers]
+        Xt = np.empty((X.shape[0], 0))
+        for i, t in enumerate(transforms):
+            Xt = np.hstack((Xt, self._transformers[i].transform(t)))
+        return self.scaler_.transform(Xt)
+
+    @classmethod
+    def _get_test_params(cls, parameter_set="default"):
+        return {"n_intervals": 1}
 
 
 class RSTSFCombined(BaseClassifier):
@@ -633,6 +726,7 @@ class RSTSFCombined(BaseClassifier):
         estimator=None,
         random_state=None,
         n_jobs=1,
+        verbose=False,
     ):
         self.n_estimators = n_estimators
         self.n_intervals_random = n_intervals_random
@@ -642,6 +736,7 @@ class RSTSFCombined(BaseClassifier):
         self.estimator = estimator
         self.random_state = random_state
         self.n_jobs = n_jobs
+        self.verbose = verbose
         super().__init__()
 
     def _fit(self, X, y):
@@ -664,7 +759,8 @@ class RSTSFCombined(BaseClassifier):
                 random_state=self.random_state,
             )
             ri_features = ri.fit_transform(t)
-            print(f"[RSTSFCombined] rep {i} rand features: {ri_features.shape} ({ri_features.nbytes / 1024**2:.1f} MB)")
+            if self.verbose:
+                print(f"[RSTSFCombined] rep {i} rand features: {ri_features.shape} ({ri_features.nbytes / 1024**2:.1f} MB)")
             Xt_rand = np.hstack((Xt_rand, ri_features))
             self._ri_transformers.append(ri)
             ri_lengths.append(ri_features.shape[1])
@@ -676,12 +772,14 @@ class RSTSFCombined(BaseClassifier):
                 random_state=self.random_state,
             )
             ui_features = ui.fit_transform(t)
-            print(f"[RSTSFCombined] rep {i} unsup features: {ui_features.shape} ({ui_features.nbytes / 1024**2:.1f} MB)")
+            if self.verbose:
+                print(f"[RSTSFCombined] rep {i} unsup features: {ui_features.shape} ({ui_features.nbytes / 1024**2:.1f} MB)")
             Xt_unsup = np.hstack((Xt_unsup, ui_features))
             self._ui_transformers.append(ui)
 
-        print(f"[RSTSFCombined] Xt_rand before concat: {Xt_rand.shape} ({Xt_rand.nbytes / 1024**2:.1f} MB)")
-        print(f"[RSTSFCombined] Xt_unsup before GRP: {Xt_unsup.shape} ({Xt_unsup.nbytes / 1024**2:.1f} MB)")
+        if self.verbose:
+            print(f"[RSTSFCombined] Xt_rand before concat: {Xt_rand.shape} ({Xt_rand.nbytes / 1024**2:.1f} MB)")
+            print(f"[RSTSFCombined] Xt_unsup before GRP: {Xt_unsup.shape} ({Xt_unsup.nbytes / 1024**2:.1f} MB)")
         n_components = self.n_components
         if n_components == "auto":
             from sklearn.random_projection import johnson_lindenstrauss_min_dim
@@ -694,7 +792,8 @@ class RSTSFCombined(BaseClassifier):
             random_state=self.random_state,
         )
         Xt_unsup_proj = self.rp_.fit_transform(Xt_unsup)
-        print(f"[RSTSFCombined] Xt_unsup after GRP: {Xt_unsup_proj.shape} ({Xt_unsup_proj.nbytes / 1024**2:.1f} MB)")
+        if self.verbose:
+            print(f"[RSTSFCombined] Xt_unsup after GRP: {Xt_unsup_proj.shape} ({Xt_unsup_proj.nbytes / 1024**2:.1f} MB)")
 
         Xt = np.hstack((Xt_rand, Xt_unsup_proj))
 
@@ -809,6 +908,7 @@ class RSTSFUnsupervisedPerRep(BaseClassifier):
         estimator=None,
         random_state=None,
         n_jobs=1,
+        verbose=False,
     ):
         self.n_estimators = n_estimators
         self.n_intervals = n_intervals
@@ -818,6 +918,7 @@ class RSTSFUnsupervisedPerRep(BaseClassifier):
         self.estimator = estimator
         self.random_state = random_state
         self.n_jobs = n_jobs
+        self.verbose = verbose
         super().__init__()
 
     def _fit(self, X, y):
@@ -855,7 +956,8 @@ class RSTSFUnsupervisedPerRep(BaseClassifier):
         self.rp_ = GaussianRandomProjection(n_components=n_comp, random_state=self.random_state)
         self.rp_.fit(probe)  # only shape matters; projection matrix is random
         n_batches = (self.n_cases_ + self.batch_size - 1) // self.batch_size
-        print(f"[RSTSFUnsupervisedPerRep] n_features={n_features} -> n_components={n_comp}, n_batches={n_batches}")
+        if self.verbose:
+            print(f"[RSTSFUnsupervisedPerRep] n_features={n_features} -> n_components={n_comp}, n_batches={n_batches}")
 
         # For each batch: compute series representations, extract features, project.
         projected_batches = []
@@ -864,10 +966,12 @@ class RSTSFUnsupervisedPerRep(BaseClassifier):
             batch_features = self._transform_batch(X[sl])
             batch_idx = start // self.batch_size
             projected = self.rp_.transform(batch_features)
-            print(f"[RSTSFUnsupervisedPerRep] fit batch {batch_idx+1}/{n_batches}  samples={batch_features.shape[0]}  {batch_features.shape} ({batch_features.nbytes / 1024**2:.1f} MB) -> {projected.shape} ({projected.nbytes / 1024**2:.1f} MB)")
+            if self.verbose:
+                print(f"[RSTSFUnsupervisedPerRep] fit batch {batch_idx+1}/{n_batches}  samples={batch_features.shape[0]}  {batch_features.shape} ({batch_features.nbytes / 1024**2:.1f} MB) -> {projected.shape} ({projected.nbytes / 1024**2:.1f} MB)")
             projected_batches.append(projected)
         Xt = np.vstack(projected_batches)
-        print(f"[RSTSFUnsupervisedPerRep] fit done: Xt={Xt.shape} ({Xt.nbytes / 1024**2:.1f} MB)")
+        if self.verbose:
+            print(f"[RSTSFUnsupervisedPerRep] fit done: Xt={Xt.shape} ({Xt.nbytes / 1024**2:.1f} MB)")
 
         self.clf_ = (
             _build_et(self.n_estimators, self._n_jobs, self.random_state)
@@ -896,7 +1000,8 @@ class RSTSFUnsupervisedPerRep(BaseClassifier):
             sl = slice(start, start + self.batch_size)
             batch_features = self._transform_batch(X[sl])
             batch_idx = start // self.batch_size
-            print(f"[RSTSFUnsupervisedPerRep] predict batch {batch_idx+1}/{n_batches}  features={batch_features.shape} ({batch_features.nbytes / 1024**2:.1f} MB)")
+            if self.verbose:
+                print(f"[RSTSFUnsupervisedPerRep] predict batch {batch_idx+1}/{n_batches}  features={batch_features.shape} ({batch_features.nbytes / 1024**2:.1f} MB)")
             projected_batches.append(self.rp_.transform(batch_features))
         return np.vstack(projected_batches)
 
