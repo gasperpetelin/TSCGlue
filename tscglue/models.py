@@ -164,6 +164,20 @@ def get_model_v6(name, seed=None, n_jobs=1):
         return scaler, clf
     elif name == "rstsf":
         return None, RSTSF(random_state=seed, n_jobs=n_jobs, n_estimators=100)
+    elif name == "rstsf-combined-etc":
+        scaler = DictMultiScaler(scalers={"rstsf-combined": NoScaler()})
+        clf = ExtraTreesClassifier(
+            n_estimators=200, criterion="entropy", class_weight="balanced",
+            max_features="sqrt", n_jobs=n_jobs, random_state=seed,
+        )
+        return scaler, clf
+    elif name == "rstsf-random-etc":
+        scaler = DictMultiScaler(scalers={"rstsf-random": NoScaler()})
+        clf = ExtraTreesClassifier(
+            n_estimators=200, criterion="entropy", class_weight="balanced",
+            max_features="sqrt", n_jobs=n_jobs, random_state=seed,
+        )
+        return scaler, clf
     else:
         raise ValueError(f"Unknown model name: {name}")
 
@@ -231,6 +245,12 @@ def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1):
         case "tsfresh":
             from aeon.transformations.collection.feature_based import TSFresh
             return TSFresh(default_fc_parameters="efficient", n_jobs=n_jobs)
+        case "rstsf-combined":
+            from tscglue.interval_models import RSTSFCombinedTransformer
+            return RSTSFCombinedTransformer(n_jobs=n_jobs, random_state=seed)
+        case "rstsf-random":
+            from tscglue.interval_models import RSTSFRandomTransformer
+            return RSTSFRandomTransformer(n_jobs=n_jobs, random_state=seed)
         case _:
             raise ValueError(f"Unknown feature transformer type: {feature_type}")
 
@@ -366,6 +386,10 @@ class LokyStackerV10Base(BaseClassifier):
             return ("rdst",)
         elif model_name == "rstsf":
             return ("raw",)
+        elif model_name == "rstsf-combined-etc":
+            return ("rstsf-combined",)
+        elif model_name == "rstsf-random-etc":
+            return ("rstsf-random",)
         elif model_name in ("fm-dummy", "fm-p-ridgecv"):
             return ("mantis", "chronos2")
         elif model_name == "tsfresh-rotf":
@@ -1058,6 +1082,22 @@ class LokyStackerV10FMTSFresh(LokyStackerV10FM):
     """LokyStackerV10FM + TSFresh efficient features with RotationForest."""
 
     DEFAULT_MODEL_NAMES = LokyStackerV10FM.DEFAULT_MODEL_NAMES + ["tsfresh-rotf"]
+
+
+class LokyStackerV10RSTSFRandom(LokyStackerV10Base):
+    """LokyStackerV10FMTSFresh with rstsf replaced by 2-stage rstsf-random-etc.
+
+    Identical to LokyStackerV10FMTSFresh but splits RSTSF into a feature
+    extraction transformer (RandomIntervals on 4 series representations) and a
+    separately trained ExtraTreesClassifier. SERIES_MODELS is empty so all
+    models go through the feature caching pipeline.
+    """
+
+    DEFAULT_MODEL_NAMES = [
+        "multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv",
+        "rstsf-random-etc", "fm-p-ridgecv",
+    ]
+    SERIES_MODELS = []
 
 def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
     all_folds = []

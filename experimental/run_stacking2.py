@@ -21,12 +21,13 @@ from aeon.classification.feature_based import Catch22Classifier
 from tscglue.data_loader import DATA_DIR, load_fold
 from tscglue.models_tsfm import Chronos2Classifier, ALL_TSFM_MODELS, make_tsfm_model, TabICLTimeSeriesClassifier
 from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier, MultiRocketTypedClassifier, MultiRocketGRPClassifier
-from tscglue.interval_models import RSTSFRandom, RSTSFUnsupervised, RSTSFCombined
+from tscglue.interval_models import RSTSFRandom, RSTSFUnsupervised, RSTSFCombined, RSTSFUnsupervisedRaw
 from tscglue.models_tsfm import RidgeClassifierCVDecisionProba
 from tscglue.models import (
     LokyStackerV10Base,
     LokyStackerV10FM,
     LokyStackerV10FMTSFresh,
+    LokyStackerV10RSTSFRandom,
     LokyStackerV10TabICL,
     TSCGlue,
 )
@@ -141,6 +142,8 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return LokyStackerV10FM(random_state=random_state, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v10-fm-tsfresh":
         return LokyStackerV10FMTSFresh(random_state=random_state, n_jobs=n_jobs, verbose=10)
+    elif model_name == "loky-stacker-v10-rstsf-random":
+        return LokyStackerV10RSTSFRandom(random_state=random_state, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v10-base":
         return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v10-base-2x":
@@ -207,6 +210,8 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return RSTSFCombined(n_estimators=200, n_intervals_random=600, n_intervals_unsupervised=50, random_state=random_state, n_jobs=n_jobs)
     elif model_name == "rstsf-combined-ridge":
         return RSTSFCombined(n_estimators=200, n_intervals_random=600, n_intervals_unsupervised=50, estimator=RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10)), random_state=random_state, n_jobs=n_jobs)
+    elif model_name == "rstsf-unsupervised-raw":
+        return RSTSFUnsupervisedRaw(n_intervals=50, random_state=random_state, n_jobs=n_jobs)
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([
@@ -237,6 +242,7 @@ ALL_MODELS = [
     "loky-stacker-v10-tabicl",
     "loky-stacker-v10-fm",
     "loky-stacker-v10-fm-tsfresh",
+    "loky-stacker-v10-rstsf-random",
     "loky-stacker-v10-base-2x",
     "loky-stacker-v10-base-5x",
     "loky-stacker-v10-base-r3",
@@ -275,6 +281,7 @@ ALL_MODELS = [
     "rstsf-unsupervised-ridge",
     "rstsf-combined",
     "rstsf-combined-ridge",
+    "rstsf-unsupervised-raw",
     #*_FILTER_VARIANTS,
 ]
 
