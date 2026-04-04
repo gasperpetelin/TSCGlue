@@ -34,7 +34,6 @@ from aeon.utils.numba.stats import (
     row_std,
 )
 from aeon.utils.validation import check_n_jobs
-from tscglue.models_tsfm import RidgeClassifierCVDecisionProba
 
 
 class UnsupervisedIntervals(BaseCollectionTransformer):
@@ -322,6 +321,7 @@ def _build_et(n_estimators, n_jobs, random_state):
 
 
 def _build_ridge():
+    from tscglue.models_tsfm import RidgeClassifierCVDecisionProba
     return RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10))
 
 
