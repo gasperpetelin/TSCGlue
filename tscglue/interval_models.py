@@ -267,6 +267,37 @@ class UnsupervisedIntervals(BaseCollectionTransformer):
         return {"n_intervals": 1, "randomised_split_point": False}
 
 
+class _FastRandomIntervals:
+    """Wraps aeon's RandomIntervals fit, replaces transform with vectorized numpy.
+
+    Aeon's _transform_interval does `[[f] for f in feature(seg)]` — a Python
+    loop over every sample for every interval. The feature functions already
+    accept 2D (n_samples, length) and return 1D, so we just call them directly.
+
+    fit is 100% identical to aeon (same RNG, same deduplication), so intervals_
+    and all results are bit-for-bit identical.
+    """
+
+    def __init__(self, n_intervals=100, min_interval_length=3, random_state=None):
+        self._ri = RandomIntervals(
+            n_intervals=n_intervals,
+            min_interval_length=min_interval_length,
+            random_state=random_state,
+            n_jobs=1,
+        )
+
+    def fit(self, X, y=None):
+        self._ri.fit(X, y)
+        return self
+
+    def transform(self, X):
+        parts = []
+        for start, end, dim, feature, dilation in self._ri.intervals_:
+            seg = X[:, dim, start:end:dilation]  # (n_samples, length)
+            parts.append(feature(seg).reshape(-1, 1))
+        return np.hstack(parts)
+
+
 def _make_series_transforms(X):
     """Return (original, diff, periodogram, AR) representations."""
     lags = int(12 * (X.shape[2] / 100.0) ** 0.25)
@@ -355,7 +386,7 @@ class RSTSFRandom(BaseClassifier):
             ri = RandomIntervals(
                 n_intervals=self.n_intervals,
                 min_interval_length=self.min_interval_length,
-                n_jobs=self._n_jobs,
+                n_jobs=1,
                 random_state=self.random_state,
             )
             features = ri.fit_transform(t)
@@ -417,34 +448,76 @@ class RSTSFRandomTransformer(BaseEstimator, TransformerMixin):
     ----------
     n_intervals : int, default=600
     min_interval_length : int, default=3
+    mode : str, default="fast"
+        Implementation to use for interval extraction.
+        "fast"    - vectorised numpy transform (much faster than aeon default).
+        "default" - aeon's RandomIntervals unmodified.
     random_state : None, int or RandomState, default=None
     n_jobs : int, default=1
+    verbose : bool, default=True
     """
 
-    def __init__(self, n_intervals=600, min_interval_length=3, random_state=None, n_jobs=1):
+    _REP_NAMES = ["raw", "diff", "periodogram", "ar"]
+
+    def __init__(self, n_intervals=600, min_interval_length=3, mode="fast", random_state=None, n_jobs=1, verbose=True):
         self.n_intervals = n_intervals
         self.min_interval_length = min_interval_length
+        self.mode = mode
         self.random_state = random_state
         self.n_jobs = n_jobs
+        self.verbose = verbose
 
-    def fit(self, X, y=None):
-        self._n_jobs = check_n_jobs(self.n_jobs)
-        transforms, self._series_transformers = _make_series_transforms(X)
-        self._ri_transformers = []
-        for t in transforms:
-            ri = RandomIntervals(
+    def _log(self, msg):
+        if self.verbose:
+            print(f"[RSTSFRandomTransformer] {msg}")
+
+    def _make_ri(self):
+        if self.mode == "fast":
+            return _FastRandomIntervals(
                 n_intervals=self.n_intervals,
                 min_interval_length=self.min_interval_length,
-                n_jobs=self._n_jobs,
                 random_state=self.random_state,
             )
+        elif self.mode == "default":
+            return RandomIntervals(
+                n_intervals=self.n_intervals,
+                min_interval_length=self.min_interval_length,
+                random_state=self.random_state,
+                n_jobs=1,
+            )
+        else:
+            raise ValueError(f"mode must be 'fast' or 'default', got '{self.mode}'")
+
+    def fit(self, X, y=None):
+        from time import perf_counter
+        self._n_jobs = check_n_jobs(self.n_jobs)
+
+        t0 = perf_counter()
+        transforms, self._series_transformers = _make_series_transforms(X)
+        self._log(f"series transforms: {perf_counter() - t0:.2f}s")
+
+        self._ri_transformers = []
+        for name, t in zip(self._REP_NAMES, transforms):
+            t0 = perf_counter()
+            ri = self._make_ri()
             ri.fit(t)
             self._ri_transformers.append(ri)
+            self._log(f"fit RI  rep={name}: {perf_counter() - t0:.2f}s")
         return self
 
     def transform(self, X):
+        from time import perf_counter
+        t0 = perf_counter()
         transforms = [X] + [t.transform(X) for t in self._series_transformers]
-        return np.hstack([ri.transform(t) for ri, t in zip(self._ri_transformers, transforms)])
+        self._log(f"transform series reps: {perf_counter() - t0:.2f}s")
+
+        parts = []
+        for name, ri, t in zip(self._REP_NAMES, self._ri_transformers, transforms):
+            t0 = perf_counter()
+            part = ri.transform(t)
+            self._log(f"transform RI  rep={name}: {perf_counter() - t0:.2f}s")
+            parts.append(part)
+        return np.hstack(parts)
 
 
 class RSTSFUnsupervised(BaseClassifier):

@@ -294,10 +294,24 @@ def _fit_transform_in_subprocess(feature_name, feature_seed, n_jobs, X_path, mod
     save_model(transformer, f"transformer_{feature_id}", model_dir)
     save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
 
+def _transform_inline(feature_id, X_path, model_dir, output_dir, dtype=np.float64):
+    X = np.load(X_path, allow_pickle=True)
+    transformer = read_model(f"transformer_{feature_id}", model_dir)
+    Xt = transformer.transform(X)
+    save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
+
+def _fit_transform_inline(feature_name, feature_seed, n_jobs, X_path, model_dir, output_dir, feature_id, dtype=np.float64):
+    X = np.load(X_path, allow_pickle=True)
+    transformer = get_feature_transformer(feature_name, seed=feature_seed, n_jobs=n_jobs)
+    Xt = transformer.fit_transform(X)
+    save_model(transformer, f"transformer_{feature_id}", model_dir)
+    save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
+
 @dataclass(frozen=True)
 class FeatureSpec:
     feature_name: str
     feature_seed: int | None = None
+    use_subprocess: bool = True
 
     def get_feature_id(self):
         return f'{self.feature_name}_s_{self.feature_seed}' if self.feature_seed is not None else self.feature_name
@@ -375,6 +389,8 @@ class LokyStackerV10Base(BaseClassifier):
     ]
     SERIES_MODELS = ["rstsf"]
     STACKING_MODEL = "probability-ridgecv"
+    NO_SUBPROCESS_FEATURES: set[str] = {"multirocket", "rdst"}
+    NO_SUBPROCESS_FEATURES: set[str] = {"multirocket", "rdst"}
 
     def _get_feature_names(self, model_name: str) -> tuple[str, ...]:
         """Return required feature type names for a model."""
@@ -399,9 +415,10 @@ class LokyStackerV10Base(BaseClassifier):
 
     def _make_feature_spec(self, feature_name: str, group_rng: np.random.Generator) -> FeatureSpec:
         """Create a single FeatureSpec. Seedless for deterministic transforms like quant."""
+        use_subprocess = feature_name not in self.NO_SUBPROCESS_FEATURES
         if feature_name in ("quant", "raw", "mantis", "chronos2", "tsfresh"):
-            return FeatureSpec(feature_name=feature_name)
-        return FeatureSpec(feature_name=feature_name, feature_seed=int(group_rng.integers(0, 2**31 - 1)))
+            return FeatureSpec(feature_name=feature_name, use_subprocess=use_subprocess)
+        return FeatureSpec(feature_name=feature_name, feature_seed=int(group_rng.integers(0, 2**31 - 1)), use_subprocess=use_subprocess)
 
     def build_model_specs(self, model_names: list[str]) -> list[ModelSpec]:
         """Build ModelSpec list from a flat list of model names.
@@ -658,7 +675,7 @@ class LokyStackerV10Base(BaseClassifier):
     # ----------------- features: train transformers + compute arrays -----------------
 
     def fit_transform_features(self, X: np.ndarray, fit_start_time=None) -> None:
-        """Fit transformers and compute features in a single subprocess per transformer."""
+        """Fit transformers and compute features, optionally in a subprocess per transformer."""
         os.makedirs(self._model_dir, exist_ok=True)
         directory = str(self._tmpdir)
         X_path = str(self._tmpdir / "X.npy")
@@ -666,11 +683,17 @@ class LokyStackerV10Base(BaseClassifier):
             if ft.feature_name == "raw":
                 continue
             t0 = perf_counter()
-            _run_in_subprocess(
-                _fit_transform_in_subprocess,
-                (ft.feature_name, ft.feature_seed, self.n_jobs,
-                 X_path, str(self._model_dir), directory, ft.get_feature_id(), self.feature_dtype),
-            )
+            if ft.use_subprocess:
+                _run_in_subprocess(
+                    _fit_transform_in_subprocess,
+                    (ft.feature_name, ft.feature_seed, self.n_jobs,
+                     X_path, str(self._model_dir), directory, ft.get_feature_id(), self.feature_dtype),
+                )
+            else:
+                _fit_transform_inline(
+                    ft.feature_name, ft.feature_seed, self.n_jobs,
+                    X_path, str(self._model_dir), directory, ft.get_feature_id(), self.feature_dtype,
+                )
             Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
             size_mb = Xt.nbytes / (1024 * 1024)
             self.log(
@@ -686,10 +709,15 @@ class LokyStackerV10Base(BaseClassifier):
             if ft.feature_name == "raw":
                 continue
             t0 = perf_counter()
-            _run_in_subprocess(
-                _transform_in_subprocess,
-                (ft.get_feature_id(), X_path, str(self._model_dir), directory, self.feature_dtype),
-            )
+            if ft.use_subprocess:
+                _run_in_subprocess(
+                    _transform_in_subprocess,
+                    (ft.get_feature_id(), X_path, str(self._model_dir), directory, self.feature_dtype),
+                )
+            else:
+                _transform_inline(
+                    ft.get_feature_id(), X_path, str(self._model_dir), directory, self.feature_dtype,
+                )
             Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
             size_mb = Xt.nbytes / (1024 * 1024)
             self.log(
@@ -1098,6 +1126,7 @@ class LokyStackerV10RSTSFRandom(LokyStackerV10Base):
         "rstsf-random-etc", "fm-p-ridgecv",
     ]
     SERIES_MODELS = []
+    NO_SUBPROCESS_FEATURES: set[str] = {"multirocket", "rdst", "rstsf-random"}
 
 def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
     all_folds = []
