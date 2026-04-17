@@ -459,7 +459,7 @@ class RSTSFRandomTransformer(BaseEstimator, TransformerMixin):
 
     _REP_NAMES = ["raw", "diff", "periodogram", "ar"]
 
-    def __init__(self, n_intervals=600, min_interval_length=3, mode="fast", random_state=None, n_jobs=1, verbose=True):
+    def __init__(self, n_intervals=600, min_interval_length=3, mode="fast", random_state=None, n_jobs=1, verbose=False):
         self.n_intervals = n_intervals
         self.min_interval_length = min_interval_length
         self.mode = mode

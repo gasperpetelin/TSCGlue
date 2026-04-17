@@ -1,9 +1,3 @@
-- #### Can rstsf be made into a feature version?
-
-RSTSF computes similarities with the target. Can that be delayed and pushed into an ML model?
-
-- #### What other TSC models to add?
-
 ## Other
 
 - #### Proper cleanup on exit or kill

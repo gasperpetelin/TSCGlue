@@ -277,20 +277,22 @@ def _fit_transformer_in_subprocess(feature_name, feature_seed, n_jobs, X_path, m
     transformer.fit(X)
     save_model(transformer, f"transformer_{feature_id}", model_dir)
 
-def _transform_in_subprocess(feature_id, X_path, model_dir, output_dir, dtype=np.float64):
+def _transform_in_subprocess(feature_id, X_path, model_dir, output_dir, dtype=np.float64, verbose=0):
     X = np.load(X_path, allow_pickle=True)
     transformer = read_model(f"transformer_{feature_id}", model_dir)
     t0 = perf_counter()
     Xt = transformer.transform(X)
-    print(f"[subprocess] transform {feature_id}: {perf_counter() - t0:.4f}s")
+    if verbose >= 3:
+        print(f"[subprocess] transform {feature_id}: {perf_counter() - t0:.4f}s")
     save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
 
-def _fit_transform_in_subprocess(feature_name, feature_seed, n_jobs, X_path, model_dir, output_dir, feature_id, dtype=np.float64):
+def _fit_transform_in_subprocess(feature_name, feature_seed, n_jobs, X_path, model_dir, output_dir, feature_id, dtype=np.float64, verbose=0):
     X = np.load(X_path, allow_pickle=True)
     transformer = get_feature_transformer(feature_name, seed=feature_seed, n_jobs=n_jobs)
     t0 = perf_counter()
     Xt = transformer.fit_transform(X)
-    print(f"[subprocess] fit_transform {feature_id}: {perf_counter() - t0:.4f}s")
+    if verbose >= 3:
+        print(f"[subprocess] fit_transform {feature_id}: {perf_counter() - t0:.4f}s")
     save_model(transformer, f"transformer_{feature_id}", model_dir)
     save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
 
@@ -472,7 +474,7 @@ class LokyStackerV10Base(BaseClassifier):
         return all_models
 
     def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0,
-                 model_names=None, n_repetitions=1, feature_dtype=None):
+                 model_names=None, n_repetitions=1, feature_dtype=None, stacking_models=None):
         super().__init__()
         self.k_folds = int(k_folds)
         self.random_state = random_state
@@ -481,6 +483,7 @@ class LokyStackerV10Base(BaseClassifier):
         self.verbose = int(verbose)
         self.n_repetitions = int(n_repetitions)
         self.feature_dtype = np.dtype(feature_dtype) if feature_dtype is not None else None
+        self.stacking_models = stacking_models if stacking_models is not None else [self.STACKING_MODEL]
 
         self.cv_splits = None
         self.feature_seed = np.random.default_rng(random_state)
@@ -492,13 +495,12 @@ class LokyStackerV10Base(BaseClassifier):
 
         self.model_names = model_names
         self.series_models = self.SERIES_MODELS.copy()
-        self.stacking_models = [self.STACKING_MODEL]
-        self.best_model = self.STACKING_MODEL
 
         # Build model specs from flat list; derive unique features
         self.model_specs = self.build_model_specs(
             self.model_names if self.model_names is not None else self.DEFAULT_MODEL_NAMES
         )
+        self.best_model = self.stacking_models[0] if self.stacking_models else self.model_specs[0].get_model_id()
         all_features: dict[str, FeatureSpec] = {}
         for spec in self.model_specs:
             for ft in spec.features:
@@ -687,7 +689,7 @@ class LokyStackerV10Base(BaseClassifier):
                 _run_in_subprocess(
                     _fit_transform_in_subprocess,
                     (ft.feature_name, ft.feature_seed, self.n_jobs,
-                     X_path, str(self._model_dir), directory, ft.get_feature_id(), self.feature_dtype),
+                     X_path, str(self._model_dir), directory, ft.get_feature_id(), self.feature_dtype, self.verbose),
                 )
             else:
                 _fit_transform_inline(
@@ -712,7 +714,7 @@ class LokyStackerV10Base(BaseClassifier):
             if ft.use_subprocess:
                 _run_in_subprocess(
                     _transform_in_subprocess,
-                    (ft.get_feature_id(), X_path, str(self._model_dir), directory, self.feature_dtype),
+                    (ft.get_feature_id(), X_path, str(self._model_dir), directory, self.feature_dtype, self.verbose),
                 )
             else:
                 _transform_inline(
@@ -839,8 +841,10 @@ class LokyStackerV10Base(BaseClassifier):
                         self.log(f"OOF acc (base) {model_id_result}: {oof_acc}", level=1, start_time=fit_start)
 
                 # -------- stacking --------
-                self.log("Starting stacking model training", level=2, start_time=fit_start)
                 prob_array = self._build_probability_array(n_samples=X.shape[0])
+                if not self.stacking_models:
+                    return
+                self.log("Starting stacking model training", level=2, start_time=fit_start)
                 if prob_array is None or np.isnan(prob_array).any():
                     self.log("NaN values detected in probability array, skipping stacking", level=2, start_time=fit_start)
                     self._fit_fallback(X, y, fit_start)
@@ -1128,6 +1132,19 @@ class LokyStackerV10RSTSFRandom(LokyStackerV10Base):
     SERIES_MODELS = []
     NO_SUBPROCESS_FEATURES: set[str] = {"multirocket", "rdst", "rstsf-random"}
 
+
+def make_ablation_model(component: str, random_state=None, n_jobs=1, verbose=0) -> LokyStackerV10RSTSFRandom:
+    """Single LokyStackerV10RSTSFRandom subcomponent without a stacking layer.
+
+    The model runs only the given component and predicts directly from it,
+    bypassing the probability-ridgecv meta-learner.
+    """
+    return LokyStackerV10RSTSFRandom(
+        random_state=random_state, n_jobs=n_jobs, verbose=verbose,
+        model_names=[component],
+        stacking_models=[],
+    )
+
 def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
     all_folds = []
     for i in range(n_repetitions):
@@ -1135,10 +1152,9 @@ def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
         all_folds.extend(folds)
     return all_folds
 
-class TSCGlue(LokyStackerV10FM):
+class TSCGlue(LokyStackerV10RSTSFRandom):
     def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0):
         super().__init__(random_state=random_state, n_repetitions=1, k_folds=k_folds, n_jobs=n_jobs, keep_features=False, verbose=verbose)
-
 
 class SparseScaler:
     """Sparse Scaler for hydra transform (NumPy version)."""

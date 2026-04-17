@@ -4,13 +4,10 @@ import re
 import random
 from itertools import product
 from pathlib import Path
-from urllib.parse import urlparse
 
-import boto3
 import click
 import numpy as np
 import polars as pl
-from botocore.exceptions import ClientError
 from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
 from sklearn.linear_model import RidgeClassifierCV
 from sklearn.metrics import accuracy_score
@@ -18,9 +15,10 @@ from sklearn.pipeline import Pipeline
 from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.classification.dummy import DummyClassifier
 from aeon.classification.feature_based import Catch22Classifier
+from aeon.classification.hybrid import HIVECOTEV2
 from tscglue.data_loader import DATA_DIR, load_fold
 from tscglue.models_tsfm import Chronos2Classifier, ALL_TSFM_MODELS, make_tsfm_model, TabICLTimeSeriesClassifier
-from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier, MultiRocketTypedClassifier, MultiRocketGRPClassifier
+from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier
 from tscglue.interval_models import RSTSFRandom, RSTSFUnsupervised, RSTSFCombined, RSTSFUnsupervisedRaw
 from tscglue.models_tsfm import RidgeClassifierCVDecisionProba
 from tscglue.models import (
@@ -30,79 +28,11 @@ from tscglue.models import (
     LokyStackerV10RSTSFRandom,
     LokyStackerV10TabICL,
     TSCGlue,
+    make_ablation_model,
 )
 
 
-import boto3
-from botocore.exceptions import ClientError
-from urllib.parse import urlparse
-
-
-class S3FileCache:
-    def __init__(self, base_s3_dir: str):
-        self.base_s3_dir = base_s3_dir.rstrip("/")
-        parsed = urlparse(base_s3_dir)
-        self.bucket = parsed.netloc
-        self.prefix = parsed.path.lstrip("/").rstrip("/")
-        self._s3 = boto3.client("s3")
-
-        self._files = set()
-        self._loaded = False
-
-    def _full_key(self, filename: str) -> str:
-        return f"{self.prefix}/{filename}" if self.prefix else filename
-
-    def _load_once(self):
-        if self._loaded:
-            return
-
-        paginator = self._s3.get_paginator("list_objects_v2")
-
-        for page in paginator.paginate(
-            Bucket=self.bucket,
-            Prefix=self.prefix
-        ):
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                # store only filename part
-                filename = key[len(self.prefix) + 1:] if self.prefix else key
-                self._files.add(filename)
-
-        self._loaded = True
-
-    def exists(self, filename: str) -> bool:
-        self._load_once()
-
-        if filename in self._files:
-            return True
-
-        key = self._full_key(filename)
-
-        try:
-            self._s3.head_object(Bucket=self.bucket, Key=key)
-            self._files.add(filename)
-            return True
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "404":
-                return False
-            raise
-
-    def add(self, df: pl.DataFrame, filename: str):
-        full_name = f"{self.base_s3_dir}/{filename}"
-        df.write_parquet(full_name)
-        self._files.add(filename)
-
-
-class LocalFileCache:
-    def __init__(self, base_dir: str):
-        self.base_dir = Path(base_dir)
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-
-    def exists(self, filename: str) -> bool:
-        return (self.base_dir / filename).exists()
-
-    def add(self, df: pl.DataFrame, filename: str):
-        df.write_parquet(self.base_dir / filename)
+from tscglue.utils import S3FileCache, LocalFileCache
 
 
 def optimal_k(n_train, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
@@ -130,6 +60,8 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return Catch22Classifier(random_state=random_state)
     elif model_name == "TSCGlue-3-3-26":
         return TSCGlue(random_state=random_state, n_jobs=n_jobs)
+    elif model_name == "TSCGlue-17-4-26":
+        return TSCGlue(random_state=random_state, n_jobs=n_jobs)
     elif model_name == "mycatch22v2":
         return Catch22Classifier(random_state=random_state + 1000)
     elif model_name == "mymrhydra":
@@ -144,6 +76,16 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return LokyStackerV10FMTSFresh(random_state=random_state, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v10-rstsf-random":
         return LokyStackerV10RSTSFRandom(random_state=random_state, n_jobs=n_jobs, verbose=10)
+    elif model_name == "ablation-multirockethydra-bestk-p-ridgecv":
+        return make_ablation_model("multirockethydra-bestk-p-ridgecv", random_state, n_jobs, verbose=10)
+    elif model_name == "ablation-quant-etc":
+        return make_ablation_model("quant-etc", random_state, n_jobs, verbose=10)
+    elif model_name == "ablation-rdst-p-ridgecv":
+        return make_ablation_model("rdst-p-ridgecv", random_state, n_jobs, verbose=10)
+    elif model_name == "ablation-rstsf-random-etc":
+        return make_ablation_model("rstsf-random-etc", random_state, n_jobs, verbose=10)
+    elif model_name == "ablation-fm-p-ridgecv":
+        return make_ablation_model("fm-p-ridgecv", random_state, n_jobs, verbose=10)
     elif model_name == "loky-stacker-v10-base":
         return LokyStackerV10Base(random_state=random_state, n_jobs=n_jobs, verbose=10)
     elif model_name == "loky-stacker-v10-base-2x":
@@ -190,14 +132,6 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return TabICLTimeSeriesClassifier(random_state=random_state, device="cuda")
     elif model_name == "tabicl-diff":
         return TabICLTimeSeriesClassifier(random_state=random_state, device="cuda", include_diff=True)
-    elif model_name == "multirocket-f64":
-        return MultiRocketTypedClassifier(dtype=None, n_jobs=n_jobs, random_state=random_state)
-    elif model_name == "multirocket-f32":
-        return MultiRocketTypedClassifier(dtype="float32", n_jobs=n_jobs, random_state=random_state)
-    elif model_name == "multirocket-f16":
-        return MultiRocketTypedClassifier(dtype="float16", n_jobs=n_jobs, random_state=random_state)
-    elif model_name == "multirocket-grp":
-        return MultiRocketGRPClassifier(n_jobs=n_jobs, random_state=random_state)
     elif model_name == "rstsf-random":
         return RSTSFRandom(n_estimators=200, n_intervals=600, random_state=random_state, n_jobs=n_jobs)
     elif model_name == "rstsf-random-ridge":
@@ -212,6 +146,10 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return RSTSFCombined(n_estimators=200, n_intervals_random=600, n_intervals_unsupervised=50, estimator=RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10)), random_state=random_state, n_jobs=n_jobs)
     elif model_name == "rstsf-unsupervised-raw":
         return RSTSFUnsupervisedRaw(n_intervals=50, random_state=random_state, n_jobs=n_jobs)
+    elif model_name == "hivecotev2-4h-j8":
+        return HIVECOTEV2(time_limit_in_minutes=240, n_jobs=n_jobs, random_state=random_state)
+    elif model_name == "hivecotev2-1h-j8":
+        return HIVECOTEV2(time_limit_in_minutes=60, n_jobs=n_jobs, random_state=random_state)
     elif model_name.startswith("mr-hydra-kbest-"):
         k = int(model_name.split("-")[-1])
         e = Pipeline([
@@ -229,10 +167,6 @@ ALL_MODELS = [
     # "loky-stacker-v5-soft-et",
     # "loky-stacker-v5-soft-ridge",
     # "loky-stacker-v5-soft-rf",
-    "loky-stacker-v6",
-    "loky-stacker-v6-soft-et",
-    "loky-stacker-v6-soft-ridge",
-    "loky-stacker-v6-soft-rf",
     "mr-hydra-kbest-5000",
     "mr-hydra-kbest-10000",
     "mr-hydra-kbest-30000",
@@ -271,10 +205,6 @@ ALL_MODELS = [
     "mycatch22v2",
     "mymrhydra",
     "mymrhydrav2",
-    "multirocket-f64",
-    "multirocket-f32",
-    "multirocket-f16",
-    "multirocket-grp",
     "rstsf-random",
     "rstsf-random-ridge",
     "rstsf-unsupervised",
@@ -283,6 +213,13 @@ ALL_MODELS = [
     "rstsf-combined-ridge",
     "rstsf-unsupervised-raw",
     #*_FILTER_VARIANTS,
+    "ablation-multirockethydra-bestk-p-ridgecv",
+    "ablation-quant-etc",
+    "ablation-rdst-p-ridgecv",
+    "ablation-rstsf-random-etc",
+    "ablation-fm-p-ridgecv",
+    "hivecotev2-4h-j8",
+    "hivecotev2-1h-j8",
 ]
 
 
