@@ -202,6 +202,7 @@ ALL_MODELS = [
     "mydummy",
     "mycatch22",
     "TSCGlue-3-3-26",
+    "TSCGlue-17-4-26",
     "mycatch22v2",
     "mymrhydra",
     "mymrhydrav2",
