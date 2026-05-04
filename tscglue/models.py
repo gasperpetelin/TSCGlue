@@ -144,6 +144,11 @@ def get_model_v6(name, seed=None, n_jobs=1):
         scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
         clf = RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=-1)
         return scaler, clf
+    elif name == "probability-nn":
+        from sklearn.neural_network import MLPClassifier
+        scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
+        clf = MLPClassifier(hidden_layer_sizes=(100,), max_iter=500, random_state=seed)
+        return scaler, clf
     elif name == "multirockethydra-bestk-p-ridgecv":
         scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
         clf = AutoSelectKBestClassifier()
@@ -474,7 +479,8 @@ class LokyStackerV10Base(BaseClassifier):
         return all_models
 
     def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0,
-                 model_names=None, n_repetitions=1, feature_dtype=None, stacking_models=None):
+                 model_names=None, n_repetitions=1, feature_dtype=None, stacking_models=None,
+                 selection=None):
         super().__init__()
         self.k_folds = int(k_folds)
         self.random_state = random_state
@@ -484,6 +490,7 @@ class LokyStackerV10Base(BaseClassifier):
         self.n_repetitions = int(n_repetitions)
         self.feature_dtype = np.dtype(feature_dtype) if feature_dtype is not None else None
         self.stacking_models = stacking_models if stacking_models is not None else [self.STACKING_MODEL]
+        self.selection = selection
 
         self.cv_splits = None
         self.feature_seed = np.random.default_rng(random_state)
@@ -916,6 +923,7 @@ class LokyStackerV10Base(BaseClassifier):
                         self.log(f"OOF acc (stack) {model_id_result}: {oof_acc}", level=1, start_time=fit_start)
 
                 self.log("Fit complete", level=1, start_time=fit_start)
+                self._select_best_model()
 
         finally:
             if not self.keep_features and self._tmpdir and self._tmpdir.exists():
@@ -926,6 +934,22 @@ class LokyStackerV10Base(BaseClassifier):
             if self.keep_features and self._tmpdir:
                 self.features_training_dir_ = str(self._tmpdir)
             self.log("Executor shutdown complete", level=2, start_time=fit_start)
+
+    def _select_best_model(self):
+        if self.selection is None:
+            return
+        if self.selection == "best":
+            candidates = self._oof_scores
+        elif self.selection == "best-stacking":
+            candidates = [s for s in self._oof_scores if s["level"] == 1]
+        elif self.selection == "best-base":
+            candidates = [s for s in self._oof_scores if s["level"] == 0]
+        else:
+            raise ValueError(f"Unknown selection strategy: {self.selection!r}")
+        if not candidates:
+            return
+        self.best_model = max(candidates, key=lambda s: s["oof_accuracy"])["model"]
+        self.log(f"Selected best model ({self.selection}): {self.best_model}", level=1)
 
     # ----------------- inspection helpers -----------------
 
@@ -1131,6 +1155,19 @@ class LokyStackerV10RSTSFRandom(LokyStackerV10Base):
     ]
     SERIES_MODELS = []
     NO_SUBPROCESS_FEATURES: set[str] = {"multirocket", "rdst", "rstsf-random"}
+
+
+class LokyStackerV10RSTSFRandomMultiStack(LokyStackerV10RSTSFRandom):
+    """LokyStackerV10RSTSFRandom with multiple stacking models for best-stacking selection experiments."""
+
+    STACKING_MODEL = "probability-ridgecv"
+
+    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, selection="best-stacking"):
+        super().__init__(
+            random_state=random_state, k_folds=k_folds, n_jobs=n_jobs, verbose=verbose,
+            stacking_models=["probability-ridgecv", "probability-et", "probability-nn", "probability-rf"],
+            selection=selection,
+        )
 
 
 def make_ablation_model(component: str, random_state=None, n_jobs=1, verbose=0) -> LokyStackerV10RSTSFRandom:

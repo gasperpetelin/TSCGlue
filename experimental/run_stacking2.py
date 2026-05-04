@@ -26,6 +26,7 @@ from tscglue.models import (
     LokyStackerV10FM,
     LokyStackerV10FMTSFresh,
     LokyStackerV10RSTSFRandom,
+    LokyStackerV10RSTSFRandomMultiStack,
     LokyStackerV10TabICL,
     TSCGlue,
     make_ablation_model,
@@ -62,6 +63,14 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return TSCGlue(random_state=random_state, n_jobs=n_jobs)
     elif model_name == "TSCGlue-17-4-26":
         return TSCGlue(random_state=random_state, n_jobs=n_jobs)
+    elif model_name == "multistack-best-stacking":
+        return LokyStackerV10RSTSFRandomMultiStack(random_state=random_state, n_jobs=n_jobs, selection="best-stacking")
+    elif model_name == "multistack-best-base":
+        return LokyStackerV10RSTSFRandomMultiStack(random_state=random_state, n_jobs=n_jobs, selection="best-base")
+    elif model_name == "multistack-best":
+        return LokyStackerV10RSTSFRandomMultiStack(random_state=random_state, n_jobs=n_jobs, selection="best")
+    elif model_name == "multistack-ridgecv":
+        return LokyStackerV10RSTSFRandomMultiStack(random_state=random_state, n_jobs=n_jobs, selection=None)
     elif model_name == "mycatch22v2":
         return Catch22Classifier(random_state=random_state + 1000)
     elif model_name == "mymrhydra":
@@ -203,6 +212,10 @@ ALL_MODELS = [
     "mycatch22",
     "TSCGlue-3-3-26",
     "TSCGlue-17-4-26",
+    "multistack-best-stacking",
+    "multistack-best-base",
+    "multistack-best",
+    "multistack-ridgecv",
     "mycatch22v2",
     "mymrhydra",
     "mymrhydrav2",
