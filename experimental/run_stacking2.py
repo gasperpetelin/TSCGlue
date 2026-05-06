@@ -354,16 +354,16 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets, storage, 
             X_train, y_train, X_test, y_test = load_fold(dataset, fold)
 
             model = get_model(model_name, random_state=fold, n_train=len(X_train), n_jobs=n_jobs)
-            model.fit(X_train, y_train)
-            preds = model.predict(X_test)
-            if hasattr(model, "cleanup"):
-                model.cleanup()
-            acc = accuracy_score(y_test, preds)
-
-            stats["test_accuracy"] = acc
-
-            df_stat = pl.DataFrame([stats])
-            cache.add(df_stat, file_name)
+            try:
+                model.fit(X_train, y_train)
+                preds = model.predict(X_test)
+                acc = accuracy_score(y_test, preds)
+                stats["test_accuracy"] = acc
+                df_stat = pl.DataFrame([stats])
+                cache.add(df_stat, file_name)
+            finally:
+                if hasattr(model, "cleanup"):
+                    model.cleanup()
         except Exception as e:
             print(f"Error processing Dataset={dataset}, Fold={fold}, Model={model_name}: {e}")
 
