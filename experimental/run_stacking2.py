@@ -69,6 +69,15 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return TSCGlue(random_state=random_state, n_jobs=n_jobs, n_repetitions=3)
     elif model_name == "TSCGlue-17-4-26-r5":
         return TSCGlue(random_state=random_state, n_jobs=n_jobs, n_repetitions=5)
+    elif model_name == "TSCGlue-17-4-26-c2":
+        base = LokyStackerV10RSTSFRandom.DEFAULT_MODEL_NAMES
+        return LokyStackerV10RSTSFRandom(random_state=random_state, n_jobs=n_jobs, model_names=base * 2)
+    elif model_name == "TSCGlue-17-4-26-c3":
+        base = LokyStackerV10RSTSFRandom.DEFAULT_MODEL_NAMES
+        return LokyStackerV10RSTSFRandom(random_state=random_state, n_jobs=n_jobs, model_names=base * 3)
+    elif model_name == "TSCGlue-17-4-26-c5":
+        base = LokyStackerV10RSTSFRandom.DEFAULT_MODEL_NAMES
+        return LokyStackerV10RSTSFRandom(random_state=random_state, n_jobs=n_jobs, model_names=base * 5)
     elif model_name == "multistack-best-stacking":
         return LokyStackerV10RSTSFRandomMultiStack(random_state=random_state, n_jobs=n_jobs, selection="best-stacking")
     elif model_name == "multistack-best-base":
@@ -221,6 +230,9 @@ ALL_MODELS = [
     "TSCGlue-17-4-26-r2",
     "TSCGlue-17-4-26-r3",
     "TSCGlue-17-4-26-r5",
+    "TSCGlue-17-4-26-c2",
+    "TSCGlue-17-4-26-c3",
+    "TSCGlue-17-4-26-c5",
     "multistack-best-stacking",
     "multistack-best-base",
     "multistack-best",
