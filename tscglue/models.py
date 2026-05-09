@@ -1190,8 +1190,8 @@ def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
     return all_folds
 
 class TSCGlue(LokyStackerV10RSTSFRandom):
-    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0):
-        super().__init__(random_state=random_state, n_repetitions=1, k_folds=k_folds, n_jobs=n_jobs, keep_features=False, verbose=verbose)
+    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1):
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=False, verbose=verbose)
 
 class SparseScaler:
     """Sparse Scaler for hydra transform (NumPy version)."""
