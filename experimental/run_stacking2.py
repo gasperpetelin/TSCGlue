@@ -63,6 +63,12 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return TSCGlue(random_state=random_state, n_jobs=n_jobs)
     elif model_name == "TSCGlue-17-4-26":
         return TSCGlue(random_state=random_state, n_jobs=n_jobs)
+    elif model_name == "TSCGlue-17-4-26-r2":
+        return TSCGlue(random_state=random_state, n_jobs=n_jobs, n_repetitions=2)
+    elif model_name == "TSCGlue-17-4-26-r3":
+        return TSCGlue(random_state=random_state, n_jobs=n_jobs, n_repetitions=3)
+    elif model_name == "TSCGlue-17-4-26-r5":
+        return TSCGlue(random_state=random_state, n_jobs=n_jobs, n_repetitions=5)
     elif model_name == "multistack-best-stacking":
         return LokyStackerV10RSTSFRandomMultiStack(random_state=random_state, n_jobs=n_jobs, selection="best-stacking")
     elif model_name == "multistack-best-base":
@@ -212,6 +218,9 @@ ALL_MODELS = [
     "mycatch22",
     "TSCGlue-3-3-26",
     "TSCGlue-17-4-26",
+    "TSCGlue-17-4-26-r2",
+    "TSCGlue-17-4-26-r3",
+    "TSCGlue-17-4-26-r5",
     "multistack-best-stacking",
     "multistack-best-base",
     "multistack-best",
