@@ -6,8 +6,6 @@
 #SBATCH --mem=64G
 #SBATCH --output=logs/stacking2_%A_%a.out
 #SBATCH --error=logs/stacking2_%A_%a.err
-#SBATCH --partition=e7
-#SBATCH --reservation=e7
 #SBATCH --array=0-29
 
 # Folds are handled by SLURM array (0-29), storage is always disk.

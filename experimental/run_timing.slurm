@@ -6,8 +6,6 @@
 #SBATCH --mem=64G
 #SBATCH --output=logs/timing_%A_%a.out
 #SBATCH --error=logs/timing_%A_%a.err
-#SBATCH --partition=e7
-#SBATCH --reservation=e7
 #SBATCH --array=5
 
 # Default setup:
