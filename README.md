@@ -8,6 +8,10 @@ Code accompanying the paper submission. TSCGlue is an ensemble classifier for un
 make setup
 ```
 
+## Implementation
+
+The TSCGlue model is implemented in `tscglue/models.py` as the `TSCGlue` class.
+
 ## Running experiments
 
 All scripts are in `experimental/`. Experiments use SLURM array jobs — each array index corresponds to one fold (0–29 over 30 resamples).
@@ -41,6 +45,21 @@ sbatch run_timing.slurm -m <model-name>
 ```
 
 Results are saved to `performance-benchmarking/` on disk (pass `--storage s3` to write to S3 instead).
+
+## Quick example
+
+```python
+from aeon.datasets import load_classification
+from sklearn.metrics import accuracy_score
+from tscglue.models import TSCGlue
+
+X_train, y_train = load_classification("ArrowHead", split="train")
+X_test, y_test = load_classification("ArrowHead", split="test")
+
+model = TSCGlue(random_state=0, n_jobs=4)
+model.fit(X_train, y_train)
+print(accuracy_score(y_test, model.predict(X_test)))
+```
 
 ## Figures and analysis
 
