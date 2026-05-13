@@ -103,7 +103,10 @@ class LocalFileCache:
         return (self.base_dir / filename).exists()
 
     def add(self, df: pl.DataFrame, filename: str):
-        df.write_parquet(self.base_dir / filename)
+        target = self.base_dir / filename
+        tmp = target.with_suffix(".tmp")
+        df.write_parquet(tmp)
+        tmp.rename(target)
 
     def list_files(self) -> list[str]:
         return [f.name for f in self.base_dir.iterdir() if f.suffix == ".parquet"]
@@ -115,6 +118,7 @@ class LocalFileCache:
 def load_s3_parquet_cached(
     s3_prefix: str = "s3://tsc-glue/performance-benchmarking/",
     max_workers: int = 16,
+    skip_empty: bool = False,
 ) -> pl.DataFrame:
     """Download all parquet files from an S3 prefix, cache locally, and return as a DataFrame."""
     import boto3
@@ -132,13 +136,20 @@ def load_s3_parquet_cached(
 
     paginator = s3.get_paginator("list_objects_v2")
     remote_keys = []
+    skipped = 0
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
             if key.endswith(".parquet"):
+                if skip_empty and obj["Size"] == 0:
+                    skipped += 1
+                    continue
                 fname = key.rsplit("/", 1)[-1]
                 if fname not in local_files:
                     remote_keys.append(key)
+
+    if skip_empty and skipped:
+        print(f"Skipped {skipped} empty parquet file(s) on S3")
 
     def _download(key):
         fname = key.rsplit("/", 1)[-1]
@@ -153,7 +164,7 @@ def load_s3_parquet_cached(
     local_paths = sorted(
         os.path.join(cache_dir, f)
         for f in os.listdir(cache_dir)
-        if f.endswith(".parquet")
+        if f.endswith(".parquet") and (not skip_empty or os.path.getsize(os.path.join(cache_dir, f)) > 0)
     )
     return pl.read_parquet(local_paths)
 

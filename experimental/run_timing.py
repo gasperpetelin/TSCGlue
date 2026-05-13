@@ -39,6 +39,8 @@ def build_model(model_name: str, random_state: int, n_train: int, n_jobs: int):
         return MultiRocketHydraClassifier(random_state=random_state, n_jobs=n_jobs)
     if model_name == "hcv2":
         return HIVECOTEV2(time_limit_in_minutes=240, n_jobs=n_jobs, random_state=random_state)
+    if model_name == "hcv2-loky":
+        return HIVECOTEV2(time_limit_in_minutes=240, n_jobs=n_jobs, random_state=random_state, parallel_backend="loky")
     return get_model(model_name, random_state=random_state, n_train=n_train, n_jobs=n_jobs)
 
 
