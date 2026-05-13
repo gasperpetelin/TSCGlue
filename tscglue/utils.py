@@ -73,7 +73,7 @@ class S3FileCache:
         from tqdm import tqdm
 
         subdir = f"{self.bucket}__{self.prefix.replace('/', '_')}"
-        local_dir = Path(cache_dir) if cache_dir else Path(tempfile.gettempdir()) / "tsc-glue-cache" / subdir
+        local_dir = Path(cache_dir) if cache_dir else Path(tempfile.gettempdir()) / "tscglue-cache" / subdir
         local_dir.mkdir(parents=True, exist_ok=True)
 
         local_files = {f.name for f in local_dir.iterdir() if f.suffix == ".parquet"}
@@ -116,7 +116,7 @@ class LocalFileCache:
 
 
 def load_s3_parquet_cached(
-    s3_prefix: str = "s3://tsc-glue/performance-benchmarking/",
+    s3_prefix: str = "s3://anonymous-bucket/performance-benchmarking/",
     max_workers: int = 16,
     skip_empty: bool = False,
 ) -> pl.DataFrame:
@@ -124,7 +124,7 @@ def load_s3_parquet_cached(
     import boto3
     from tqdm import tqdm
 
-    cache_dir = os.path.join(tempfile.gettempdir(), "tsc-glue-cache")
+    cache_dir = os.path.join(tempfile.gettempdir(), "tscglue-cache")
     os.makedirs(cache_dir, exist_ok=True)
 
     parsed = urlparse(s3_prefix)

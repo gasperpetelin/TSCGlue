@@ -15,7 +15,7 @@ from tscglue.utils import LocalFileCache, S3FileCache
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DISK_RESULTS_DIR = ROOT_DIR / "results" / "timing_runs_slurm"
-S3_RESULTS_DIR = "s3://tsc-glue/performance-timing-slurm"
+S3_RESULTS_DIR = "s3://anonymous-bucket/performance-timing-slurm"
 TIMING_MODEL_NAMES = [
     "multirockethydra",
     "hcv2",

@@ -339,7 +339,7 @@ def main(models, dataset_names, fold_spec, list_models, list_datasets, storage, 
         requested_folds = [int(x.strip()) for x in fold_spec.split(",")]
 
     if storage == "s3":
-        cache = S3FileCache("s3://tsc-glue/performance-benchmarking")
+        cache = S3FileCache("s3://anonymous-bucket/performance-benchmarking")
     else:
         cache = LocalFileCache("performance-benchmarking")
 
