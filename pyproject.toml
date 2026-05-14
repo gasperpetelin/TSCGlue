@@ -1,6 +1,6 @@
 [project]
 name = "tscglue"
-version = "1.2.0"
+version = "0.1.2"
 description = "Automatic Time Series Classification"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
