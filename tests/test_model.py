@@ -143,10 +143,20 @@ def test_regressor_summary():
     assert len(scores_with_transforms) >= len(scores)
 
 
+def _normalize(X):
+    mean = X.mean(axis=-1, keepdims=True)
+    std = X.std(axis=-1, keepdims=True)
+    std = np.where(std < 1e-6, 1.0, std)
+    return (X - mean) / std
+
+
 def test_regressor_univariate():
     """Test regressor on real univariate regression dataset (Covid3Month, 1 channel)."""
     X_train, y_train = load_regression("Covid3Month", split="train")
     X_test, y_test = load_regression("Covid3Month", split="test")
+
+    X_train = _normalize(X_train)
+    X_test = _normalize(X_test)
 
     model = TSCGlueRegressor(random_state=0, k_folds=3, n_jobs=1)
     model.fit(X_train, y_train)
