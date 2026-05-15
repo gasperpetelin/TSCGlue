@@ -18,7 +18,6 @@ from aeon.classification.feature_based import Catch22Classifier
 from aeon.classification.hybrid import HIVECOTEV2
 from tscglue.data_loader import DATA_DIR, load_fold
 from tscglue.models_tsfm import Chronos2Classifier, ALL_TSFM_MODELS, make_tsfm_model, TabICLTimeSeriesClassifier
-from tscglue.gpu_models import MRHydraClassifier, MultiRocketHydraSelectKBestClassifier
 from tscglue.interval_models import RSTSFRandom, RSTSFUnsupervised, RSTSFCombined, RSTSFUnsupervisedRaw
 from tscglue.models_tsfm import RidgeClassifierCVDecisionProba
 from tscglue.models import (

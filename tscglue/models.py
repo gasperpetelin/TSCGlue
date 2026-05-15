@@ -517,8 +517,8 @@ class LokyStackerV10Base(BaseClassifier):
         self.features_list = list(all_features.values())
 
         self._oof_scores: list[dict] = []
+        self._transform_times: list[dict] = []
         self._probability_columns: list[tuple[int, str, Any]] | None = None
-        self.neki: list[dict] = []
 
         self._fallback_path: Path = self._model_dir / "fallback.pkl"
 
@@ -705,11 +705,13 @@ class LokyStackerV10Base(BaseClassifier):
                 )
             Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
             size_mb = Xt.nbytes / (1024 * 1024)
+            elapsed = perf_counter() - t0
             self.log(
-                f"Fit+transformed {ft.get_feature_id()} features {Xt.shape} ({size_mb:.2f} MB) dtype={Xt.dtype} in {perf_counter() - t0:.4f}s",
+                f"Fit+transformed {ft.get_feature_id()} features {Xt.shape} ({size_mb:.2f} MB) dtype={Xt.dtype} in {elapsed:.4f}s",
                 level=1,
                 start_time=fit_start_time,
             )
+            self._transform_times.append({"model": ft.get_feature_id(), "level": None, "oof_accuracy": None, "train_time": [elapsed]})
 
     def compute_features(self, X: np.ndarray, directory: str, start_time=None) -> None:
         compute_start = perf_counter()
@@ -810,6 +812,7 @@ class LokyStackerV10Base(BaseClassifier):
 
                 futures = {executor.submit(_train_one_model_v10, *t): t for t in tasks}
                 model_groups = defaultdict(list)
+                model_train_times: dict[str, list[float]] = defaultdict(list)
 
                 for future in as_completed(futures):
                     task = futures[future]
@@ -835,16 +838,16 @@ class LokyStackerV10Base(BaseClassifier):
                         indices=val_idx,
                     )
                     predictions.extend(new_preds)
-                    self.neki.extend(new_preds)
 
                     model_groups[model_id_result].append(fold_number)
+                    model_train_times[model_id_result].append(train_dur)
                     if len(model_groups[model_id_result]) == expected_folds[model_id_result]:
                         self.log(f"Completed training for model {model_id_result}", level=2, start_time=fit_start)
                         del model_groups[model_id_result]
 
                         predictions = self._save_model_predictions(predictions, model_id_result, n_samples=X.shape[0], level=0)
                         oof_acc = self._compute_oof_accuracy(y, model_id_result)
-                        self._oof_scores.append({"model": model_id_result, "level": 0, "oof_accuracy": oof_acc})
+                        self._oof_scores.append({"model": model_id_result, "level": 0, "oof_accuracy": oof_acc, "train_time": model_train_times.pop(model_id_result)})
                         self.log(f"OOF acc (base) {model_id_result}: {oof_acc}", level=1, start_time=fit_start)
 
                 # -------- stacking --------
@@ -885,6 +888,7 @@ class LokyStackerV10Base(BaseClassifier):
 
                 futures = {executor.submit(_train_one_model_v10, *t): t for t in stack_tasks}
                 model_groups = defaultdict(list)
+                model_train_times: dict[str, list[float]] = defaultdict(list)
 
                 for future in as_completed(futures):
                     task = futures[future]
@@ -910,16 +914,16 @@ class LokyStackerV10Base(BaseClassifier):
                         indices=val_idx,
                     )
                     predictions.extend(new_preds)
-                    self.neki.extend(new_preds)
 
                     model_groups[model_id_result].append(fold_number)
+                    model_train_times[model_id_result].append(train_dur)
                     if len(model_groups[model_id_result]) == self.k_folds:
                         self.log(f"Completed training for model {model_id_result}", level=2, start_time=fit_start)
                         del model_groups[model_id_result]
 
                         predictions = self._save_model_predictions(predictions, model_id_result, n_samples=X.shape[0], level=1)
                         oof_acc = self._compute_oof_accuracy(y, model_id_result)
-                        self._oof_scores.append({"model": model_id_result, "level": 1, "oof_accuracy": oof_acc})
+                        self._oof_scores.append({"model": model_id_result, "level": 1, "oof_accuracy": oof_acc, "train_time": model_train_times.pop(model_id_result)})
                         self.log(f"OOF acc (stack) {model_id_result}: {oof_acc}", level=1, start_time=fit_start)
 
                 self.log("Fit complete", level=1, start_time=fit_start)
@@ -985,7 +989,9 @@ class LokyStackerV10Base(BaseClassifier):
                 frames.append(pl.DataFrame(arr, schema=schema))
         return pl.DataFrame() if not frames else pl.concat(frames, how="horizontal")
 
-    def summary(self) -> list[dict]:
+    def summary(self, return_transforms: bool = False) -> list[dict]:
+        if return_transforms:
+            return self._transform_times + self._oof_scores
         return self._oof_scores
 
     # ----------------- inference -----------------
@@ -1267,70 +1273,6 @@ class MultiRocketHydra(BaseCollectionTransformer):
             f"multirocket_{x}" for x in range(self.n_multirocket_features_)
         ]
         return pl.DataFrame(Xt, schema=schema)
-
-
-class MultiScaler(BaseEstimator, TransformerMixin):
-    """
-    Applies different scalers to different feature groups.
-    Features not in any group are ignored.
-
-    Parameters
-    ----------
-    scalers : dict
-        Dictionary mapping feature prefix to scaler instance.
-        Example: {'hydra': SparseScaler(), 'multirocket': StandardScaler()}
-    verbose : bool, default=False
-        If True, print information about which features are scaled with which scaler.
-    """
-
-    def __init__(self, scalers, verbose=False):
-        self.scalers = scalers
-        self.verbose = verbose
-
-    def fit(self, X, y=None):
-        self.scalers_ = {}
-        self.feature_groups_ = {}
-
-        # Group columns by prefix
-        for prefix, scaler in self.scalers.items():
-            cols = [col for col in X.columns if col.startswith(prefix)]
-            if cols:
-                self.feature_groups_[prefix] = cols
-                self.scalers_[prefix] = scaler
-                self.scalers_[prefix].fit(X.select(cols).to_numpy())
-
-                if self.verbose:
-                    print(
-                        f"[MultiScaler] {len(cols)} '{prefix}' features -> {scaler.__class__.__name__}"
-                    )
-
-        # Store output column order
-        self.output_cols_ = [
-            col for prefix in self.scalers.keys() for col in self.feature_groups_.get(prefix, [])
-        ]
-
-        if self.verbose:
-            total_input = len(X.columns)
-            total_output = len(self.output_cols_)
-            ignored = total_input - total_output
-            print(
-                f"[MultiScaler] Total: {total_output}/{total_input} features kept, {ignored} ignored"
-            )
-
-        return self
-
-    def transform(self, X):
-        parts = []
-        for prefix in self.scalers_.keys():
-            if prefix in self.feature_groups_:
-                cols = self.feature_groups_[prefix]
-                scaled = self.scalers_[prefix].transform(X.select(cols).to_numpy())
-                parts.append(scaled)
-
-        return np.hstack(parts) if parts else np.empty((len(X), 0))
-
-    def get_feature_names_out(self, input_features=None):
-        return np.array(self.output_cols_)
 
 
 class DictMultiScaler(BaseEstimator, TransformerMixin):
