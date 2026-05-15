@@ -2,7 +2,8 @@
 
 import pytest
 import numpy as np
-from tscglue.models import LokyStackerV10Base
+from aeon.datasets import load_regression
+from tscglue.models import LokyStackerV10Base, TSCGlueRegressor
 from tscglue.interval_models import RSTSFRandomTransformer
 from sklearn.metrics import accuracy_score
 from tscglue import utils
@@ -102,6 +103,57 @@ def test_rstsf_random_transformer_modes(mode):
     assert Xt_train.ndim == 2
     assert Xt_train.shape[0] == X.shape[0]
     assert Xt_test.shape == Xt_train.shape
+
+
+def _make_regression_data(n_train=40, n_test=15, n_channels=1, n_timesteps=30, seed=0):
+    rng = np.random.default_rng(seed)
+    X_train = rng.standard_normal((n_train, n_channels, n_timesteps)).astype(np.float32)
+    X_test = rng.standard_normal((n_test, n_channels, n_timesteps)).astype(np.float32)
+    y_train = X_train[:, 0, :].mean(axis=1) + 0.1 * rng.standard_normal(n_train)
+    y_test = X_test[:, 0, :].mean(axis=1) + 0.1 * rng.standard_normal(n_test)
+    return X_train, y_train, X_test, y_test
+
+
+def test_regressor_fit_predict_basic():
+    X_train, y_train, X_test, y_test = _make_regression_data()
+    model = TSCGlueRegressor(random_state=0, k_folds=3, n_jobs=1)
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+
+    assert y_pred.shape == (len(X_test),), f"Expected shape ({len(X_test)},), got {y_pred.shape}"
+    assert np.isfinite(y_pred).all(), "Predictions contain NaN or Inf"
+    assert y_pred.dtype in (np.float32, np.float64), f"Unexpected dtype {y_pred.dtype}"
+
+
+def test_regressor_summary():
+    X_train, y_train, X_test, _ = _make_regression_data()
+    model = TSCGlueRegressor(random_state=0, k_folds=3, n_jobs=1)
+    model.fit(X_train, y_train)
+
+    scores = model.summary()
+    assert len(scores) > 0
+    for entry in scores:
+        assert "model" in entry
+        assert "level" in entry
+        assert "oof_rmse" in entry
+        assert "train_time" in entry
+        assert np.isfinite(entry["oof_rmse"]), f"oof_rmse is not finite for {entry['model']}"
+
+    scores_with_transforms = model.summary(return_transforms=True)
+    assert len(scores_with_transforms) >= len(scores)
+
+
+def test_regressor_univariate():
+    """Test regressor on real univariate regression dataset (Covid3Month, 1 channel)."""
+    X_train, y_train = load_regression("Covid3Month", split="train")
+    X_test, y_test = load_regression("Covid3Month", split="test")
+
+    model = TSCGlueRegressor(random_state=0, k_folds=3, n_jobs=1)
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+
+    assert y_pred.shape == (len(X_test),)
+    assert np.isfinite(y_pred).all()
 
 
 def test_rstsf_random_transformer_modes_match():
