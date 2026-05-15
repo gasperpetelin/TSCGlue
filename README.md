@@ -2,6 +2,12 @@
 
 Automatic Time Series Classification library built on top of aeon and scikit-learn.
 
+## Benchmark
+
+Critical difference diagram evaluated on 112 univariate UCR datasets:
+
+![Critical difference diagram](figures/critical_difference.png)
+
 ## Installation
 
 ```bash
