@@ -27,7 +27,7 @@ from tscglue.models import (
     LokyStackerV10RSTSFRandom,
     LokyStackerV10RSTSFRandomMultiStack,
     LokyStackerV10TabICL,
-    TSCGlue,
+    TSCGlueClassifier,
     make_ablation_model,
 )
 
@@ -58,23 +58,23 @@ def get_model(model_name, random_state, n_train=None, n_jobs=8):
         return DummyClassifier()
     elif model_name == "mycatch22":
         return Catch22Classifier(random_state=random_state)
-    elif model_name == "TSCGlue-3-3-26":
-        return TSCGlue(random_state=random_state, n_jobs=n_jobs)
-    elif model_name == "TSCGlue-17-4-26":
-        return TSCGlue(random_state=random_state, n_jobs=n_jobs)
-    elif model_name == "TSCGlue-17-4-26-r2":
-        return TSCGlue(random_state=random_state, n_jobs=n_jobs, n_repetitions=2)
-    elif model_name == "TSCGlue-17-4-26-r3":
-        return TSCGlue(random_state=random_state, n_jobs=n_jobs, n_repetitions=3)
-    elif model_name == "TSCGlue-17-4-26-r5":
-        return TSCGlue(random_state=random_state, n_jobs=n_jobs, n_repetitions=5)
-    elif model_name == "TSCGlue-17-4-26-c2":
+    elif model_name == "TSCGlueClassifier-3-3-26":
+        return TSCGlueClassifier(random_state=random_state, n_jobs=n_jobs)
+    elif model_name == "TSCGlueClassifier-17-4-26":
+        return TSCGlueClassifier(random_state=random_state, n_jobs=n_jobs)
+    elif model_name == "TSCGlueClassifier-17-4-26-r2":
+        return TSCGlueClassifier(random_state=random_state, n_jobs=n_jobs, n_repetitions=2)
+    elif model_name == "TSCGlueClassifier-17-4-26-r3":
+        return TSCGlueClassifier(random_state=random_state, n_jobs=n_jobs, n_repetitions=3)
+    elif model_name == "TSCGlueClassifier-17-4-26-r5":
+        return TSCGlueClassifier(random_state=random_state, n_jobs=n_jobs, n_repetitions=5)
+    elif model_name == "TSCGlueClassifier-17-4-26-c2":
         base = LokyStackerV10RSTSFRandom.DEFAULT_MODEL_NAMES
         return LokyStackerV10RSTSFRandom(random_state=random_state, n_jobs=n_jobs, model_names=base * 2)
-    elif model_name == "TSCGlue-17-4-26-c3":
+    elif model_name == "TSCGlueClassifier-17-4-26-c3":
         base = LokyStackerV10RSTSFRandom.DEFAULT_MODEL_NAMES
         return LokyStackerV10RSTSFRandom(random_state=random_state, n_jobs=n_jobs, model_names=base * 3)
-    elif model_name == "TSCGlue-17-4-26-c5":
+    elif model_name == "TSCGlueClassifier-17-4-26-c5":
         base = LokyStackerV10RSTSFRandom.DEFAULT_MODEL_NAMES
         return LokyStackerV10RSTSFRandom(random_state=random_state, n_jobs=n_jobs, model_names=base * 5)
     elif model_name == "multistack-best-stacking":
@@ -224,14 +224,14 @@ ALL_MODELS = [
     "tabicl-diff",
     "mydummy",
     "mycatch22",
-    "TSCGlue-3-3-26",
-    "TSCGlue-17-4-26",
-    "TSCGlue-17-4-26-r2",
-    "TSCGlue-17-4-26-r3",
-    "TSCGlue-17-4-26-r5",
-    "TSCGlue-17-4-26-c2",
-    "TSCGlue-17-4-26-c3",
-    "TSCGlue-17-4-26-c5",
+    "TSCGlueClassifier-3-3-26",
+    "TSCGlueClassifier-17-4-26",
+    "TSCGlueClassifier-17-4-26-r2",
+    "TSCGlueClassifier-17-4-26-r3",
+    "TSCGlueClassifier-17-4-26-r5",
+    "TSCGlueClassifier-17-4-26-c2",
+    "TSCGlueClassifier-17-4-26-c3",
+    "TSCGlueClassifier-17-4-26-c5",
     "multistack-best-stacking",
     "multistack-best-base",
     "multistack-best",

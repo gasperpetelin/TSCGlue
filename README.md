@@ -1,4 +1,4 @@
-# TSCGlue
+# TSCGlueClassifier
 
 Automatic Time Series Classification library built on top of aeon and scikit-learn.
 
@@ -12,14 +12,14 @@ pip install tscglue
 
 ```python
 from tscglue import utils
-from tscglue.models import TSCGlue
+from tscglue.models import TSCGlueClassifier
 from sklearn.metrics import accuracy_score
 
 # Load a time series classification dataset
 X_train, y_train, X_test, y_test = utils.load_dataset("ArrowHead")
 
 # Create and train the model
-model = TSCGlue(
+model = TSCGlueClassifier(
     random_state=270,
     k_folds=10,
     n_jobs=-1

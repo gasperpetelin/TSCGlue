@@ -19,7 +19,7 @@ S3_RESULTS_DIR = "s3://tsc-glue/performance-timing-slurm"
 TIMING_MODEL_NAMES = [
     "multirockethydra",
     "hcv2",
-    "TSCGlue-17-4-26",
+    "TSCGlueClassifier-17-4-26",
 ]
 
 
