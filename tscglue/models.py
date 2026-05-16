@@ -26,7 +26,7 @@ from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, Transfo
 from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor, RandomForestClassifier
 from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif, f_regression
 from sklearn.linear_model import RidgeClassifierCV, RidgeCV
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, r2_score
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
 from sklearn.utils.extmath import softmax
@@ -1277,7 +1277,7 @@ def _predict_one_model_reg(model_id, directory, feature_specs, model_dir, fold):
 
 class TSCGlueRegressor(BaseRegressor):
     _tags = {"capability:multivariate": True}
-    DEFAULT_MODEL_NAMES = ["multirockethydra-bestk-ridgecv", "quant-etr", "rdst-ridgecv", "rstsf-random-etr"]
+    DEFAULT_MODEL_NAMES = ["quant-etr", "rstsf-random-etr"]
     STACKING_MODEL = "prediction-ridgecv"
     NO_SUBPROCESS_FEATURES: set[str] = {"multirocket", "rdst", "rstsf-random"}
 
@@ -1479,12 +1479,14 @@ class TSCGlueRegressor(BaseRegressor):
                         del model_groups[model_id_result]
                         counts = oof_counts[model_id_result]
                         oof_preds[model_id_result] = np.where(counts > 0, oof_preds[model_id_result] / counts, np.nan)
-                        oof_rmse = float(np.sqrt(np.nanmean((y - oof_preds[model_id_result]) ** 2)))
+                        residuals = y - oof_preds[model_id_result]
+                        oof_rmse = float(np.sqrt(np.nanmean(residuals ** 2)))
+                        oof_r2 = float(r2_score(y, oof_preds[model_id_result]))
                         self._oof_scores.append({
                             "model": model_id_result, "level": 0,
-                            "oof_rmse": oof_rmse, "train_time": model_train_times.pop(model_id_result),
+                            "oof_rmse": oof_rmse, "oof_r2": oof_r2, "train_time": model_train_times.pop(model_id_result),
                         })
-                        self.log(f"OOF RMSE (base) {model_id_result}: {oof_rmse:.4f}", level=1, start_time=fit_start)
+                        self.log(f"OOF RMSE (base) {model_id_result}: {oof_rmse:.4f}  R²: {oof_r2:.4f}", level=1, start_time=fit_start)
 
                 if not self.stacking_models:
                     return
@@ -1529,12 +1531,14 @@ class TSCGlueRegressor(BaseRegressor):
                         del model_groups[model_id_result]
                         counts = stack_oof_counts[model_id_result]
                         avg_preds = np.where(counts > 0, stack_oof_preds[model_id_result] / counts, np.nan)
-                        oof_rmse = float(np.sqrt(np.nanmean((y - avg_preds) ** 2)))
+                        residuals = y - avg_preds
+                        oof_rmse = float(np.sqrt(np.nanmean(residuals ** 2)))
+                        oof_r2 = float(r2_score(y, avg_preds))
                         self._oof_scores.append({
                             "model": model_id_result, "level": 1,
-                            "oof_rmse": oof_rmse, "train_time": model_train_times.pop(model_id_result),
+                            "oof_rmse": oof_rmse, "oof_r2": oof_r2, "train_time": model_train_times.pop(model_id_result),
                         })
-                        self.log(f"OOF RMSE (stack) {model_id_result}: {oof_rmse:.4f}", level=1, start_time=fit_start)
+                        self.log(f"OOF RMSE (stack) {model_id_result}: {oof_rmse:.4f}  R²: {oof_r2:.4f}", level=1, start_time=fit_start)
 
                 self.log("Fit complete", level=1, start_time=fit_start)
 

@@ -136,8 +136,10 @@ def test_regressor_summary():
         assert "model" in entry
         assert "level" in entry
         assert "oof_rmse" in entry
+        assert "oof_r2" in entry
         assert "train_time" in entry
         assert np.isfinite(entry["oof_rmse"]), f"oof_rmse is not finite for {entry['model']}"
+        assert np.isfinite(entry["oof_r2"]), f"oof_r2 is not finite for {entry['model']}"
 
     scores_with_transforms = model.summary(return_transforms=True)
     assert len(scores_with_transforms) >= len(scores)
