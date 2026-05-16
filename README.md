@@ -4,8 +4,24 @@ Code accompanying the paper submission. TSCGlue is an ensemble classifier for un
 
 ## Setup
 
+Requires Python 3.12 or 3.13.
+
+Install [uv](https://docs.astral.sh/uv/) if you don't have it:
+
+```bash
+make install-uv
+```
+
+Then install dependencies:
+
 ```bash
 make setup
+```
+
+Download the UCR archive (required for running experiments):
+
+```bash
+make download-ucr
 ```
 
 ## Implementation
@@ -15,6 +31,12 @@ The TSCGlue model is implemented in `tscglue/models.py` as the `TSCGlue` class.
 ## Running experiments
 
 All scripts are in `experimental/`. Experiments use SLURM array jobs — each array index corresponds to one fold (0–29 over 30 resamples).
+
+If running on SLURM or another offline environment, pre-download the HuggingFace models (Mantis, Chronos-2) before submitting jobs:
+
+```bash
+make download-models
+```
 
 **Run all models on all datasets:**
 ```bash
