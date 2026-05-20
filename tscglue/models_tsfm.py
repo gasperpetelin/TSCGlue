@@ -10,11 +10,12 @@ class Chronos2Embedding(BaseEstimator, TransformerMixin):
     Chronos-2 (decoder-only): [REG] at [-2]
     Chronos-Bolt (encoder-decoder): [REG] at [-1]
     """
-    def __init__(self, model_id="amazon/chronos-2", batch_size=256, device="cpu", include_diff=True):
+    def __init__(self, model_id="amazon/chronos-2", batch_size=256, device="cpu", include_diff=True, verbose=False):
         self.model_id = model_id
         self.batch_size = batch_size
         self.device = device
         self.include_diff = include_diff
+        self.verbose = verbose
         self._pipeline = None
 
     @property
@@ -38,12 +39,13 @@ class Chronos2Embedding(BaseEstimator, TransformerMixin):
     def _embed(self, X):
         torch = _require_torch()
         pipeline = self._get_pipeline()
+        if X.shape[1] != 1:
+            raise ValueError(f"Chronos2Embedding only supports univariate series, got {X.shape[1]} channels.")
+        n_batches = (len(X) + self.batch_size - 1) // self.batch_size
         with torch.inference_mode():
             reg_idx = -1 if self._is_bolt else -2
             all_embs = []
-            for i in range(0, len(X), self.batch_size):
-                if X.shape[1] != 1:
-                    raise ValueError(f"Chronos2Embedding only supports univariate series, got {X.shape[1]} channels.")
+            for batch_idx, i in enumerate(range(0, len(X), self.batch_size)):
                 batch = [torch.from_numpy(x.squeeze(0)).float() for x in X[i:i+self.batch_size]]
                 embeddings, _ = pipeline.embed(batch)
                 if self._is_bolt:
@@ -51,6 +53,8 @@ class Chronos2Embedding(BaseEstimator, TransformerMixin):
                 else:
                     vecs = np.stack([e[0, reg_idx, :].detach().cpu().float().numpy() for e in embeddings])
                 all_embs.append(vecs)
+                if self.verbose:
+                    print(f"[Chronos2Embedding] batch {batch_idx + 1}/{n_batches}", flush=True)
         return np.vstack(all_embs)
 
     def transform(self, X):

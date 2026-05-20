@@ -8,7 +8,7 @@ if __name__ == "__main__":
     X_train = rng.standard_normal((20, 1, 50)).astype(np.float32)
     X_test = rng.standard_normal((8, 1, 50)).astype(np.float32)
 
-    emb = Chronos2Embedding(include_diff=False)
+    emb = Chronos2Embedding(include_diff=False, verbose=True)
     emb.fit(X_train)
 
     Xt_train = emb.transform(X_train)
