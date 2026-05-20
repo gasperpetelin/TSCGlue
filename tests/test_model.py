@@ -3,7 +3,7 @@
 import pytest
 import numpy as np
 from aeon.datasets import load_regression
-from tscglue.models import LokyStackerV10Base, TSCGlueRegressor
+from tscglue.models import LokyStackerV10Base, TSCGlueClassifier, TSCGlueRegressor
 from tscglue.interval_models import RSTSFRandomTransformer
 from sklearn.metrics import accuracy_score
 from tscglue import utils
@@ -13,7 +13,7 @@ def test_model_accuracy_on_arrowhead():
     """Test model can achieve reasonable accuracy on ArrowHead dataset."""
     X_train, y_train, X_test, y_test = utils.load_dataset("ArrowHead")
 
-    model = LokyStackerV10Base(random_state=270, n_repetitions=1, k_folds=10)
+    model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10)
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
@@ -51,7 +51,7 @@ def test_model_on_multivariate():
     """Test model can fit and predict on a multivariate dataset."""
     X_train, y_train, X_test, y_test = utils.load_dataset("BasicMotions")
 
-    model = LokyStackerV10Base(random_state=270, n_repetitions=1, k_folds=10)
+    model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10)
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
@@ -74,7 +74,7 @@ def test_label_dtype(encode_labels):
         y_train_fit = y_train
         y_test_expected = y_test
 
-    model = LokyStackerV10Base(random_state=270, n_repetitions=1, k_folds=10, n_jobs=1)
+    model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10, n_jobs=1)
     model.fit(X_train, y_train_fit)
 
     y_pred = model.predict(X_test)
