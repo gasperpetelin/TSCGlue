@@ -18,7 +18,13 @@ dependencies = [
     "pyarrow",
     "statsmodels",
     "tabicl",
-    "tsfresh"
+    "tsfresh",
+    "chronos-forecasting",
+    "mantis-tsfm>=1.0.0",
+    "transformers",
+    "accelerate",
+    "catboost",
+    "lightgbm",
 ]
 
 [project.optional-dependencies]
@@ -37,12 +43,6 @@ notebooks = [
     "ipykernel",
     "hvplot",
     "pandas",
-    "transformers",
-    "accelerate",
-    "chronos-forecasting",
-    "mantis-tsfm>=1.0.0",
-    "catboost",
-    "lightgbm",
 ]
 
 [build-system]
