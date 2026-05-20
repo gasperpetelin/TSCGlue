@@ -4,6 +4,7 @@ import numpy as np
 from tscglue.models_tsfm import Chronos2Embedding
 
 if __name__ == "__main__":
+    print("starting...", flush=True)
     rng = np.random.default_rng(42)
     X_train = rng.standard_normal((20, 1, 50)).astype(np.float32)
     X_test = rng.standard_normal((8, 1, 50)).astype(np.float32)
