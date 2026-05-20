@@ -4,6 +4,19 @@ from aeon.datasets import load_classification
 from sklearn.model_selection import KFold, StratifiedKFold
 
 
+def require_torch():
+    try:
+        import torch
+        return torch
+    except ImportError as exc:
+        raise ImportError(
+            "This feature requires PyTorch. Install with:\n"
+            "  pip install 'tscglue[torch]'\n"
+            "  uv pip install 'tscglue[cpu]'\n"
+            "  uv pip install 'tscglue[cu124]'"
+        ) from exc
+
+
 def load_dataset(dataset_name):
     """Load and normalize a dataset."""
     X_train, y_train = load_classification(dataset_name, split="train")
