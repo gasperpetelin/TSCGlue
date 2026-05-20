@@ -250,6 +250,8 @@ class Chronos2Embedding(BaseEstimator, TransformerMixin):
             all_embs = []
             for i in range(0, len(X), self.batch_size):
                 tb = perf_counter()
+                if X.shape[1] != 1:
+                    raise ValueError(f"Chronos2Embedding only supports univariate series, got {X.shape[1]} channels.")
                 batch = [torch.from_numpy(x.squeeze(0)).float() for x in X[i:i+self.batch_size]]
                 t_prep = perf_counter()
                 embeddings, _ = pipeline.embed(batch)
