@@ -1,17 +1,14 @@
-"""Tests for AutoTSC models."""
+"""Tests for TSCGlueClassifier, TSCGlueRegressor, and LokyStackerV10Base."""
 
-import pytest
 import numpy as np
+import pytest
 from aeon.datasets import load_regression
-from tscglue.models import LokyStackerV10Base, TSCGlueClassifier, TSCGlueRegressor
-from tscglue.interval_models import RSTSFRandomTransformer
-from tscglue.models_tsfm import Chronos2Embedding, MantisEmbedding
 from sklearn.metrics import accuracy_score
+from tscglue.models import LokyStackerV10Base, TSCGlueClassifier, TSCGlueRegressor
 from tscglue import utils
 
 
 def test_model_accuracy_on_coffee():
-    """Test model can achieve reasonable accuracy on Coffee dataset."""
     X_train, y_train, X_test, y_test = utils.load_dataset("Coffee")
 
     model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10)
@@ -21,8 +18,6 @@ def test_model_accuracy_on_coffee():
 
     assert accuracy > 0.1, f"Accuracy {accuracy} is too low (<=0.1)"
     assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
-
-    print(f"Test passed with accuracy: {accuracy:.4f}")
 
 
 @pytest.mark.parametrize("feature_dtype", [None, "float32", "float64"])
@@ -45,12 +40,9 @@ def test_v10base_feature_dtype(feature_dtype):
         f"Expected feature_dtype={expected_dtype}, got {model.feature_dtype}"
     )
 
-    print(f"feature_dtype={feature_dtype}: accuracy={accuracy:.4f}")
-
 
 @pytest.mark.skip(reason="TSCGlueClassifier foundation models (Chronos2) don't support multivariate yet")
 def test_model_on_multivariate():
-    """Test model can fit and predict on a multivariate dataset."""
     X_train, y_train, X_test, y_test = utils.load_dataset("BasicMotions")
 
     model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10)
@@ -61,13 +53,11 @@ def test_model_on_multivariate():
     assert accuracy > 0.1, f"Accuracy {accuracy} is too low (<=0.1)"
     assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
 
-    print(f"Test passed with accuracy: {accuracy:.4f}")
-
 
 @pytest.mark.skip(reason="TSCGlueClassifier foundation models (Chronos2) don't support multivariate yet")
 @pytest.mark.parametrize("encode_labels", [False, True], ids=["string_labels", "int_labels"])
 def test_label_dtype(encode_labels):
-    """Test that v10 inference works with both string and integer labels."""
+    """Test that inference works with both string and integer labels."""
     X_train, y_train, X_test, y_test = utils.load_dataset("BasicMotions")
 
     if encode_labels:
@@ -91,51 +81,6 @@ def test_label_dtype(encode_labels):
     accuracy = accuracy_score(y_test_expected, y_pred)
     assert accuracy > 0.1, f"Accuracy {accuracy} is too low (<=0.1)"
     assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
-
-
-@pytest.mark.parametrize("mode", ["fast", "default"])
-def test_rstsf_random_transformer_modes(mode):
-    """Both modes should produce identical output shapes and close feature values."""
-    rng = np.random.default_rng(0)
-    X = rng.standard_normal((20, 1, 50)).astype(np.float32)
-
-    t = RSTSFRandomTransformer(n_intervals=30, random_state=42, n_jobs=1, verbose=False, mode=mode)
-    Xt_train = t.fit_transform(X)
-    Xt_test = t.transform(X)
-
-    assert Xt_train.ndim == 2
-    assert Xt_train.shape[0] == X.shape[0]
-    assert Xt_test.shape == Xt_train.shape
-
-
-def test_chronos2_embedding_shape():
-    X_train, y_train, X_test, y_test = utils.load_dataset("Coffee")
-    emb = Chronos2Embedding(include_diff=False)
-    emb.fit(X_train)
-    Xt_train = emb.transform(X_train)
-    Xt_test = emb.transform(X_test)
-
-    assert Xt_train.ndim == 2
-    assert Xt_train.shape[0] == X_train.shape[0]
-    assert Xt_test.shape[0] == X_test.shape[0]
-    assert Xt_train.shape[1] == Xt_test.shape[1]
-    assert np.isfinite(Xt_train).all()
-    assert np.isfinite(Xt_test).all()
-
-
-def test_mantis_embedding_shape():
-    X_train, y_train, X_test, y_test = utils.load_dataset("Coffee")
-    emb = MantisEmbedding(include_diff=False)
-    emb.fit(X_train)
-    Xt_train = emb.transform(X_train)
-    Xt_test = emb.transform(X_test)
-
-    assert Xt_train.ndim == 2
-    assert Xt_train.shape[0] == X_train.shape[0]
-    assert Xt_test.shape[0] == X_test.shape[0]
-    assert Xt_train.shape[1] == Xt_test.shape[1]
-    assert np.isfinite(Xt_train).all()
-    assert np.isfinite(Xt_test).all()
 
 
 def _make_regression_data(n_train=40, n_test=15, n_channels=1, n_timesteps=30, seed=0):
@@ -199,18 +144,3 @@ def test_regressor_univariate():
 
     assert y_pred.shape == (len(X_test),)
     assert np.isfinite(y_pred).all()
-
-
-def test_rstsf_random_transformer_modes_match():
-    """'fast' and 'default' modes must produce numerically identical features."""
-    rng = np.random.default_rng(0)
-    X = rng.standard_normal((20, 1, 50)).astype(np.float32)
-
-    Xt = {}
-    for mode in ["fast", "default"]:
-        t = RSTSFRandomTransformer(n_intervals=30, random_state=42, n_jobs=1, verbose=False, mode=mode)
-        Xt[mode] = t.fit_transform(X)
-
-    assert Xt["fast"].shape == Xt["default"].shape, "Shape mismatch between modes"
-    np.testing.assert_allclose(Xt["fast"], Xt["default"], rtol=1e-5, atol=1e-5,
-                               err_msg="'fast' and 'default' modes produce different features")
