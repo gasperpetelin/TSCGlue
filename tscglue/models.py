@@ -32,6 +32,7 @@ from sklearn.preprocessing import FunctionTransformer, StandardScaler
 from sklearn.utils.extmath import softmax
 from threadpoolctl import threadpool_limits
 from tscglue import utils
+from tscglue.utils import RidgeClassifierCVDecisionProba
 
 
 class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
@@ -1766,19 +1767,6 @@ class RidgeClassifierCVIndicator(RidgeClassifierCV):
         with threadpool_limits(limits=1):
             return super().fit(X, y)
 
-class RidgeClassifierCVDecisionProba(RidgeClassifierCV):
-    def fit(self, X, y):
-        with threadpool_limits(limits=1):
-            return super().fit(X, y)
-
-    def predict_proba(self, X):
-        scores = self.decision_function(X)
-
-        # binary case: decision_function returns shape (n_samples,)
-        if scores.ndim == 1:
-            scores = np.vstack([-scores, scores]).T
-
-        return softmax(scores)
 
 
 class RSTSFUnsupervisedTransformer:

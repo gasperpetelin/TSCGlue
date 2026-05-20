@@ -1,7 +1,23 @@
 """Utility functions for AutoTSC."""
 
+import numpy as np
 from aeon.datasets import load_classification
+from sklearn.linear_model import RidgeClassifierCV
 from sklearn.model_selection import KFold, StratifiedKFold
+from sklearn.utils.extmath import softmax
+from threadpoolctl import threadpool_limits
+
+
+class RidgeClassifierCVDecisionProba(RidgeClassifierCV):
+    def fit(self, X, y):
+        with threadpool_limits(limits=1):
+            return super().fit(X, y)
+
+    def predict_proba(self, X):
+        scores = self.decision_function(X)
+        if scores.ndim == 1:
+            scores = np.vstack([-scores, scores]).T
+        return softmax(scores)
 
 
 def require_torch():

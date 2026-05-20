@@ -1,35 +1,7 @@
-import os
-import sys
-import inspect
 import numpy as np
-import pandas as pd
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import RidgeClassifierCV
-from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, HistGradientBoostingClassifier
-from sklearn.pipeline import make_pipeline
 from sklearn.base import BaseEstimator, TransformerMixin
-from threadpoolctl import threadpool_limits
-from sklearn.utils.extmath import softmax
-from lightgbm import LGBMClassifier
-
 
 from tscglue.utils import require_torch as _require_torch
-
-# TODO it is duplicated here. remove in the future.
-class RidgeClassifierCVDecisionProba(RidgeClassifierCV):
-    def fit(self, X, y):
-        with threadpool_limits(limits=1):
-            return super().fit(X, y)
-
-    def predict_proba(self, X):
-        scores = self.decision_function(X)
-
-        # binary case: decision_function returns shape (n_samples,)
-        if scores.ndim == 1:
-            scores = np.vstack([-scores, scores]).T
-
-        return softmax(scores)
-
 
 
 class Chronos2Embedding(BaseEstimator, TransformerMixin):
@@ -51,9 +23,7 @@ class Chronos2Embedding(BaseEstimator, TransformerMixin):
 
     def _get_pipeline(self):
         if self._pipeline is None:
-            from time import perf_counter
             from chronos import BaseChronosPipeline
-            t0 = perf_counter()
             self._pipeline = BaseChronosPipeline.from_pretrained(self.model_id, device_map=self.device)
         return self._pipeline
 
@@ -66,35 +36,24 @@ class Chronos2Embedding(BaseEstimator, TransformerMixin):
         return self
 
     def _embed(self, X):
-        import os
-        from time import perf_counter
         torch = _require_torch()
-        t0 = perf_counter()
         pipeline = self._get_pipeline()
-        t1 = perf_counter()
         with torch.inference_mode():
             reg_idx = -1 if self._is_bolt else -2
             all_embs = []
             for i in range(0, len(X), self.batch_size):
-                tb = perf_counter()
                 if X.shape[1] != 1:
                     raise ValueError(f"Chronos2Embedding only supports univariate series, got {X.shape[1]} channels.")
                 batch = [torch.from_numpy(x.squeeze(0)).float() for x in X[i:i+self.batch_size]]
-                t_prep = perf_counter()
                 embeddings, _ = pipeline.embed(batch)
-                t_emb = perf_counter()
-
                 if self._is_bolt:
                     vecs = embeddings[:, reg_idx, :].detach().cpu().float().numpy()
                 else:
                     vecs = np.stack([e[0, reg_idx, :].detach().cpu().float().numpy() for e in embeddings])
                 all_embs.append(vecs)
-            result = np.vstack(all_embs)
-        return result
+        return np.vstack(all_embs)
 
     def transform(self, X):
-        from time import perf_counter
-        t0 = perf_counter()
         emb = self._embed(X)
         if self.include_diff:
             diff_emb = self._embed(np.diff(X, axis=-1))
@@ -139,7 +98,7 @@ class MantisEmbedding(BaseEstimator, TransformerMixin):
 def download_models():
     """Pre-download all HF models to local cache (run before offline/SLURM)."""
     import time
-    from huggingface_hub import snapshot_download, hf_hub_download
+    from huggingface_hub import snapshot_download
 
     repos = [
         "paris-noah/MantisV2",
@@ -151,15 +110,10 @@ def download_models():
     ]
 
     for i, repo in enumerate(repos, 1):
-        print(f"[{i}/{len(repos) + 1}] Downloading {repo} ...", flush=True)
+        print(f"[{i}/{len(repos)}] Downloading {repo} ...", flush=True)
         t0 = time.time()
         snapshot_download(repo)
-        print(f"[{i}/{len(repos) + 1}] Cached {repo} in {time.time() - t0:.1f}s", flush=True)
-
-    print(f"[{len(repos) + 1}/{len(repos) + 1}] Downloading jingang/TabICL ...", flush=True)
-    t0 = time.time()
-    ckpt = hf_hub_download(repo_id="jingang/TabICL", filename="tabicl-classifier-v2-20260212.ckpt")
-    print(f"[{len(repos) + 1}/{len(repos) + 1}] Cached jingang/TabICL -> {ckpt} in {time.time() - t0:.1f}s", flush=True)
+        print(f"[{i}/{len(repos)}] Cached {repo} in {time.time() - t0:.1f}s", flush=True)
 
     print("All models cached.", flush=True)
 
