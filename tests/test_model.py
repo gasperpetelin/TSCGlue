@@ -5,6 +5,7 @@ import numpy as np
 from aeon.datasets import load_regression
 from tscglue.models import LokyStackerV10Base, TSCGlueClassifier, TSCGlueRegressor
 from tscglue.interval_models import RSTSFRandomTransformer
+from tscglue.models_tsfm import Chronos2Embedding, MantisEmbedding
 from sklearn.metrics import accuracy_score
 from tscglue import utils
 
@@ -105,6 +106,36 @@ def test_rstsf_random_transformer_modes(mode):
     assert Xt_train.ndim == 2
     assert Xt_train.shape[0] == X.shape[0]
     assert Xt_test.shape == Xt_train.shape
+
+
+def test_chronos2_embedding_shape():
+    X_train, y_train, X_test, y_test = utils.load_dataset("Coffee")
+    emb = Chronos2Embedding(include_diff=False)
+    emb.fit(X_train)
+    Xt_train = emb.transform(X_train)
+    Xt_test = emb.transform(X_test)
+
+    assert Xt_train.ndim == 2
+    assert Xt_train.shape[0] == X_train.shape[0]
+    assert Xt_test.shape[0] == X_test.shape[0]
+    assert Xt_train.shape[1] == Xt_test.shape[1]
+    assert np.isfinite(Xt_train).all()
+    assert np.isfinite(Xt_test).all()
+
+
+def test_mantis_embedding_shape():
+    X_train, y_train, X_test, y_test = utils.load_dataset("Coffee")
+    emb = MantisEmbedding(include_diff=False)
+    emb.fit(X_train)
+    Xt_train = emb.transform(X_train)
+    Xt_test = emb.transform(X_test)
+
+    assert Xt_train.ndim == 2
+    assert Xt_train.shape[0] == X_train.shape[0]
+    assert Xt_test.shape[0] == X_test.shape[0]
+    assert Xt_train.shape[1] == Xt_test.shape[1]
+    assert np.isfinite(Xt_train).all()
+    assert np.isfinite(Xt_test).all()
 
 
 def _make_regression_data(n_train=40, n_test=15, n_channels=1, n_timesteps=30, seed=0):
