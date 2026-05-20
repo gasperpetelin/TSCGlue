@@ -1,4 +1,4 @@
-.PHONY: help install-uv setup list clean tests format download-ucr download-models
+.PHONY: help install-uv setup setup-cpu setup-cuda list clean tests format download-ucr download-models
 .ONESHELL:
 
 help:   ## Show available commands
@@ -7,8 +7,14 @@ help:   ## Show available commands
 install-uv:  ## Install uv package manager
 	curl -LsSf https://astral.sh/uv/install.sh | sh
 
-setup:  ## Sets up everything needed for a new deployment
-	uv sync --all-extras
+setup:  ## Install base dependencies (no PyTorch)
+	uv sync
+
+setup-cpu:  ## Install with CPU PyTorch
+	uv sync --extra cpu
+
+setup-cuda:  ## Install with CUDA 12.4 PyTorch
+	uv sync --extra cu124
 
 list:
 	@LC_ALL=C $(MAKE) -pRrq -f $(firstword $(MAKEFILE_LIST)) : 2>/dev/null | awk -v RS= -F: '/(^|\n)# Files(\n|$$)/,/(^|\n)# Finished Make data base/ {if ($$1 !~ "^[#.]") {print $$1}}' | sort | grep -E -v -e '^[^[:alnum:]]' -e '^$@$$'

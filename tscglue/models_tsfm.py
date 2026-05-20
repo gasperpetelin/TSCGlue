@@ -3,10 +3,6 @@ import sys
 import inspect
 import numpy as np
 import pandas as pd
-import torch
-import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
-from chronos import BaseChronosPipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeClassifierCV
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, HistGradientBoostingClassifier
@@ -15,6 +11,19 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from threadpoolctl import threadpool_limits
 from sklearn.utils.extmath import softmax
 from lightgbm import LGBMClassifier
+
+
+def _require_torch():
+    try:
+        import torch
+        return torch
+    except ImportError as exc:
+        raise ImportError(
+            "This feature requires PyTorch. Install with:\n"
+            "  pip install 'tscglue[torch]'\n"
+            "  uv pip install 'tscglue[cpu]'\n"
+            "  uv pip install 'tscglue[cu124]'"
+        ) from exc
 
 # TODO it is duplicated here. remove in the future.
 class RidgeClassifierCVDecisionProba(RidgeClassifierCV):
@@ -34,13 +43,15 @@ class RidgeClassifierCVDecisionProba(RidgeClassifierCV):
 class Chronos2Classifier:
     # TODO This is pure AI slop and should be replaced with a proper Chronos2-based classifier.
     def __init__(self):
+        torch = _require_torch()
+        from chronos import BaseChronosPipeline
         MODEL_ID = "amazon/chronos-2"
         self.pipeline = BaseChronosPipeline.from_pretrained(
             MODEL_ID,
             device_map="auto",
         )
 
-    def _pool_to_vector(self, t: torch.Tensor) -> torch.Tensor:
+    def _pool_to_vector(self, t):
         # embed() returns (n_variates, num_patches+2, d_model) per series.
         # Layout: [context patches ... | REG token | masked future patch]
         # Use the [REG] token at [-2]: it attends over all context patches and
@@ -56,7 +67,7 @@ class Chronos2Classifier:
             return t
         return t.reshape(-1)
 
-    def build_long_df(self, batch: list[torch.Tensor]) -> pd.DataFrame:
+    def build_long_df(self, batch) -> pd.DataFrame:
         rows = []
         for item_id, ts in enumerate(batch):
             values = ts.detach().cpu().numpy().astype(np.float32)
@@ -70,7 +81,8 @@ class Chronos2Classifier:
                 )
         return pd.DataFrame(rows)
 
-    def extract_series_embedding_matrix(self, embed_output) -> torch.Tensor:
+    def extract_series_embedding_matrix(self, embed_output):
+        torch = _require_torch()
         # Chronos2Pipeline.embed currently returns:
         # (list[tensor per input], list[...aux...])
         if isinstance(embed_output, tuple) and len(embed_output) > 0 and isinstance(embed_output[0], list):
@@ -78,6 +90,7 @@ class Chronos2Classifier:
             tensors = [x for x in first if isinstance(x, torch.Tensor)]
             if tensors:
                 return torch.stack([self._pool_to_vector(t) for t in tensors], dim=0)
+
 
         queue = [embed_output]
         vectors = []
@@ -103,7 +116,8 @@ class Chronos2Classifier:
             return torch.stack(vectors, dim=0)
         raise TypeError(f"Could not locate embeddings tensor(s) in output type {type(embed_output)}")
 
-    def run_embed_with_fallbacks(self, batch: list[torch.Tensor]):
+    def run_embed_with_fallbacks(self, batch):
+        from torch.nn.utils.rnn import pad_sequence
         padded = pad_sequence(batch, batch_first=True)
         df = self.build_long_df(batch)
 
@@ -133,6 +147,7 @@ class Chronos2Classifier:
         raise RuntimeError("All embed attempts failed:\n" + "\n".join(f"- {k}: {v}" for k, v in errors.items()))
 
     def compute_chronos2_embeddings_local(self, X: np.ndarray, batch_size: int = 128) -> np.ndarray:
+        torch = _require_torch()
         embs = []
         for i in range(0, X.shape[0], batch_size):
             batch_np = X[i : i + batch_size]
@@ -164,6 +179,8 @@ class Chronos2Classifier:
 # --- Embedding extractors ---
 
 def _mantis_embed(X: np.ndarray) -> np.ndarray:
+    torch = _require_torch()
+    import torch.nn.functional as F
     from mantis.architecture import MantisV2
     from mantis.trainer import MantisTrainer
     network = MantisV2(device='cpu')
@@ -176,6 +193,8 @@ def _mantis_embed(X: np.ndarray) -> np.ndarray:
 
 
 def _chronos2_embed(X: np.ndarray, batch_size: int = 64) -> np.ndarray:
+    torch = _require_torch()
+    from chronos import BaseChronosPipeline
     pipeline = BaseChronosPipeline.from_pretrained("amazon/chronos-2", device_map="cpu")
     all_embs = []
     for i in range(0, len(X), batch_size):
@@ -206,6 +225,7 @@ class Chronos2Embedding(BaseEstimator, TransformerMixin):
     def _get_pipeline(self):
         if self._pipeline is None:
             from time import perf_counter
+            from chronos import BaseChronosPipeline
             t0 = perf_counter()
             self._pipeline = BaseChronosPipeline.from_pretrained(self.model_id, device_map=self.device)
         return self._pipeline
@@ -221,6 +241,7 @@ class Chronos2Embedding(BaseEstimator, TransformerMixin):
     def _embed(self, X):
         import os
         from time import perf_counter
+        torch = _require_torch()
         t0 = perf_counter()
         pipeline = self._get_pipeline()
         t1 = perf_counter()
@@ -263,6 +284,8 @@ class MantisEmbedding(BaseEstimator, TransformerMixin):
         return self
 
     def _embed(self, X):
+        torch = _require_torch()
+        import torch.nn.functional as F
         from mantis.architecture import MantisV2
         from mantis.trainer import MantisTrainer
 

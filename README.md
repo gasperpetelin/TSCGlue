@@ -11,8 +11,20 @@ Critical difference diagram evaluated on 112 univariate UCR datasets:
 ## Installation
 
 ```bash
+# Base install (no PyTorch)
 pip install tscglue
+
+# Generic PyTorch (pip resolves version)
+pip install "tscglue[torch]"
+
+# CPU PyTorch (via uv)
+uv pip install "tscglue[cpu]"
+
+# CUDA 12.4 PyTorch (via uv)
+uv pip install "tscglue[cu124]"
 ```
+
+If you already have PyTorch installed, just install the base package — it won't reinstall torch.
 
 ## Quick Start
 

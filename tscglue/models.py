@@ -756,16 +756,21 @@ class LokyStackerV10Base(BaseClassifier):
         self.log(f"Starting fit, run_dir={self._base_dir}, n_jobs={self.n_jobs}", level=1, start_time=fit_start)
         _cpu_max = os.cpu_count() or 1
         _cpu_used = _cpu_max if self.n_jobs == -1 else self.n_jobs
-        self.log(f"CPUs: set={self.n_jobs}, max={_cpu_max}, used={_cpu_used}", level=1, start_time=fit_start)
+        self.log(f"CPUs set/available/used/ {self.n_jobs}/{_cpu_max}/{_cpu_used}", level=1, start_time=fit_start)
+        try:
+            import torch
+            _gpu_torch = torch.cuda.device_count()
+        except Exception:
+            _gpu_torch = 0
         try:
             import subprocess
-            _gpu_avail = len(subprocess.check_output(
+            _gpu_smi = len(subprocess.check_output(
                 ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                 stderr=subprocess.DEVNULL
             ).decode().strip().splitlines())
         except Exception:
-            _gpu_avail = 0
-        self.log(f"GPUs: set=0, available={_gpu_avail}, used=0", level=1, start_time=fit_start)
+            _gpu_smi = 0
+        self.log(f"GPUs set/available[torch]/available[smi]/used/ 0/{_gpu_torch}/{_gpu_smi}/0", level=1, start_time=fit_start)
 
         os.makedirs(self._model_dir, exist_ok=True)
         os.makedirs(self._tmpdir, exist_ok=True)
