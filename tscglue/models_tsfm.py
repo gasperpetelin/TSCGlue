@@ -25,7 +25,11 @@ class Chronos2Embedding(BaseEstimator, TransformerMixin):
     def _get_pipeline(self):
         if self._pipeline is None:
             from chronos import BaseChronosPipeline
+            if self.verbose:
+                print(f"[Chronos2Embedding] loading {self.model_id} ...", flush=True)
             self._pipeline = BaseChronosPipeline.from_pretrained(self.model_id, device_map=self.device)
+            if self.verbose:
+                print(f"[Chronos2Embedding] model loaded", flush=True)
         return self._pipeline
 
     def __getstate__(self):
