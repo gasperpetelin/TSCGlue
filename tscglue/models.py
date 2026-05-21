@@ -233,7 +233,7 @@ class RDSTFloat64(RandomDilatedShapeletTransform):
         return super()._transform(np.asarray(X, dtype=np.float64), y)
 
 
-def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1):
+def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1, device: str = "cpu"):
     match feature_type:
         case "multirocket":
             return MultiRocket(n_jobs=n_jobs, random_state=seed)
@@ -245,10 +245,10 @@ def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1):
             return HydraTransformer(n_jobs=n_jobs, random_state=seed)
         case "mantis":
             from tscglue.models_tsfm import MantisEmbedding
-            return MantisEmbedding()
+            return MantisEmbedding(device=device)
         case "chronos2":
             from tscglue.models_tsfm import Chronos2Embedding
-            return Chronos2Embedding()
+            return Chronos2Embedding(device=device)
         case "tsfresh":
             from aeon.transformations.collection.feature_based import TSFresh
             return TSFresh(default_fc_parameters="efficient", n_jobs=n_jobs)
@@ -293,9 +293,9 @@ def _transform_in_subprocess(feature_id, X_path, model_dir, output_dir, dtype=np
         print(f"[subprocess] transform {feature_id}: {perf_counter() - t0:.4f}s")
     save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
 
-def _fit_transform_in_subprocess(feature_name, feature_seed, n_jobs, X_path, model_dir, output_dir, feature_id, dtype=np.float64, verbose=0):
+def _fit_transform_in_subprocess(feature_name, feature_seed, n_jobs, X_path, model_dir, output_dir, feature_id, dtype=np.float64, verbose=0, device="cpu"):
     X = np.load(X_path, allow_pickle=True)
-    transformer = get_feature_transformer(feature_name, seed=feature_seed, n_jobs=n_jobs)
+    transformer = get_feature_transformer(feature_name, seed=feature_seed, n_jobs=n_jobs, device=device)
     t0 = perf_counter()
     Xt = transformer.fit_transform(X)
     if verbose >= 3:
@@ -309,9 +309,9 @@ def _transform_inline(feature_id, X_path, model_dir, output_dir, dtype=np.float6
     Xt = transformer.transform(X)
     save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
 
-def _fit_transform_inline(feature_name, feature_seed, n_jobs, X_path, model_dir, output_dir, feature_id, dtype=np.float64):
+def _fit_transform_inline(feature_name, feature_seed, n_jobs, X_path, model_dir, output_dir, feature_id, dtype=np.float64, device="cpu"):
     X = np.load(X_path, allow_pickle=True)
-    transformer = get_feature_transformer(feature_name, seed=feature_seed, n_jobs=n_jobs)
+    transformer = get_feature_transformer(feature_name, seed=feature_seed, n_jobs=n_jobs, device=device)
     Xt = transformer.fit_transform(X)
     save_model(transformer, f"transformer_{feature_id}", model_dir)
     save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
@@ -482,11 +482,12 @@ class LokyStackerV10Base(BaseClassifier):
 
     def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0,
                  model_names=None, n_repetitions=1, feature_dtype=None, stacking_models=None,
-                 selection=None):
+                 selection=None, n_gpus=0):
         super().__init__()
         self.k_folds = int(k_folds)
         self.random_state = random_state
         self.n_jobs = int(n_jobs)
+        self.n_gpus = int(n_gpus)
         self.keep_features = bool(keep_features)
         self.verbose = int(verbose)
         self.n_repetitions = int(n_repetitions)
@@ -525,6 +526,10 @@ class LokyStackerV10Base(BaseClassifier):
         self._fallback_path: Path = self._model_dir / "fallback.pkl"
 
     # ----------------- utils -----------------
+
+    @property
+    def _device(self) -> str:
+        return "cuda" if self.n_gpus != 0 else "cpu"
 
     def _get_feature_seed(self) -> int:
         return int(self.feature_seed.integers(0, 2**31 - 1, dtype=np.int32))
@@ -698,12 +703,12 @@ class LokyStackerV10Base(BaseClassifier):
                 _run_in_subprocess(
                     _fit_transform_in_subprocess,
                     (ft.feature_name, ft.feature_seed, self.n_jobs,
-                     X_path, str(self._model_dir), directory, ft.get_feature_id(), self.feature_dtype, self.verbose),
+                     X_path, str(self._model_dir), directory, ft.get_feature_id(), self.feature_dtype, self.verbose, self._device),
                 )
             else:
                 _fit_transform_inline(
                     ft.feature_name, ft.feature_seed, self.n_jobs,
-                    X_path, str(self._model_dir), directory, ft.get_feature_id(), self.feature_dtype,
+                    X_path, str(self._model_dir), directory, ft.get_feature_id(), self.feature_dtype, self._device,
                 )
             Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
             size_mb = Xt.nbytes / (1024 * 1024)
@@ -771,7 +776,8 @@ class LokyStackerV10Base(BaseClassifier):
             ).decode().strip().splitlines())
         except Exception:
             _gpu_smi = 0
-        self.log(f"GPUs set/available[torch]/available[smi]/used/ 0/{_gpu_torch}/{_gpu_smi}/0", level=1, start_time=fit_start)
+        _gpu_used = 1 if self.n_gpus != 0 else 0
+        self.log(f"GPUs set/available[torch]/available[smi]/used/ {self.n_gpus}/{_gpu_torch}/{_gpu_smi}/{_gpu_used}", level=1, start_time=fit_start)
 
         os.makedirs(self._model_dir, exist_ok=True)
         os.makedirs(self._tmpdir, exist_ok=True)
@@ -1215,8 +1221,9 @@ def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
     return all_folds
 
 class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
-    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1):
-        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=False, verbose=verbose)
+    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1, n_gpus=0):
+        assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=False, verbose=verbose, n_gpus=n_gpus)
 
 
 class AutoSelectKBestRegressor(BaseEstimator, RegressorMixin):
