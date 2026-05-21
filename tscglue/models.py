@@ -762,7 +762,7 @@ class LokyStackerV10Base(BaseClassifier):
         self.log(f"Starting fit, run_dir={self._base_dir}, n_jobs={self.n_jobs}", level=1, start_time=fit_start)
         _cpu_max = os.cpu_count() or 1
         _cpu_used = _cpu_max if self.n_jobs == -1 else self.n_jobs
-        self.log(f"CPUs set/available/used/ {self.n_jobs}/{_cpu_max}/{_cpu_used}", level=1, start_time=fit_start)
+        self.log(f"CPUs set/available/used/ {_cpu_used}/{_cpu_max}/{_cpu_used}", level=1, start_time=fit_start)
         try:
             import torch
             _gpu_torch = torch.cuda.device_count()
@@ -777,7 +777,7 @@ class LokyStackerV10Base(BaseClassifier):
         except Exception:
             _gpu_smi = 0
         _gpu_used = 1 if self.n_gpus != 0 else 0
-        self.log(f"GPUs set/available[torch]/available[smi]/used/ {self.n_gpus}/{_gpu_torch}/{_gpu_smi}/{_gpu_used}", level=1, start_time=fit_start)
+        self.log(f"GPUs set/available[torch]/available[smi]/used/ {_gpu_used}/{_gpu_torch}/{_gpu_smi}/{_gpu_used}", level=1, start_time=fit_start)
 
         os.makedirs(self._model_dir, exist_ok=True)
         os.makedirs(self._tmpdir, exist_ok=True)

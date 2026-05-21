@@ -40,11 +40,9 @@ class Chronos2Embedding(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
         return self
 
-    def _embed(self, X):
+    def _embed_channel(self, X):
         torch = _require_torch()
         pipeline = self._get_pipeline()
-        if X.shape[1] != 1:
-            raise ValueError(f"Chronos2Embedding only supports univariate series, got {X.shape[1]} channels.")
         n_batches = (len(X) + self.batch_size - 1) // self.batch_size
         with torch.inference_mode():
             reg_idx = -1 if self._is_bolt else -2
@@ -60,6 +58,11 @@ class Chronos2Embedding(BaseEstimator, TransformerMixin):
                 if self.verbose:
                     print(f"[Chronos2Embedding] batch {batch_idx + 1}/{n_batches}", flush=True)
         return np.vstack(all_embs)
+
+    def _embed(self, X):
+        if X.shape[1] == 1:
+            return self._embed_channel(X)
+        return np.hstack([self._embed_channel(X[:, i:i+1, :]) for i in range(X.shape[1])])
 
     def transform(self, X):
         emb = self._embed(X)
@@ -79,7 +82,7 @@ class MantisEmbedding(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
         return self
 
-    def _embed(self, X):
+    def _embed_channel(self, X):
         torch = _require_torch()
         import torch.nn.functional as F
         from mantis.architecture import MantisV2
@@ -92,6 +95,11 @@ class MantisEmbedding(BaseEstimator, TransformerMixin):
             torch.tensor(X, dtype=torch.float), size=512, mode='linear', align_corners=False
         ).numpy()
         return model.transform(X_r)
+
+    def _embed(self, X):
+        if X.shape[1] == 1:
+            return self._embed_channel(X)
+        return np.hstack([self._embed_channel(X[:, i:i+1, :]) for i in range(X.shape[1])])
 
     def transform(self, X):
         emb = self._embed(X)

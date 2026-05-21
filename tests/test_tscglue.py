@@ -41,7 +41,6 @@ def test_v10base_feature_dtype(feature_dtype):
     )
 
 
-@pytest.mark.skip(reason="TSCGlueClassifier foundation models (Chronos2) don't support multivariate yet")
 def test_model_on_multivariate():
     X_train, y_train, X_test, y_test = utils.load_dataset("BasicMotions")
 
@@ -54,7 +53,6 @@ def test_model_on_multivariate():
     assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
 
 
-@pytest.mark.skip(reason="TSCGlueClassifier foundation models (Chronos2) don't support multivariate yet")
 @pytest.mark.parametrize("encode_labels", [False, True], ids=["string_labels", "int_labels"])
 def test_label_dtype(encode_labels):
     """Test that inference works with both string and integer labels."""
