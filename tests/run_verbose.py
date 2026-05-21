@@ -1,15 +1,22 @@
 """Standalone script: run TSCGlueClassifier on synthetic data with max verbosity (CPU and GPU)."""
 
+import argparse
 import numpy as np
 from sklearn.metrics import accuracy_score
 from tscglue.models import TSCGlueClassifier
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n-train", type=int, default=60)
+    parser.add_argument("--n-test", type=int, default=20)
+    parser.add_argument("--series-len", type=int, default=50)
+    args = parser.parse_args()
+
     rng = np.random.default_rng(42)
-    X_train = rng.standard_normal((60, 1, 50)).astype(np.float32)
-    y_train = np.array(["a"] * 30 + ["b"] * 30)
-    X_test = rng.standard_normal((20, 1, 50)).astype(np.float32)
-    y_test = np.array(["a"] * 10 + ["b"] * 10)
+    X_train = rng.standard_normal((args.n_train, 1, args.series_len)).astype(np.float32)
+    y_train = np.array(["a"] * (args.n_train // 2) + ["b"] * (args.n_train - args.n_train // 2))
+    X_test = rng.standard_normal((args.n_test, 1, args.series_len)).astype(np.float32)
+    y_test = np.array(["a"] * (args.n_test // 2) + ["b"] * (args.n_test - args.n_test // 2))
 
     for n_gpus in [0, 1]:
         print(f"\n{'='*60}")
