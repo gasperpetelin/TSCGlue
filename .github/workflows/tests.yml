@@ -23,7 +23,7 @@ jobs:
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
     - name: Install dependencies
-      run: uv sync --extra cpu --extra dev
+      run: uv sync --extra cpu --extra dev --extra autogluon
 
     - name: Download foundation models
       run: make download-models
