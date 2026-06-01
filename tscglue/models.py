@@ -482,7 +482,7 @@ class LokyStackerV10Base(BaseClassifier):
 
     def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0,
                  model_names=None, n_repetitions=1, feature_dtype=None, stacking_models=None,
-                 selection=None, n_gpus=0):
+                 selection=None, n_gpus=0, runs_dir=None):
         super().__init__()
         self.k_folds = int(k_folds)
         self.random_state = random_state
@@ -494,12 +494,13 @@ class LokyStackerV10Base(BaseClassifier):
         self.feature_dtype = np.dtype(feature_dtype) if feature_dtype is not None else None
         self.stacking_models = stacking_models if stacking_models is not None else [self.STACKING_MODEL]
         self.selection = selection
+        self.runs_dir = runs_dir
 
         self.cv_splits = None
         self.feature_seed = np.random.default_rng(random_state)
 
         self._run_id = uuid.uuid4().hex[:16]
-        self._base_dir = Path(".", "tscglue_runs", self._run_id)
+        self._base_dir = Path(".", runs_dir if runs_dir is not None else "tscglue_runs", self._run_id)
         self._model_dir = self._base_dir / "models"
         self._tmpdir: Path | None = self._base_dir / "features_training"
 
@@ -1221,9 +1222,9 @@ def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
     return all_folds
 
 class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
-    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1, n_gpus=0):
+    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1, n_gpus=0, runs_dir=None):
         assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
-        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=False, verbose=verbose, n_gpus=n_gpus)
+        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=False, verbose=verbose, n_gpus=n_gpus, runs_dir=runs_dir)
 
 
 class AutoSelectKBestRegressor(BaseEstimator, RegressorMixin):
@@ -1354,17 +1355,18 @@ class TSCGlueRegressor(BaseRegressor):
                 ))
         return all_models
 
-    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1):
+    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1, runs_dir=None):
         super().__init__()
         self.random_state = random_state
         self.k_folds = int(k_folds)
         self.n_jobs = int(n_jobs)
         self.verbose = int(verbose)
         self.n_repetitions = int(n_repetitions)
+        self.runs_dir = runs_dir
 
         self._rng = np.random.default_rng(random_state)
         self._run_id = uuid.uuid4().hex[:16]
-        self._base_dir = Path(".", "tscglue_runs", self._run_id)
+        self._base_dir = Path(".", runs_dir if runs_dir is not None else "tscglue_runs", self._run_id)
         self._model_dir = self._base_dir / "models"
         self._tmpdir: Path = self._base_dir / "features_training"
         self._feature_dtype: np.dtype | None = None

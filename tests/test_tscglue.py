@@ -1,5 +1,7 @@
 """Tests for TSCGlueClassifier, TSCGlueRegressor, and LokyStackerV10Base."""
 
+import tempfile
+
 import numpy as np
 import pytest
 from aeon.datasets import load_regression
@@ -11,11 +13,12 @@ from tscglue import utils
 def test_model_accuracy_on_coffee():
     X_train, y_train, X_test, y_test = utils.load_dataset("Coffee")
 
-    model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10)
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10, runs_dir=tmp_dir)
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
 
+    accuracy = accuracy_score(y_test, y_pred)
     assert accuracy > 0.1, f"Accuracy {accuracy} is too low (<=0.1)"
     assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
 
@@ -25,13 +28,14 @@ def test_v10base_feature_dtype(feature_dtype):
     """Test that LokyStackerV10Base fit+predict works with different feature_dtype values."""
     X_train, y_train, X_test, y_test = utils.load_dataset("Coffee")
 
-    model = LokyStackerV10Base(
-        random_state=270, n_repetitions=1, k_folds=10, feature_dtype=feature_dtype,
-    )
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = LokyStackerV10Base(
+            random_state=270, n_repetitions=1, k_folds=10, feature_dtype=feature_dtype, runs_dir=tmp_dir,
+        )
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
 
+    accuracy = accuracy_score(y_test, y_pred)
     assert accuracy > 0.1, f"Accuracy {accuracy} is too low (<=0.1)"
     assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
 
@@ -44,11 +48,12 @@ def test_v10base_feature_dtype(feature_dtype):
 def test_model_on_multivariate():
     X_train, y_train, X_test, y_test = utils.load_dataset("BasicMotions")
 
-    model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10)
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10, runs_dir=tmp_dir)
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
 
+    accuracy = accuracy_score(y_test, y_pred)
     assert accuracy > 0.1, f"Accuracy {accuracy} is too low (<=0.1)"
     assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
 
@@ -65,12 +70,12 @@ def test_label_dtype(encode_labels):
         y_train_fit = y_train
         y_test_expected = y_test
 
-    model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10, n_jobs=1)
-    model.fit(X_train, y_train_fit)
-
-    y_pred = model.predict(X_test)
-    proba_per_model = model.predict_proba_per_model(X_test)
-    best_proba = proba_per_model[model.best_model]
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10, n_jobs=1, runs_dir=tmp_dir)
+        model.fit(X_train, y_train_fit)
+        y_pred = model.predict(X_test)
+        proba_per_model = model.predict_proba_per_model(X_test)
+        best_proba = proba_per_model[model.best_model]
 
     assert y_pred.shape == y_test_expected.shape
     assert best_proba.shape == (X_test.shape[0], len(model.classes_))
@@ -92,9 +97,11 @@ def _make_regression_data(n_train=40, n_test=15, n_channels=1, n_timesteps=30, s
 
 def test_regressor_fit_predict_basic():
     X_train, y_train, X_test, y_test = _make_regression_data()
-    model = TSCGlueRegressor(random_state=0, k_folds=3, n_jobs=1)
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_test)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCGlueRegressor(random_state=0, k_folds=3, n_jobs=1, runs_dir=tmp_dir)
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
 
     assert y_pred.shape == (len(X_test),), f"Expected shape ({len(X_test)},), got {y_pred.shape}"
     assert np.isfinite(y_pred).all(), "Predictions contain NaN or Inf"
@@ -103,10 +110,13 @@ def test_regressor_fit_predict_basic():
 
 def test_regressor_summary():
     X_train, y_train, X_test, _ = _make_regression_data()
-    model = TSCGlueRegressor(random_state=0, k_folds=3, n_jobs=1)
-    model.fit(X_train, y_train)
 
-    scores = model.summary()
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCGlueRegressor(random_state=0, k_folds=3, n_jobs=1, runs_dir=tmp_dir)
+        model.fit(X_train, y_train)
+        scores = model.summary()
+        scores_with_transforms = model.summary(return_transforms=True)
+
     assert len(scores) > 0
     for entry in scores:
         assert "model" in entry
@@ -117,7 +127,6 @@ def test_regressor_summary():
         assert np.isfinite(entry["oof_rmse"]), f"oof_rmse is not finite for {entry['model']}"
         assert np.isfinite(entry["oof_r2"]), f"oof_r2 is not finite for {entry['model']}"
 
-    scores_with_transforms = model.summary(return_transforms=True)
     assert len(scores_with_transforms) >= len(scores)
 
 
@@ -136,9 +145,10 @@ def test_regressor_univariate():
     X_train = _normalize(X_train)
     X_test = _normalize(X_test)
 
-    model = TSCGlueRegressor(random_state=0, k_folds=3, n_jobs=1)
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_test)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCGlueRegressor(random_state=0, k_folds=3, n_jobs=1, runs_dir=tmp_dir)
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
 
     assert y_pred.shape == (len(X_test),)
     assert np.isfinite(y_pred).all()
