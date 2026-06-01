@@ -1,14 +1,15 @@
+import multiprocessing
 import os
-import uuid
 import pickle
 import shutil
-import multiprocessing
+import uuid
 from collections import defaultdict
+from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Iterable, Tuple
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -16,7 +17,10 @@ from aeon.classification.base import BaseClassifier
 from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.classification.interval_based import RSTSF
 from aeon.regression.base import BaseRegressor
-from aeon.transformations.collection import ARCoefficientTransformer, BaseCollectionTransformer, PeriodogramTransformer
+from aeon.transformations.collection import (
+    ARCoefficientTransformer,
+    PeriodogramTransformer,
+)
 from aeon.transformations.collection.convolution_based import MultiRocket
 from aeon.transformations.collection.convolution_based._hydra import HydraTransformer
 from aeon.transformations.collection.interval_based import QUANTTransformer, RandomIntervals
@@ -27,16 +31,18 @@ from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor, RandomFo
 from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif, f_regression
 from sklearn.linear_model import RidgeClassifierCV, RidgeCV
 from sklearn.metrics import accuracy_score, r2_score
-from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
-from sklearn.utils.extmath import softmax
 from threadpoolctl import threadpool_limits
+
 from tscglue import utils
 from tscglue.utils import RidgeClassifierCVDecisionProba
 
 
 class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
-    def __init__(self, classifier=None, k=None, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
+    def __init__(
+        self, classifier=None, k=None, k_min=6000, k_max=35000, midpoint=300, steepness=0.010
+    ):
         self.classifier = classifier
         self.k = k
         self.k_min = k_min
@@ -80,6 +86,7 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
         # and scaling, some features have near-zero variance that passes VarianceThreshold
         # but f_classif still treats as constant. These features are harmless (never selected).
         import warnings
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             self.classifier_.fit(X, y)
@@ -101,7 +108,6 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
         return self.classifier_.predict_proba(X)
 
 
-
 def get_model_v6(name, seed=None, n_jobs=1, model_dir=None):
     """Returns (DictMultiScaler, classifier) for feature/stacking models, or (None, pipe) for series models."""
     if name == "multirockethydra-ridgecv":
@@ -115,8 +121,11 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None):
     elif name == "quant-etc":
         scaler = DictMultiScaler(scalers={"quant": NoScaler()})
         clf = ExtraTreesClassifier(
-            n_estimators=200, max_features=0.1, criterion="entropy",
-            random_state=seed, n_jobs=n_jobs,
+            n_estimators=200,
+            max_features=0.1,
+            criterion="entropy",
+            random_state=seed,
+            n_jobs=n_jobs,
         )
         return scaler, clf
     elif name == "rdst-ridgecv":
@@ -133,13 +142,16 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None):
         return scaler, clf
     elif name == "probability-tabicl":
         from tabicl import TabICLClassifier
+
         scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
         clf = TabICLClassifier(device="cpu", random_state=seed, n_jobs=1, kv_cache=False)
         return scaler, clf
     elif name == "probability-et":
         scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
         clf = ExtraTreesClassifier(
-            n_estimators=1000, random_state=seed, n_jobs=n_jobs,
+            n_estimators=1000,
+            random_state=seed,
+            n_jobs=n_jobs,
         )
         return scaler, clf
     elif name == "probability-rf":
@@ -148,13 +160,18 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None):
         return scaler, clf
     elif name == "probability-nn":
         from sklearn.neural_network import MLPClassifier
+
         scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
         clf = MLPClassifier(hidden_layer_sizes=(100,), max_iter=500, random_state=seed)
         return scaler, clf
     elif name == "probability-autogluon":
-        from autogluon.tabular.experimental import TabularClassifier
         import tempfile
-        ag_path = str(Path(model_dir) / f"ag_{uuid.uuid4().hex[:8]}") if model_dir else tempfile.mkdtemp()
+
+        from autogluon.tabular.experimental import TabularClassifier
+
+        ag_path = (
+            str(Path(model_dir) / f"ag_{uuid.uuid4().hex[:8]}") if model_dir else tempfile.mkdtemp()
+        )
         scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
         clf = TabularClassifier(path=ag_path, time_limit=60, presets="medium_quality", verbosity=0)
         return scaler, clf
@@ -164,6 +181,7 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None):
         return scaler, clf
     elif name == "fm-dummy":
         from sklearn.dummy import DummyClassifier
+
         scaler = DictMultiScaler(scalers={"mantis": NoScaler(), "chronos2": NoScaler()})
         clf = DummyClassifier(strategy="prior")
         return scaler, clf
@@ -173,6 +191,7 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None):
         return scaler, clf
     elif name == "tsfresh-rotf":
         from aeon.classification.sklearn import RotationForestClassifier
+
         scaler = DictMultiScaler(scalers={"tsfresh": NoScaler()})
         clf = RotationForestClassifier(n_estimators=200, n_jobs=n_jobs, random_state=seed)
         return scaler, clf
@@ -181,21 +200,27 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None):
     elif name == "rstsf-combined-etc":
         scaler = DictMultiScaler(scalers={"rstsf-combined": NoScaler()})
         clf = ExtraTreesClassifier(
-            n_estimators=200, criterion="entropy", class_weight="balanced",
-            max_features="sqrt", n_jobs=n_jobs, random_state=seed,
+            n_estimators=200,
+            criterion="entropy",
+            class_weight="balanced",
+            max_features="sqrt",
+            n_jobs=n_jobs,
+            random_state=seed,
         )
         return scaler, clf
     elif name == "rstsf-random-etc":
         scaler = DictMultiScaler(scalers={"rstsf-random": NoScaler()})
         clf = ExtraTreesClassifier(
-            n_estimators=200, criterion="entropy", class_weight="balanced",
-            max_features="sqrt", n_jobs=n_jobs, random_state=seed,
+            n_estimators=200,
+            criterion="entropy",
+            class_weight="balanced",
+            max_features="sqrt",
+            n_jobs=n_jobs,
+            random_state=seed,
         )
         return scaler, clf
     else:
         raise ValueError(f"Unknown model name: {name}")
-
-
 
 
 def save_array(X, name, directory, dtype=None, repetition=None):
@@ -207,28 +232,32 @@ def save_array(X, name, directory, dtype=None, repetition=None):
     size = os.path.getsize(path) / (1024 * 1024)
     return path, X.shape, size
 
+
 def read_array(name, directory, repetition=None, mmap_mode="r", allow_pickle=False):
     suffix = f"_r_{repetition}" if repetition is not None else ""
     path = f"{directory}/{name}{suffix}.npy"
     # TODO remove allow_pickle=True once all features/models are numpy arrays
     return np.load(path, mmap_mode=mmap_mode, allow_pickle=allow_pickle)
 
+
 def save_model(model, name, directory, repetition=None, fold=None):
     rep_suffix = f"_r_{repetition}" if repetition is not None else ""
     fold_suffix = f"_f_{fold}" if fold is not None else ""
     path = f"{directory}/{name}{rep_suffix}{fold_suffix}.pkl"
-    with open(path, 'wb') as f:
+    with open(path, "wb") as f:
         pickle.dump(model, f)
     size = os.path.getsize(path)
     return path, size
+
 
 def read_model(name, directory, repetition=None, fold=None):
     directory = str(directory)
     rep_suffix = f"_r_{repetition}" if repetition is not None else ""
     fold_suffix = f"_f_{fold}" if fold is not None else ""
     path = f"{directory}/{name}{rep_suffix}{fold_suffix}.pkl"
-    with open(path, 'rb') as f:
+    with open(path, "rb") as f:
         return pickle.load(f)
+
 
 class RDSTFloat64(RandomDilatedShapeletTransform):
     """RDST wrapper that casts input to float64 (numba requires it)."""
@@ -252,24 +281,31 @@ def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1, devic
             return HydraTransformer(n_jobs=n_jobs, random_state=seed)
         case "mantis":
             from tscglue.models_tsfm import MantisEmbedding
+
             return MantisEmbedding(device=device)
         case "chronos2":
             from tscglue.models_tsfm import Chronos2Embedding
+
             return Chronos2Embedding(device=device)
         case "tsfresh":
             from aeon.transformations.collection.feature_based import TSFresh
+
             return TSFresh(default_fc_parameters="efficient", n_jobs=n_jobs)
         case "rstsf-combined":
             from tscglue.interval_models import RSTSFCombinedTransformer
+
             return RSTSFCombinedTransformer(n_jobs=n_jobs, random_state=seed)
         case "rstsf-random":
             from tscglue.interval_models import RSTSFRandomTransformer
+
             return RSTSFRandomTransformer(n_jobs=n_jobs, random_state=seed)
         case _:
             raise ValueError(f"Unknown feature transformer type: {feature_type}")
 
+
 def _noop():
     return None
+
 
 def _run_in_subprocess(target, args):
     """Run target(*args) in a fresh spawned subprocess.
@@ -285,13 +321,19 @@ def _run_in_subprocess(target, args):
     if p.exitcode != 0:
         raise RuntimeError(f"Subprocess failed with exit code {p.exitcode}")
 
-def _fit_transformer_in_subprocess(feature_name, feature_seed, n_jobs, X_path, model_dir, feature_id):
+
+def _fit_transformer_in_subprocess(
+    feature_name, feature_seed, n_jobs, X_path, model_dir, feature_id
+):
     X = np.load(X_path, allow_pickle=True)
     transformer = get_feature_transformer(feature_name, seed=feature_seed, n_jobs=n_jobs)
     transformer.fit(X)
     save_model(transformer, f"transformer_{feature_id}", model_dir)
 
-def _transform_in_subprocess(feature_id, X_path, model_dir, output_dir, dtype=np.float64, verbose=0):
+
+def _transform_in_subprocess(
+    feature_id, X_path, model_dir, output_dir, dtype=np.float64, verbose=0
+):
     X = np.load(X_path, allow_pickle=True)
     transformer = read_model(f"transformer_{feature_id}", model_dir)
     t0 = perf_counter()
@@ -300,9 +342,23 @@ def _transform_in_subprocess(feature_id, X_path, model_dir, output_dir, dtype=np
         print(f"[subprocess] transform {feature_id}: {perf_counter() - t0:.4f}s")
     save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
 
-def _fit_transform_in_subprocess(feature_name, feature_seed, n_jobs, X_path, model_dir, output_dir, feature_id, dtype=np.float64, verbose=0, device="cpu"):
+
+def _fit_transform_in_subprocess(
+    feature_name,
+    feature_seed,
+    n_jobs,
+    X_path,
+    model_dir,
+    output_dir,
+    feature_id,
+    dtype=np.float64,
+    verbose=0,
+    device="cpu",
+):
     X = np.load(X_path, allow_pickle=True)
-    transformer = get_feature_transformer(feature_name, seed=feature_seed, n_jobs=n_jobs, device=device)
+    transformer = get_feature_transformer(
+        feature_name, seed=feature_seed, n_jobs=n_jobs, device=device
+    )
     t0 = perf_counter()
     Xt = transformer.fit_transform(X)
     if verbose >= 3:
@@ -310,18 +366,33 @@ def _fit_transform_in_subprocess(feature_name, feature_seed, n_jobs, X_path, mod
     save_model(transformer, f"transformer_{feature_id}", model_dir)
     save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
 
+
 def _transform_inline(feature_id, X_path, model_dir, output_dir, dtype=np.float64):
     X = np.load(X_path, allow_pickle=True)
     transformer = read_model(f"transformer_{feature_id}", model_dir)
     Xt = transformer.transform(X)
     save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
 
-def _fit_transform_inline(feature_name, feature_seed, n_jobs, X_path, model_dir, output_dir, feature_id, dtype=np.float64, device="cpu"):
+
+def _fit_transform_inline(
+    feature_name,
+    feature_seed,
+    n_jobs,
+    X_path,
+    model_dir,
+    output_dir,
+    feature_id,
+    dtype=np.float64,
+    device="cpu",
+):
     X = np.load(X_path, allow_pickle=True)
-    transformer = get_feature_transformer(feature_name, seed=feature_seed, n_jobs=n_jobs, device=device)
+    transformer = get_feature_transformer(
+        feature_name, seed=feature_seed, n_jobs=n_jobs, device=device
+    )
     Xt = transformer.fit_transform(X)
     save_model(transformer, f"transformer_{feature_id}", model_dir)
     save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
+
 
 @dataclass(frozen=True)
 class FeatureSpec:
@@ -330,7 +401,12 @@ class FeatureSpec:
     use_subprocess: bool = True
 
     def get_feature_id(self):
-        return f'{self.feature_name}_s_{self.feature_seed}' if self.feature_seed is not None else self.feature_name
+        return (
+            f"{self.feature_name}_s_{self.feature_seed}"
+            if self.feature_seed is not None
+            else self.feature_name
+        )
+
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -338,15 +414,16 @@ class ModelSpec:
     model_seed: int
     is_series: bool
     level: int
-    features: Tuple[FeatureSpec, ...]
+    features: tuple[FeatureSpec, ...]
     fold_seeds: tuple[int, ...]
 
     def get_model_id(self):
-        return f'{self.model_name}_s_{self.model_seed}'
+        return f"{self.model_name}_s_{self.model_seed}"
 
     @property
     def n_repetitions(self) -> int:
         return len(self.fold_seeds)
+
 
 def _load_feature_dict_v10(directory, feature_specs):
     """Load feature arrays using read_array with (feat_type, repetition) specs."""
@@ -358,7 +435,10 @@ def _load_feature_dict_v10(directory, feature_specs):
         feature_dict[feat_spec.feature_name] = read_array(f"Xt_{feat_id}", directory)
     return feature_dict
 
-def _predict_one_model_v10(model_id, model_name, is_series, directory, feature_specs, model_dir, fold):
+
+def _predict_one_model_v10(
+    model_id, model_name, is_series, directory, feature_specs, model_dir, fold
+):
     """Prediction function - loads model from disk, loads data via read_array."""
     X = read_array("X", directory)
     feature_dict = _load_feature_dict_v10(directory, feature_specs)
@@ -375,8 +455,19 @@ def _predict_one_model_v10(model_id, model_name, is_series, directory, feature_s
     predict_dur = perf_counter() - start_predict
     return (proba, clf.classes_, predict_dur, model_id)
 
-def _train_one_model_v10(fold_number, model_id, model_name, is_series, train_idx, val_idx, model_seed,
-                         directory, feature_specs, model_dir):
+
+def _train_one_model_v10(
+    fold_number,
+    model_id,
+    model_name,
+    is_series,
+    train_idx,
+    val_idx,
+    model_seed,
+    directory,
+    feature_specs,
+    model_dir,
+):
     """Training function - loads data via read_array, saves model to disk."""
     X = read_array("X", directory)
     y = read_array("y", directory)
@@ -397,11 +488,15 @@ def _train_one_model_v10(fold_number, model_id, model_name, is_series, train_idx
     train_dur = perf_counter() - start_train
     return (train_idx, val_idx, proba, clf.classes_, model_size, train_dur, model_id, fold_number)
 
+
 class LokyStackerV10Base(BaseClassifier):
     _tags = {"capability:multivariate": True}
 
     DEFAULT_MODEL_NAMES = [
-        "multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv", "rstsf",
+        "multirockethydra-bestk-p-ridgecv",
+        "quant-etc",
+        "rdst-p-ridgecv",
+        "rstsf",
     ]
     SERIES_MODELS = ["rstsf"]
     STACKING_MODEL = "probability-ridgecv"
@@ -410,7 +505,11 @@ class LokyStackerV10Base(BaseClassifier):
 
     def _get_feature_names(self, model_name: str) -> tuple[str, ...]:
         """Return required feature type names for a model."""
-        if model_name in ("multirockethydra-bestk-p-ridgecv", "multirockethydra-p-ridgecv", "multirockethydra-ridgecv"):
+        if model_name in (
+            "multirockethydra-bestk-p-ridgecv",
+            "multirockethydra-p-ridgecv",
+            "multirockethydra-ridgecv",
+        ):
             return ("multirocket", "hydra")
         elif model_name == "quant-etc":
             return ("quant",)
@@ -434,7 +533,11 @@ class LokyStackerV10Base(BaseClassifier):
         use_subprocess = feature_name not in self.NO_SUBPROCESS_FEATURES
         if feature_name in ("quant", "raw", "mantis", "chronos2", "tsfresh"):
             return FeatureSpec(feature_name=feature_name, use_subprocess=use_subprocess)
-        return FeatureSpec(feature_name=feature_name, feature_seed=int(group_rng.integers(0, 2**31 - 1)), use_subprocess=use_subprocess)
+        return FeatureSpec(
+            feature_name=feature_name,
+            feature_seed=int(group_rng.integers(0, 2**31 - 1)),
+            use_subprocess=use_subprocess,
+        )
 
     def build_model_specs(self, model_names: list[str]) -> list[ModelSpec]:
         """Build ModelSpec list from a flat list of model names.
@@ -487,9 +590,21 @@ class LokyStackerV10Base(BaseClassifier):
 
         return all_models
 
-    def __init__(self, random_state=None, k_folds=10, n_jobs=1, keep_features=False, verbose=0,
-                 model_names=None, n_repetitions=1, feature_dtype=None, stacking_models=None,
-                 selection=None, n_gpus=0, runs_dir=None):
+    def __init__(
+        self,
+        random_state=None,
+        k_folds=10,
+        n_jobs=1,
+        keep_features=False,
+        verbose=0,
+        model_names=None,
+        n_repetitions=1,
+        feature_dtype=None,
+        stacking_models=None,
+        selection=None,
+        n_gpus=0,
+        runs_dir=None,
+    ):
         super().__init__()
         self.k_folds = int(k_folds)
         self.random_state = random_state
@@ -499,7 +614,9 @@ class LokyStackerV10Base(BaseClassifier):
         self.verbose = int(verbose)
         self.n_repetitions = int(n_repetitions)
         self.feature_dtype = np.dtype(feature_dtype) if feature_dtype is not None else None
-        self.stacking_models = stacking_models if stacking_models is not None else [self.STACKING_MODEL]
+        self.stacking_models = (
+            stacking_models if stacking_models is not None else [self.STACKING_MODEL]
+        )
         self.selection = selection
         self.runs_dir = runs_dir
 
@@ -507,7 +624,9 @@ class LokyStackerV10Base(BaseClassifier):
         self.feature_seed = np.random.default_rng(random_state)
 
         self._run_id = uuid.uuid4().hex[:16]
-        self._base_dir = Path(".", runs_dir if runs_dir is not None else "tscglue_runs", self._run_id)
+        self._base_dir = Path(
+            ".", runs_dir if runs_dir is not None else "tscglue_runs", self._run_id
+        )
         self._model_dir = self._base_dir / "models"
         self._tmpdir: Path | None = self._base_dir / "features_training"
 
@@ -518,7 +637,9 @@ class LokyStackerV10Base(BaseClassifier):
         self.model_specs = self.build_model_specs(
             self.model_names if self.model_names is not None else self.DEFAULT_MODEL_NAMES
         )
-        self.best_model = self.stacking_models[0] if self.stacking_models else self.model_specs[0].get_model_id()
+        self.best_model = (
+            self.stacking_models[0] if self.stacking_models else self.model_specs[0].get_model_id()
+        )
         all_features: dict[str, FeatureSpec] = {}
         for spec in self.model_specs:
             for ft in spec.features:
@@ -643,7 +764,9 @@ class LokyStackerV10Base(BaseClassifier):
         model_preds = [p for p in predictions if p["model"] == model_name]
         if not model_preds:
             return predictions
-        classes = sorted({self._label_to_python(p["class"]) for p in model_preds}, key=self._label_sort_key)
+        classes = sorted(
+            {self._label_to_python(p["class"]) for p in model_preds}, key=self._label_sort_key
+        )
         class_to_idx = {c: i for i, c in enumerate(classes)}
         prob_sum = np.zeros((n_samples, len(classes)), dtype=np.float64)
         prob_count = np.zeros((n_samples, len(classes)), dtype=np.int32)
@@ -710,13 +833,30 @@ class LokyStackerV10Base(BaseClassifier):
             if ft.use_subprocess:
                 _run_in_subprocess(
                     _fit_transform_in_subprocess,
-                    (ft.feature_name, ft.feature_seed, self.n_jobs,
-                     X_path, str(self._model_dir), directory, ft.get_feature_id(), self.feature_dtype, self.verbose, self._device),
+                    (
+                        ft.feature_name,
+                        ft.feature_seed,
+                        self.n_jobs,
+                        X_path,
+                        str(self._model_dir),
+                        directory,
+                        ft.get_feature_id(),
+                        self.feature_dtype,
+                        self.verbose,
+                        self._device,
+                    ),
                 )
             else:
                 _fit_transform_inline(
-                    ft.feature_name, ft.feature_seed, self.n_jobs,
-                    X_path, str(self._model_dir), directory, ft.get_feature_id(), self.feature_dtype, self._device,
+                    ft.feature_name,
+                    ft.feature_seed,
+                    self.n_jobs,
+                    X_path,
+                    str(self._model_dir),
+                    directory,
+                    ft.get_feature_id(),
+                    self.feature_dtype,
+                    self._device,
                 )
             Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
             size_mb = Xt.nbytes / (1024 * 1024)
@@ -726,7 +866,14 @@ class LokyStackerV10Base(BaseClassifier):
                 level=1,
                 start_time=fit_start_time,
             )
-            self._transform_times.append({"model": ft.get_feature_id(), "level": None, "oof_accuracy": None, "train_time": [elapsed]})
+            self._transform_times.append(
+                {
+                    "model": ft.get_feature_id(),
+                    "level": None,
+                    "oof_accuracy": None,
+                    "train_time": [elapsed],
+                }
+            )
 
     def compute_features(self, X: np.ndarray, directory: str, start_time=None) -> None:
         compute_start = perf_counter()
@@ -738,11 +885,22 @@ class LokyStackerV10Base(BaseClassifier):
             if ft.use_subprocess:
                 _run_in_subprocess(
                     _transform_in_subprocess,
-                    (ft.get_feature_id(), X_path, str(self._model_dir), directory, self.feature_dtype, self.verbose),
+                    (
+                        ft.get_feature_id(),
+                        X_path,
+                        str(self._model_dir),
+                        directory,
+                        self.feature_dtype,
+                        self.verbose,
+                    ),
                 )
             else:
                 _transform_inline(
-                    ft.get_feature_id(), X_path, str(self._model_dir), directory, self.feature_dtype,
+                    ft.get_feature_id(),
+                    X_path,
+                    str(self._model_dir),
+                    directory,
+                    self.feature_dtype,
                 )
             Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
             size_mb = Xt.nbytes / (1024 * 1024)
@@ -767,25 +925,44 @@ class LokyStackerV10Base(BaseClassifier):
         fit_start = perf_counter()
         if self.feature_dtype is None:
             self.feature_dtype = np.asarray(X).dtype
-        self.log(f"Starting fit, run_dir={self._base_dir}, n_jobs={self.n_jobs}", level=1, start_time=fit_start)
+        self.log(
+            f"Starting fit, run_dir={self._base_dir}, n_jobs={self.n_jobs}",
+            level=1,
+            start_time=fit_start,
+        )
         _cpu_max = os.cpu_count() or 1
         _cpu_used = _cpu_max if self.n_jobs == -1 else self.n_jobs
-        self.log(f"CPUs set/available/used/ {_cpu_used}/{_cpu_max}/{_cpu_used}", level=1, start_time=fit_start)
+        self.log(
+            f"CPUs set/available/used/ {_cpu_used}/{_cpu_max}/{_cpu_used}",
+            level=1,
+            start_time=fit_start,
+        )
         try:
             import torch
+
             _gpu_torch = torch.cuda.device_count()
         except Exception:
             _gpu_torch = 0
         try:
             import subprocess
-            _gpu_smi = len(subprocess.check_output(
-                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                stderr=subprocess.DEVNULL
-            ).decode().strip().splitlines())
+
+            _gpu_smi = len(
+                subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                    stderr=subprocess.DEVNULL,
+                )
+                .decode()
+                .strip()
+                .splitlines()
+            )
         except Exception:
             _gpu_smi = 0
         _gpu_used = 1 if self.n_gpus != 0 else 0
-        self.log(f"GPUs set/available[torch]/available[smi]/used/ {_gpu_used}/{_gpu_torch}/{_gpu_smi}/{_gpu_used}", level=1, start_time=fit_start)
+        self.log(
+            f"GPUs set/available[torch]/available[smi]/used/ {_gpu_used}/{_gpu_torch}/{_gpu_smi}/{_gpu_used}",
+            level=1,
+            start_time=fit_start,
+        )
 
         os.makedirs(self._model_dir, exist_ok=True)
         os.makedirs(self._tmpdir, exist_ok=True)
@@ -793,11 +970,19 @@ class LokyStackerV10Base(BaseClassifier):
         t0 = perf_counter()
         save_array(X, "X", str(self._tmpdir), dtype=self.feature_dtype)
         save_array(y, "y", str(self._tmpdir))
-        self.log(f"Saved X and y to disk in {perf_counter() - t0:.2f}s (dtype={self.feature_dtype})", level=2, start_time=fit_start)
+        self.log(
+            f"Saved X and y to disk in {perf_counter() - t0:.2f}s (dtype={self.feature_dtype})",
+            level=2,
+            start_time=fit_start,
+        )
 
         _, counts = np.unique(y, return_counts=True)
         if np.any(counts < 2):
-            self.log("Some classes have fewer than 2 instances, fold training not possible", level=1, start_time=fit_start)
+            self.log(
+                "Some classes have fewer than 2 instances, fold training not possible",
+                level=1,
+                start_time=fit_start,
+            )
             self._fit_fallback(X, y, fit_start)
             return
 
@@ -815,13 +1000,18 @@ class LokyStackerV10Base(BaseClassifier):
                 stacker_fold_seed = self._get_feature_seed()
 
                 # -------- level 0 --------
-                expected_folds = {spec.get_model_id(): self.k_folds * spec.n_repetitions for spec in self.model_specs}
+                expected_folds = {
+                    spec.get_model_id(): self.k_folds * spec.n_repetitions
+                    for spec in self.model_specs
+                }
                 tasks = []
                 for spec in self.model_specs:
                     fold_rng = np.random.default_rng(spec.model_seed)
                     fold_counter = 0
                     for fold_seed in spec.fold_seeds:
-                        rep_splits = generate_folds(X, y, n_splits=self.k_folds, n_repetitions=1, random_state=fold_seed)
+                        rep_splits = generate_folds(
+                            X, y, n_splits=self.k_folds, n_repetitions=1, random_state=fold_seed
+                        )
                         for _, (train_idx, val_idx) in enumerate(rep_splits):
                             fold_model_seed = int(fold_rng.integers(0, 2**31 - 1))
                             tasks.append(
@@ -841,7 +1031,11 @@ class LokyStackerV10Base(BaseClassifier):
                             fold_counter += 1
 
                 n_workers = min(self.n_jobs, len(tasks))
-                self.log(f"Starting training with {n_workers} workers for {len(tasks)} models", level=2, start_time=fit_start)
+                self.log(
+                    f"Starting training with {n_workers} workers for {len(tasks)} models",
+                    level=2,
+                    start_time=fit_start,
+                )
 
                 futures = {executor.submit(_train_one_model_v10, *t): t for t in tasks}
                 model_groups = defaultdict(list)
@@ -852,9 +1046,20 @@ class LokyStackerV10Base(BaseClassifier):
                     fold_number = task[0]
                     model_id_task = task[1]
                     try:
-                        train_idx, val_idx, proba, classes_, model_size, train_dur, model_id_result, fold_number = future.result()
+                        (
+                            train_idx,
+                            val_idx,
+                            proba,
+                            classes_,
+                            model_size,
+                            train_dur,
+                            model_id_result,
+                            fold_number,
+                        ) = future.result()
                     except Exception as e:
-                        raise RuntimeError(f"Worker failed during training {model_id_task} fold {fold_number}: {e}") from e
+                        raise RuntimeError(
+                            f"Worker failed during training {model_id_task} fold {fold_number}: {e}"
+                        ) from e
 
                     self.log(
                         f"Trained {model_id_result} in {train_dur:.4f}s for f-{fold_number} "
@@ -875,13 +1080,30 @@ class LokyStackerV10Base(BaseClassifier):
                     model_groups[model_id_result].append(fold_number)
                     model_train_times[model_id_result].append(train_dur)
                     if len(model_groups[model_id_result]) == expected_folds[model_id_result]:
-                        self.log(f"Completed training for model {model_id_result}", level=2, start_time=fit_start)
+                        self.log(
+                            f"Completed training for model {model_id_result}",
+                            level=2,
+                            start_time=fit_start,
+                        )
                         del model_groups[model_id_result]
 
-                        predictions = self._save_model_predictions(predictions, model_id_result, n_samples=X.shape[0], level=0)
+                        predictions = self._save_model_predictions(
+                            predictions, model_id_result, n_samples=X.shape[0], level=0
+                        )
                         oof_acc = self._compute_oof_accuracy(y, model_id_result)
-                        self._oof_scores.append({"model": model_id_result, "level": 0, "oof_accuracy": oof_acc, "train_time": model_train_times.pop(model_id_result)})
-                        self.log(f"OOF acc (base) {model_id_result}: {oof_acc}", level=1, start_time=fit_start)
+                        self._oof_scores.append(
+                            {
+                                "model": model_id_result,
+                                "level": 0,
+                                "oof_accuracy": oof_acc,
+                                "train_time": model_train_times.pop(model_id_result),
+                            }
+                        )
+                        self.log(
+                            f"OOF acc (base) {model_id_result}: {oof_acc}",
+                            level=1,
+                            start_time=fit_start,
+                        )
 
                 # -------- stacking --------
                 prob_array = self._build_probability_array(n_samples=X.shape[0])
@@ -889,13 +1111,19 @@ class LokyStackerV10Base(BaseClassifier):
                     return
                 self.log("Starting stacking model training", level=2, start_time=fit_start)
                 if prob_array is None or np.isnan(prob_array).any():
-                    self.log("NaN values detected in probability array, skipping stacking", level=2, start_time=fit_start)
+                    self.log(
+                        "NaN values detected in probability array, skipping stacking",
+                        level=2,
+                        start_time=fit_start,
+                    )
                     self._fit_fallback(X, y, fit_start)
                     return
 
                 save_array(prob_array, "Xt_probabilities", str(self._tmpdir))
 
-                stacker_splits = generate_folds(X, y, n_splits=self.k_folds, n_repetitions=1, random_state=stacker_fold_seed)
+                stacker_splits = generate_folds(
+                    X, y, n_splits=self.k_folds, n_repetitions=1, random_state=stacker_fold_seed
+                )
                 stack_tasks = []
                 for model_name in self.stacking_models:
                     stack_fold_rng = np.random.default_rng(self._get_feature_seed())
@@ -917,7 +1145,11 @@ class LokyStackerV10Base(BaseClassifier):
                         )
 
                 n_workers = min(self.n_jobs, len(stack_tasks))
-                self.log(f"Starting stacking training with {n_workers} workers for {len(stack_tasks)} models", level=2, start_time=fit_start)
+                self.log(
+                    f"Starting stacking training with {n_workers} workers for {len(stack_tasks)} models",
+                    level=2,
+                    start_time=fit_start,
+                )
 
                 futures = {executor.submit(_train_one_model_v10, *t): t for t in stack_tasks}
                 model_groups = defaultdict(list)
@@ -928,9 +1160,20 @@ class LokyStackerV10Base(BaseClassifier):
                     fold_number = task[0]
                     model_id_task = task[1]
                     try:
-                        train_idx, val_idx, proba, classes_, model_size, train_dur, model_id_result, fold_number = future.result()
+                        (
+                            train_idx,
+                            val_idx,
+                            proba,
+                            classes_,
+                            model_size,
+                            train_dur,
+                            model_id_result,
+                            fold_number,
+                        ) = future.result()
                     except Exception as e:
-                        raise RuntimeError(f"Worker failed during stacking training {model_id_task} fold {fold_number}: {e}") from e
+                        raise RuntimeError(
+                            f"Worker failed during stacking training {model_id_task} fold {fold_number}: {e}"
+                        ) from e
 
                     self.log(
                         f"Trained {model_id_result} in {train_dur:.4f}s for f-{fold_number} "
@@ -951,13 +1194,30 @@ class LokyStackerV10Base(BaseClassifier):
                     model_groups[model_id_result].append(fold_number)
                     model_train_times[model_id_result].append(train_dur)
                     if len(model_groups[model_id_result]) == self.k_folds:
-                        self.log(f"Completed training for model {model_id_result}", level=2, start_time=fit_start)
+                        self.log(
+                            f"Completed training for model {model_id_result}",
+                            level=2,
+                            start_time=fit_start,
+                        )
                         del model_groups[model_id_result]
 
-                        predictions = self._save_model_predictions(predictions, model_id_result, n_samples=X.shape[0], level=1)
+                        predictions = self._save_model_predictions(
+                            predictions, model_id_result, n_samples=X.shape[0], level=1
+                        )
                         oof_acc = self._compute_oof_accuracy(y, model_id_result)
-                        self._oof_scores.append({"model": model_id_result, "level": 1, "oof_accuracy": oof_acc, "train_time": model_train_times.pop(model_id_result)})
-                        self.log(f"OOF acc (stack) {model_id_result}: {oof_acc}", level=1, start_time=fit_start)
+                        self._oof_scores.append(
+                            {
+                                "model": model_id_result,
+                                "level": 1,
+                                "oof_accuracy": oof_acc,
+                                "train_time": model_train_times.pop(model_id_result),
+                            }
+                        )
+                        self.log(
+                            f"OOF acc (stack) {model_id_result}: {oof_acc}",
+                            level=1,
+                            start_time=fit_start,
+                        )
 
                 self.log("Fit complete", level=1, start_time=fit_start)
                 self._select_best_model()
@@ -966,7 +1226,11 @@ class LokyStackerV10Base(BaseClassifier):
             if not self.keep_features and self._tmpdir and self._tmpdir.exists():
                 cleanup_start = perf_counter()
                 shutil.rmtree(self._tmpdir)
-                self.log(f"Cleaned up tmpdir in {perf_counter() - cleanup_start:.2f}s", level=2, start_time=fit_start)
+                self.log(
+                    f"Cleaned up tmpdir in {perf_counter() - cleanup_start:.2f}s",
+                    level=2,
+                    start_time=fit_start,
+                )
                 self._tmpdir = None
             if self.keep_features and self._tmpdir:
                 self.features_training_dir_ = str(self._tmpdir)
@@ -991,7 +1255,9 @@ class LokyStackerV10Base(BaseClassifier):
     # ----------------- inspection helpers -----------------
 
     def _get_training_dir(self) -> str:
-        d = getattr(self, "features_training_dir_", None) or (str(self._tmpdir) if self._tmpdir else None)
+        d = getattr(self, "features_training_dir_", None) or (
+            str(self._tmpdir) if self._tmpdir else None
+        )
         if not self.keep_features or not d or not os.path.exists(d):
             raise RuntimeError(
                 f"Not available. Set keep_features=True before fitting. keep_features={self.keep_features}, dir={d}"
@@ -1047,7 +1313,9 @@ class LokyStackerV10Base(BaseClassifier):
                 # compute features (transform-only; transformers already trained)
                 save_array(X, "X", str(features_infer), dtype=self.feature_dtype)
                 self.compute_features(X, str(features_infer), start_time=predict_start)
-                self.log("Computed and saved features for prediction", level=1, start_time=predict_start)
+                self.log(
+                    "Computed and saved features for prediction", level=1, start_time=predict_start
+                )
 
                 predictions = []
                 # ---- level 0 predictions ----
@@ -1079,12 +1347,22 @@ class LokyStackerV10Base(BaseClassifier):
                     try:
                         proba, classes_, predict_dur, model_id_res = future.result()
                     except Exception as e:
-                        raise RuntimeError(f"Worker failed during prediction {model_id_task}: {e}") from e
+                        raise RuntimeError(
+                            f"Worker failed during prediction {model_id_task}: {e}"
+                        ) from e
 
-                    self.log(f"Predicted {model_id_res} in {predict_dur:.4f}s", level=2, start_time=predict_start)
-                    predictions.extend(self.add_probabilities(proba, classes_, model_id_res, level=0))
+                    self.log(
+                        f"Predicted {model_id_res} in {predict_dur:.4f}s",
+                        level=2,
+                        start_time=predict_start,
+                    )
+                    predictions.extend(
+                        self.add_probabilities(proba, classes_, model_id_res, level=0)
+                    )
 
-                self.log("Completed all first-level model predictions", level=1, start_time=predict_start)
+                self.log(
+                    "Completed all first-level model predictions", level=1, start_time=predict_start
+                )
 
                 # ---- build stacking matrix ----
                 if features_infer.exists():
@@ -1093,7 +1371,9 @@ class LokyStackerV10Base(BaseClassifier):
                 self._tmpdir = features_stack
 
                 if self._probability_columns is None:
-                    raise RuntimeError("Probability column metadata missing. Fit the model before predicting.")
+                    raise RuntimeError(
+                        "Probability column metadata missing. Fit the model before predicting."
+                    )
                 prob_array = self._aggregate_prediction_matrix(
                     predictions=predictions,
                     n_samples=X.shape[0],
@@ -1132,10 +1412,18 @@ class LokyStackerV10Base(BaseClassifier):
                     try:
                         proba, classes_, predict_dur, model_id_res = future.result()
                     except Exception as e:
-                        raise RuntimeError(f"Worker failed during stacking prediction {model_id_task}: {e}") from e
+                        raise RuntimeError(
+                            f"Worker failed during stacking prediction {model_id_task}: {e}"
+                        ) from e
 
-                    self.log(f"Predicted {model_id_res} in {predict_dur:.4f}s", level=2, start_time=predict_start)
-                    predictions.extend(self.add_probabilities(proba, classes_, model_id_res, level=1))
+                    self.log(
+                        f"Predicted {model_id_res} in {predict_dur:.4f}s",
+                        level=2,
+                        start_time=predict_start,
+                    )
+                    predictions.extend(
+                        self.add_probabilities(proba, classes_, model_id_res, level=1)
+                    )
 
             self.log("Completed all stacking model predictions", level=1, start_time=predict_start)
 
@@ -1160,8 +1448,9 @@ class LokyStackerV10Base(BaseClassifier):
 
     def predict_per_model(self, X: np.ndarray) -> dict[str, np.ndarray]:
         proba_per_model = self.predict_proba_per_model(X)
-        return {name: self.classes_[np.argmax(proba, axis=1)] for name, proba in proba_per_model.items()}
-
+        return {
+            name: self.classes_[np.argmax(proba, axis=1)] for name, proba in proba_per_model.items()
+        }
 
 
 class LokyStackerV10RSTSFRandom(LokyStackerV10Base):
@@ -1171,8 +1460,11 @@ class LokyStackerV10RSTSFRandom(LokyStackerV10Base):
     """
 
     DEFAULT_MODEL_NAMES = [
-        "multirockethydra-bestk-p-ridgecv", "quant-etc", "rdst-p-ridgecv",
-        "rstsf-random-etc", "fm-p-ridgecv",
+        "multirockethydra-bestk-p-ridgecv",
+        "quant-etc",
+        "rdst-p-ridgecv",
+        "rstsf-random-etc",
+        "fm-p-ridgecv",
     ]
     SERIES_MODELS = []
     NO_SUBPROCESS_FEATURES: set[str] = {"multirocket", "rdst", "rstsf-random"}
@@ -1183,10 +1475,20 @@ class LokyStackerV10RSTSFRandomMultiStack(LokyStackerV10RSTSFRandom):
 
     STACKING_MODEL = "probability-ridgecv"
 
-    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, selection="best-stacking"):
+    def __init__(
+        self, random_state=None, k_folds=10, n_jobs=1, verbose=0, selection="best-stacking"
+    ):
         super().__init__(
-            random_state=random_state, k_folds=k_folds, n_jobs=n_jobs, verbose=verbose,
-            stacking_models=["probability-ridgecv", "probability-et", "probability-nn", "probability-rf"],
+            random_state=random_state,
+            k_folds=k_folds,
+            n_jobs=n_jobs,
+            verbose=verbose,
+            stacking_models=[
+                "probability-ridgecv",
+                "probability-et",
+                "probability-nn",
+                "probability-rf",
+            ],
             selection=selection,
         )
 
@@ -1198,24 +1500,60 @@ def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
         all_folds.extend(folds)
     return all_folds
 
+
 class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
-    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1, n_gpus=0, runs_dir=None):
+    def __init__(
+        self,
+        random_state=None,
+        k_folds=10,
+        n_jobs=1,
+        verbose=0,
+        n_repetitions=1,
+        n_gpus=0,
+        runs_dir=None,
+    ):
         assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
-        super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=False, verbose=verbose, n_gpus=n_gpus, runs_dir=runs_dir)
+        super().__init__(
+            random_state=random_state,
+            n_repetitions=n_repetitions,
+            k_folds=k_folds,
+            n_jobs=n_jobs,
+            keep_features=False,
+            verbose=verbose,
+            n_gpus=n_gpus,
+            runs_dir=runs_dir,
+        )
 
 
 class TSCAGGlueClassifier(LokyStackerV10RSTSFRandom):
-    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1, n_gpus=0, runs_dir=None):
+    def __init__(
+        self,
+        random_state=None,
+        k_folds=10,
+        n_jobs=1,
+        verbose=0,
+        n_repetitions=1,
+        n_gpus=0,
+        runs_dir=None,
+    ):
         assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
         super().__init__(
-            random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs,
-            keep_features=False, verbose=verbose, n_gpus=n_gpus, runs_dir=runs_dir,
+            random_state=random_state,
+            n_repetitions=n_repetitions,
+            k_folds=k_folds,
+            n_jobs=n_jobs,
+            keep_features=False,
+            verbose=verbose,
+            n_gpus=n_gpus,
+            runs_dir=runs_dir,
             stacking_models=["probability-autogluon"],
         )
 
 
 class AutoSelectKBestRegressor(BaseEstimator, RegressorMixin):
-    def __init__(self, regressor=None, k=None, k_min=6000, k_max=35000, midpoint=300, steepness=0.010):
+    def __init__(
+        self, regressor=None, k=None, k_min=6000, k_max=35000, midpoint=300, steepness=0.010
+    ):
         self.regressor = regressor
         self.k = k
         self.k_min = k_min
@@ -1225,18 +1563,27 @@ class AutoSelectKBestRegressor(BaseEstimator, RegressorMixin):
 
     def _optimal_k(self, n_train: int) -> int:
         return int(
-            self.k_min + (self.k_max - self.k_min) / (1.0 + np.exp(-self.steepness * (n_train - self.midpoint)))
+            self.k_min
+            + (self.k_max - self.k_min)
+            / (1.0 + np.exp(-self.steepness * (n_train - self.midpoint)))
         )
 
     def fit(self, X, y):
         k = self.k if self.k is not None else min(self._optimal_k(X.shape[0]), X.shape[1])
-        reg = RidgeCV(alphas=np.logspace(-3, 3, 10)) if self.regressor is None else clone(self.regressor)
-        self.regressor_ = Pipeline([
-            ("var", VarianceThreshold()),
-            ("select", SelectKBest(score_func=f_regression, k=k)),
-            ("reg", reg),
-        ])
+        reg = (
+            RidgeCV(alphas=np.logspace(-3, 3, 10))
+            if self.regressor is None
+            else clone(self.regressor)
+        )
+        self.regressor_ = Pipeline(
+            [
+                ("var", VarianceThreshold()),
+                ("select", SelectKBest(score_func=f_regression, k=k)),
+                ("reg", reg),
+            ]
+        )
         import warnings
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             self.regressor_.fit(X, y)
@@ -1252,13 +1599,17 @@ def get_model_reg(name, seed=None, n_jobs=1):
         return scaler, AutoSelectKBestRegressor()
     elif name == "quant-etr":
         scaler = DictMultiScaler(scalers={"quant": NoScaler()})
-        return scaler, ExtraTreesRegressor(n_estimators=200, max_features=0.1, random_state=seed, n_jobs=n_jobs)
+        return scaler, ExtraTreesRegressor(
+            n_estimators=200, max_features=0.1, random_state=seed, n_jobs=n_jobs
+        )
     elif name == "rdst-ridgecv":
         scaler = DictMultiScaler(scalers={"rdst": StandardScaler()})
         return scaler, RidgeCV(alphas=np.logspace(-4, 4, 20))
     elif name == "rstsf-random-etr":
         scaler = DictMultiScaler(scalers={"rstsf-random": NoScaler()})
-        return scaler, ExtraTreesRegressor(n_estimators=200, max_features="sqrt", random_state=seed, n_jobs=n_jobs)
+        return scaler, ExtraTreesRegressor(
+            n_estimators=200, max_features="sqrt", random_state=seed, n_jobs=n_jobs
+        )
     elif name == "prediction-ridgecv":
         scaler = DictMultiScaler(scalers={"predictions": StandardScaler()})
         return scaler, RidgeCV(alphas=np.logspace(-3, 3, 20))
@@ -1266,8 +1617,17 @@ def get_model_reg(name, seed=None, n_jobs=1):
         raise ValueError(f"Unknown regressor model: {name}")
 
 
-def _train_one_model_reg(fold_number, model_id, model_name, train_idx, val_idx, model_seed,
-                          directory, feature_specs, model_dir):
+def _train_one_model_reg(
+    fold_number,
+    model_id,
+    model_name,
+    train_idx,
+    val_idx,
+    model_seed,
+    directory,
+    feature_specs,
+    model_dir,
+):
     X = read_array("X", directory)
     y = read_array("y", directory)
     feature_dict = _load_feature_dict_v10(directory, feature_specs)
@@ -1310,7 +1670,11 @@ class TSCGlueRegressor(BaseRegressor):
         use_subprocess = feature_name not in self.NO_SUBPROCESS_FEATURES
         if feature_name == "quant":
             return FeatureSpec(feature_name=feature_name, use_subprocess=use_subprocess)
-        return FeatureSpec(feature_name=feature_name, feature_seed=int(group_rng.integers(0, 2**31 - 1)), use_subprocess=use_subprocess)
+        return FeatureSpec(
+            feature_name=feature_name,
+            feature_seed=int(group_rng.integers(0, 2**31 - 1)),
+            use_subprocess=use_subprocess,
+        )
 
     def _build_model_specs(self, model_names: list[str]) -> list[ModelSpec]:
         groups: list[list[str]] = []
@@ -1332,17 +1696,29 @@ class TSCGlueRegressor(BaseRegressor):
                     if ft_name not in group_features:
                         group_features[ft_name] = self._make_feature_spec(ft_name, group_rng)
             for model_name in group:
-                features = tuple(group_features[ft_name] for ft_name in self._get_feature_names(model_name))
+                features = tuple(
+                    group_features[ft_name] for ft_name in self._get_feature_names(model_name)
+                )
                 model_seed = self._get_seed()
                 fold_seed_rng = np.random.default_rng(model_seed)
-                fold_seeds = tuple(int(fold_seed_rng.integers(0, 2**31 - 1)) for _ in range(self.n_repetitions))
-                all_models.append(ModelSpec(
-                    model_name=model_name, model_seed=model_seed, is_series=False, level=0,
-                    features=features, fold_seeds=fold_seeds,
-                ))
+                fold_seeds = tuple(
+                    int(fold_seed_rng.integers(0, 2**31 - 1)) for _ in range(self.n_repetitions)
+                )
+                all_models.append(
+                    ModelSpec(
+                        model_name=model_name,
+                        model_seed=model_seed,
+                        is_series=False,
+                        level=0,
+                        features=features,
+                        fold_seeds=fold_seeds,
+                    )
+                )
         return all_models
 
-    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1, runs_dir=None):
+    def __init__(
+        self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1, runs_dir=None
+    ):
         super().__init__()
         self.random_state = random_state
         self.k_folds = int(k_folds)
@@ -1353,7 +1729,9 @@ class TSCGlueRegressor(BaseRegressor):
 
         self._rng = np.random.default_rng(random_state)
         self._run_id = uuid.uuid4().hex[:16]
-        self._base_dir = Path(".", runs_dir if runs_dir is not None else "tscglue_runs", self._run_id)
+        self._base_dir = Path(
+            ".", runs_dir if runs_dir is not None else "tscglue_runs", self._run_id
+        )
         self._model_dir = self._base_dir / "models"
         self._tmpdir: Path = self._base_dir / "features_training"
         self._feature_dtype: np.dtype | None = None
@@ -1403,21 +1781,44 @@ class TSCGlueRegressor(BaseRegressor):
             if ft.use_subprocess:
                 _run_in_subprocess(
                     _fit_transform_in_subprocess,
-                    (ft.feature_name, ft.feature_seed, self.n_jobs, X_path,
-                     str(self._model_dir), directory, ft.get_feature_id(), self._feature_dtype, self.verbose),
+                    (
+                        ft.feature_name,
+                        ft.feature_seed,
+                        self.n_jobs,
+                        X_path,
+                        str(self._model_dir),
+                        directory,
+                        ft.get_feature_id(),
+                        self._feature_dtype,
+                        self.verbose,
+                    ),
                 )
             else:
                 _fit_transform_inline(
-                    ft.feature_name, ft.feature_seed, self.n_jobs, X_path,
-                    str(self._model_dir), directory, ft.get_feature_id(), self._feature_dtype,
+                    ft.feature_name,
+                    ft.feature_seed,
+                    self.n_jobs,
+                    X_path,
+                    str(self._model_dir),
+                    directory,
+                    ft.get_feature_id(),
+                    self._feature_dtype,
                 )
             Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
             elapsed = perf_counter() - t0
             self.log(
-                f"Fit+transformed {ft.get_feature_id()} features {Xt.shape} ({Xt.nbytes / (1024*1024):.2f} MB) dtype={Xt.dtype} in {elapsed:.4f}s",
-                level=1, start_time=fit_start_time,
+                f"Fit+transformed {ft.get_feature_id()} features {Xt.shape} ({Xt.nbytes / (1024 * 1024):.2f} MB) dtype={Xt.dtype} in {elapsed:.4f}s",
+                level=1,
+                start_time=fit_start_time,
             )
-            self._transform_times.append({"model": ft.get_feature_id(), "level": None, "oof_rmse": None, "train_time": [elapsed]})
+            self._transform_times.append(
+                {
+                    "model": ft.get_feature_id(),
+                    "level": None,
+                    "oof_rmse": None,
+                    "train_time": [elapsed],
+                }
+            )
 
     def _compute_features(self, X: np.ndarray, directory: str, start_time=None) -> None:
         X_path = f"{directory}/X.npy"
@@ -1428,14 +1829,28 @@ class TSCGlueRegressor(BaseRegressor):
             if ft.use_subprocess:
                 _run_in_subprocess(
                     _transform_in_subprocess,
-                    (ft.get_feature_id(), X_path, str(self._model_dir), directory, self._feature_dtype, self.verbose),
+                    (
+                        ft.get_feature_id(),
+                        X_path,
+                        str(self._model_dir),
+                        directory,
+                        self._feature_dtype,
+                        self.verbose,
+                    ),
                 )
             else:
-                _transform_inline(ft.get_feature_id(), X_path, str(self._model_dir), directory, self._feature_dtype)
+                _transform_inline(
+                    ft.get_feature_id(),
+                    X_path,
+                    str(self._model_dir),
+                    directory,
+                    self._feature_dtype,
+                )
             Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
             self.log(
                 f"Computed {ft.get_feature_id()} features {Xt.shape} in {perf_counter() - t0:.4f}s",
-                level=1, start_time=start_time,
+                level=1,
+                start_time=start_time,
             )
 
     def _fit(self, X, y):
@@ -1451,21 +1866,35 @@ class TSCGlueRegressor(BaseRegressor):
 
         n_samples = X.shape[0]
         oof_preds = {spec.get_model_id(): np.zeros(n_samples) for spec in self.model_specs}
-        oof_counts = {spec.get_model_id(): np.zeros(n_samples, dtype=int) for spec in self.model_specs}
-        expected_folds = {spec.get_model_id(): self.k_folds * spec.n_repetitions for spec in self.model_specs}
+        oof_counts = {
+            spec.get_model_id(): np.zeros(n_samples, dtype=int) for spec in self.model_specs
+        }
+        expected_folds = {
+            spec.get_model_id(): self.k_folds * spec.n_repetitions for spec in self.model_specs
+        }
 
         tasks = []
         for spec in self.model_specs:
             fold_rng = np.random.default_rng(spec.model_seed)
             fold_counter = 0
             for fold_seed in spec.fold_seeds:
-                for train_idx, val_idx in generate_folds(X, y, n_splits=self.k_folds, n_repetitions=1, random_state=fold_seed):
+                for train_idx, val_idx in generate_folds(
+                    X, y, n_splits=self.k_folds, n_repetitions=1, random_state=fold_seed
+                ):
                     fold_model_seed = int(fold_rng.integers(0, 2**31 - 1))
-                    tasks.append((
-                        fold_counter, spec.get_model_id(), spec.model_name,
-                        train_idx, val_idx, fold_model_seed,
-                        str(self._tmpdir), list(spec.features), str(self._model_dir),
-                    ))
+                    tasks.append(
+                        (
+                            fold_counter,
+                            spec.get_model_id(),
+                            spec.model_name,
+                            train_idx,
+                            val_idx,
+                            fold_model_seed,
+                            str(self._tmpdir),
+                            list(spec.features),
+                            str(self._model_dir),
+                        )
+                    )
                     fold_counter += 1
 
         mp_ctx = multiprocessing.get_context("forkserver")
@@ -1479,11 +1908,25 @@ class TSCGlueRegressor(BaseRegressor):
                 for future in as_completed(futures):
                     fold_number, model_id_task = futures[future][0], futures[future][1]
                     try:
-                        train_idx, val_idx, preds, model_size, train_dur, model_id_result, fold_number = future.result()
+                        (
+                            train_idx,
+                            val_idx,
+                            preds,
+                            model_size,
+                            train_dur,
+                            model_id_result,
+                            fold_number,
+                        ) = future.result()
                     except Exception as e:
-                        raise RuntimeError(f"Worker failed training {model_id_task} fold {fold_number}: {e}") from e
+                        raise RuntimeError(
+                            f"Worker failed training {model_id_task} fold {fold_number}: {e}"
+                        ) from e
 
-                    self.log(f"Trained {model_id_result} in {train_dur:.4f}s for f-{fold_number}", level=2, start_time=fit_start)
+                    self.log(
+                        f"Trained {model_id_result} in {train_dur:.4f}s for f-{fold_number}",
+                        level=2,
+                        start_time=fit_start,
+                    )
                     oof_preds[model_id_result][val_idx] += preds
                     oof_counts[model_id_result][val_idx] += 1
                     model_groups[model_id_result].append(fold_number)
@@ -1492,15 +1935,26 @@ class TSCGlueRegressor(BaseRegressor):
                     if len(model_groups[model_id_result]) == expected_folds[model_id_result]:
                         del model_groups[model_id_result]
                         counts = oof_counts[model_id_result]
-                        oof_preds[model_id_result] = np.where(counts > 0, oof_preds[model_id_result] / counts, np.nan)
+                        oof_preds[model_id_result] = np.where(
+                            counts > 0, oof_preds[model_id_result] / counts, np.nan
+                        )
                         residuals = y - oof_preds[model_id_result]
-                        oof_rmse = float(np.sqrt(np.nanmean(residuals ** 2)))
+                        oof_rmse = float(np.sqrt(np.nanmean(residuals**2)))
                         oof_r2 = float(r2_score(y, oof_preds[model_id_result]))
-                        self._oof_scores.append({
-                            "model": model_id_result, "level": 0,
-                            "oof_rmse": oof_rmse, "oof_r2": oof_r2, "train_time": model_train_times.pop(model_id_result),
-                        })
-                        self.log(f"OOF RMSE (base) {model_id_result}: {oof_rmse:.4f}  R²: {oof_r2:.4f}", level=1, start_time=fit_start)
+                        self._oof_scores.append(
+                            {
+                                "model": model_id_result,
+                                "level": 0,
+                                "oof_rmse": oof_rmse,
+                                "oof_r2": oof_r2,
+                                "train_time": model_train_times.pop(model_id_result),
+                            }
+                        )
+                        self.log(
+                            f"OOF RMSE (base) {model_id_result}: {oof_rmse:.4f}  R²: {oof_r2:.4f}",
+                            level=1,
+                            start_time=fit_start,
+                        )
 
                 if not self.stacking_models:
                     return
@@ -1510,7 +1964,9 @@ class TSCGlueRegressor(BaseRegressor):
                 save_array(oof_matrix, "Xt_predictions", str(self._tmpdir))
 
                 stacker_fold_seed = self._get_seed()
-                stacker_splits = generate_folds(X, y, n_splits=self.k_folds, n_repetitions=1, random_state=stacker_fold_seed)
+                stacker_splits = generate_folds(
+                    X, y, n_splits=self.k_folds, n_repetitions=1, random_state=stacker_fold_seed
+                )
                 stack_oof_preds = {m: np.zeros(n_samples) for m in self.stacking_models}
                 stack_oof_counts = {m: np.zeros(n_samples, dtype=int) for m in self.stacking_models}
                 model_groups = defaultdict(list)
@@ -1521,21 +1977,43 @@ class TSCGlueRegressor(BaseRegressor):
                     stack_fold_rng = np.random.default_rng(self._get_seed())
                     for fold_no, (train_idx, val_idx) in enumerate(stacker_splits):
                         stack_fold_seed = int(stack_fold_rng.integers(0, 2**31 - 1))
-                        stack_tasks.append((
-                            fold_no, model_name, model_name,
-                            train_idx, val_idx, stack_fold_seed,
-                            str(self._tmpdir), [FeatureSpec(feature_name="predictions")], str(self._model_dir),
-                        ))
+                        stack_tasks.append(
+                            (
+                                fold_no,
+                                model_name,
+                                model_name,
+                                train_idx,
+                                val_idx,
+                                stack_fold_seed,
+                                str(self._tmpdir),
+                                [FeatureSpec(feature_name="predictions")],
+                                str(self._model_dir),
+                            )
+                        )
 
                 futures = {executor.submit(_train_one_model_reg, *t): t for t in stack_tasks}
                 for future in as_completed(futures):
                     fold_number, model_id_task = futures[future][0], futures[future][1]
                     try:
-                        train_idx, val_idx, preds, model_size, train_dur, model_id_result, fold_number = future.result()
+                        (
+                            train_idx,
+                            val_idx,
+                            preds,
+                            model_size,
+                            train_dur,
+                            model_id_result,
+                            fold_number,
+                        ) = future.result()
                     except Exception as e:
-                        raise RuntimeError(f"Worker failed stacking {model_id_task} fold {fold_number}: {e}") from e
+                        raise RuntimeError(
+                            f"Worker failed stacking {model_id_task} fold {fold_number}: {e}"
+                        ) from e
 
-                    self.log(f"Trained stacker {model_id_result} in {train_dur:.4f}s for f-{fold_number}", level=2, start_time=fit_start)
+                    self.log(
+                        f"Trained stacker {model_id_result} in {train_dur:.4f}s for f-{fold_number}",
+                        level=2,
+                        start_time=fit_start,
+                    )
                     stack_oof_preds[model_id_result][val_idx] += preds
                     stack_oof_counts[model_id_result][val_idx] += 1
                     model_groups[model_id_result].append(fold_number)
@@ -1544,15 +2022,26 @@ class TSCGlueRegressor(BaseRegressor):
                     if len(model_groups[model_id_result]) == self.k_folds:
                         del model_groups[model_id_result]
                         counts = stack_oof_counts[model_id_result]
-                        avg_preds = np.where(counts > 0, stack_oof_preds[model_id_result] / counts, np.nan)
+                        avg_preds = np.where(
+                            counts > 0, stack_oof_preds[model_id_result] / counts, np.nan
+                        )
                         residuals = y - avg_preds
-                        oof_rmse = float(np.sqrt(np.nanmean(residuals ** 2)))
+                        oof_rmse = float(np.sqrt(np.nanmean(residuals**2)))
                         oof_r2 = float(r2_score(y, avg_preds))
-                        self._oof_scores.append({
-                            "model": model_id_result, "level": 1,
-                            "oof_rmse": oof_rmse, "oof_r2": oof_r2, "train_time": model_train_times.pop(model_id_result),
-                        })
-                        self.log(f"OOF RMSE (stack) {model_id_result}: {oof_rmse:.4f}  R²: {oof_r2:.4f}", level=1, start_time=fit_start)
+                        self._oof_scores.append(
+                            {
+                                "model": model_id_result,
+                                "level": 1,
+                                "oof_rmse": oof_rmse,
+                                "oof_r2": oof_r2,
+                                "train_time": model_train_times.pop(model_id_result),
+                            }
+                        )
+                        self.log(
+                            f"OOF RMSE (stack) {model_id_result}: {oof_rmse:.4f}  R²: {oof_r2:.4f}",
+                            level=1,
+                            start_time=fit_start,
+                        )
 
                 self.log("Fit complete", level=1, start_time=fit_start)
 
@@ -1575,11 +2064,19 @@ class TSCGlueRegressor(BaseRegressor):
                 save_array(X, "X", str(features_infer), dtype=self._feature_dtype)
                 self._compute_features(X, str(features_infer), start_time=predict_start)
 
-                base_preds_sum = {spec.get_model_id(): np.zeros(X.shape[0]) for spec in self.model_specs}
+                base_preds_sum = {
+                    spec.get_model_id(): np.zeros(X.shape[0]) for spec in self.model_specs
+                }
                 base_preds_count = {spec.get_model_id(): 0 for spec in self.model_specs}
 
                 tasks = [
-                    (spec.get_model_id(), str(features_infer), list(spec.features), str(self._model_dir), fold)
+                    (
+                        spec.get_model_id(),
+                        str(features_infer),
+                        list(spec.features),
+                        str(self._model_dir),
+                        fold,
+                    )
                     for spec in self.model_specs
                     for fold in range(self.k_folds * spec.n_repetitions)
                 ]
@@ -1593,12 +2090,16 @@ class TSCGlueRegressor(BaseRegressor):
                     base_preds_sum[model_id_res] += preds
                     base_preds_count[model_id_res] += 1
 
-                base_preds = {mid: base_preds_sum[mid] / base_preds_count[mid] for mid in base_preds_sum}
+                base_preds = {
+                    mid: base_preds_sum[mid] / base_preds_count[mid] for mid in base_preds_sum
+                }
 
                 if not self.stacking_models:
                     return np.mean(list(base_preds.values()), axis=0)
 
-                stacking_matrix = np.column_stack([base_preds[mid] for mid in self._stacking_model_order])
+                stacking_matrix = np.column_stack(
+                    [base_preds[mid] for mid in self._stacking_model_order]
+                )
                 os.makedirs(features_stack, exist_ok=True)
                 save_array(X, "X", str(features_stack), dtype=self._feature_dtype)
                 save_array(stacking_matrix, "Xt_predictions", str(features_stack))
@@ -1606,7 +2107,13 @@ class TSCGlueRegressor(BaseRegressor):
                 stack_preds_sum = np.zeros(X.shape[0])
                 stack_count = 0
                 stack_tasks = [
-                    (model_name, str(features_stack), [FeatureSpec(feature_name="predictions")], str(self._model_dir), fold)
+                    (
+                        model_name,
+                        str(features_stack),
+                        [FeatureSpec(feature_name="predictions")],
+                        str(self._model_dir),
+                        fold,
+                    )
                     for model_name in self.stacking_models
                     for fold in range(self.k_folds)
                 ]
@@ -1616,7 +2123,9 @@ class TSCGlueRegressor(BaseRegressor):
                     try:
                         preds, predict_dur, model_id_res = future.result()
                     except Exception as e:
-                        raise RuntimeError(f"Worker failed stacking predict {model_id_task}: {e}") from e
+                        raise RuntimeError(
+                            f"Worker failed stacking predict {model_id_task}: {e}"
+                        ) from e
                     stack_preds_sum += preds
                     stack_count += 1
 
@@ -1661,8 +2170,6 @@ class SparseScaler:
 
     def fit_transform(self, X, y=None):
         return self.fit(X).transform(X)
-
-
 
 
 class DictMultiScaler(BaseEstimator, TransformerMixin):
@@ -1725,7 +2232,6 @@ class RidgeClassifierCVIndicator(RidgeClassifierCV):
             return super().fit(X, y)
 
 
-
 class RSTSFUnsupervisedTransformer:
     def __init__(self, n_intervals=2500, random_state=None, n_jobs=1):
         self.n_intervals = n_intervals
@@ -1762,5 +2268,3 @@ class RSTSFUnsupervisedTransformer:
 
     def fit_transform(self, X, y=None):
         return self.fit(X).transform(X)
-
-

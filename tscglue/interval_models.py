@@ -5,13 +5,6 @@ __all__ = ["UnsupervisedIntervals", "RSTSFRandomTransformer", "RSTSFCombinedTran
 import inspect
 
 import numpy as np
-from joblib import Parallel, delayed
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.ensemble import ExtraTreesClassifier
-from sklearn.preprocessing import FunctionTransformer
-from sklearn.random_projection import GaussianRandomProjection
-from sklearn.utils import check_random_state
-
 from aeon.base._base import _clone_estimator
 from aeon.transformations.base import BaseTransformer
 from aeon.transformations.collection import (
@@ -33,6 +26,12 @@ from aeon.utils.numba.stats import (
     row_std,
 )
 from aeon.utils.validation import check_n_jobs
+from joblib import Parallel, delayed
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.preprocessing import FunctionTransformer
+from sklearn.random_projection import GaussianRandomProjection
+from sklearn.utils import check_random_state
 
 
 class UnsupervisedIntervals(BaseCollectionTransformer):
@@ -102,12 +101,8 @@ class UnsupervisedIntervals(BaseCollectionTransformer):
         X, rng = self._fit_setup(X)
         X_norm = z_normalise_series_3d(X) if self.normalise_for_search else X
 
-        fit = Parallel(
-            n_jobs=self._n_jobs, backend=self.parallel_backend, prefer="threads"
-        )(
-            delayed(self._generate_intervals)(
-                X, X_norm, rng.randint(np.iinfo(np.int32).max)
-            )
+        fit = Parallel(n_jobs=self._n_jobs, backend=self.parallel_backend, prefer="threads")(
+            delayed(self._generate_intervals)(X, X_norm, rng.randint(np.iinfo(np.int32).max))
             for _ in range(self.n_intervals)
         )
 
@@ -117,11 +112,8 @@ class UnsupervisedIntervals(BaseCollectionTransformer):
         return self
 
     def _transform(self, X, y=None):
-        transform = Parallel(
-            n_jobs=self._n_jobs, backend=self.parallel_backend, prefer="threads"
-        )(
-            delayed(self._transform_intervals)(X, i)
-            for i in range(len(self.intervals_))
+        transform = Parallel(n_jobs=self._n_jobs, backend=self.parallel_backend, prefer="threads")(
+            delayed(self._transform_intervals)(X, i) for i in range(len(self.intervals_))
         )
 
         Xt = np.zeros((X.shape[0], len(transform)))
@@ -139,9 +131,7 @@ class UnsupervisedIntervals(BaseCollectionTransformer):
 
         self._min_interval_length = max(3, self.min_interval_length)
         if self._min_interval_length * 2 > self.n_timepoints_:
-            raise ValueError(
-                "Minimum interval length must allow at least one valid split."
-            )
+            raise ValueError("Minimum interval length must allow at least one valid split.")
 
         self._features = self.features
         if self.features is None:
@@ -212,12 +202,24 @@ class UnsupervisedIntervals(BaseCollectionTransformer):
                 ):
                     random_cut_point = int(rng.randint(1, self.n_timepoints_ - 1))
 
-                intervals.extend(self._unsupervised_search(
-                    X_norm[:, dim, :random_cut_point], 0, feature, dim, rng,
-                ))
-                intervals.extend(self._unsupervised_search(
-                    X_norm[:, dim, random_cut_point:], random_cut_point, feature, dim, rng,
-                ))
+                intervals.extend(
+                    self._unsupervised_search(
+                        X_norm[:, dim, :random_cut_point],
+                        0,
+                        feature,
+                        dim,
+                        rng,
+                    )
+                )
+                intervals.extend(
+                    self._unsupervised_search(
+                        X_norm[:, dim, random_cut_point:],
+                        random_cut_point,
+                        feature,
+                        dim,
+                        rng,
+                    )
+                )
 
         return intervals
 
@@ -251,9 +253,7 @@ class UnsupervisedIntervals(BaseCollectionTransformer):
     def set_features_to_transform(self, arr, raise_error=True):
         if len(arr) != len(self.intervals_) or not all(isinstance(b, bool) for b in arr):
             if raise_error:
-                raise ValueError(
-                    "Input must be a list of bools of length len(intervals_)."
-                )
+                raise ValueError("Input must be a list of bools of length len(intervals_).")
             return False
         self._transform_features = arr
         return True
@@ -321,6 +321,7 @@ def _build_et(n_estimators, n_jobs, random_state):
 
 def _build_ridge():
     from tscglue.utils import RidgeClassifierCVDecisionProba
+
     return RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10))
 
 
@@ -346,7 +347,15 @@ class RSTSFRandomTransformer(BaseEstimator, TransformerMixin):
 
     _REP_NAMES = ["raw", "diff", "periodogram", "ar"]
 
-    def __init__(self, n_intervals=600, min_interval_length=3, mode="fast", random_state=None, n_jobs=1, verbose=False):
+    def __init__(
+        self,
+        n_intervals=600,
+        min_interval_length=3,
+        mode="fast",
+        random_state=None,
+        n_jobs=1,
+        verbose=False,
+    ):
         self.n_intervals = n_intervals
         self.min_interval_length = min_interval_length
         self.mode = mode
@@ -377,6 +386,7 @@ class RSTSFRandomTransformer(BaseEstimator, TransformerMixin):
 
     def fit(self, X, y=None):
         from time import perf_counter
+
         self._n_jobs = check_n_jobs(self.n_jobs)
 
         t0 = perf_counter()
@@ -394,6 +404,7 @@ class RSTSFRandomTransformer(BaseEstimator, TransformerMixin):
 
     def transform(self, X):
         from time import perf_counter
+
         t0 = perf_counter()
         transforms = [X] + [t.transform(X) for t in self._series_transformers]
         self._log(f"transform series reps: {perf_counter() - t0:.2f}s")
@@ -452,6 +463,7 @@ class RSTSFCombinedTransformer(BaseEstimator, TransformerMixin):
 
     def fit(self, X, y=None):
         from time import perf_counter
+
         self._n_jobs = check_n_jobs(self.n_jobs)
         t0 = perf_counter()
         transforms, self._series_transformers = _make_series_transforms(X)
@@ -491,17 +503,23 @@ class RSTSFCombinedTransformer(BaseEstimator, TransformerMixin):
         n_components = self.n_components
         if n_components == "auto":
             from sklearn.random_projection import johnson_lindenstrauss_min_dim
+
             n_components = min(
                 johnson_lindenstrauss_min_dim(X.shape[0], eps=0.1),
                 probe_unsup.shape[1],
             )
-        self.rp_ = GaussianRandomProjection(n_components=n_components, random_state=self.random_state)
+        self.rp_ = GaussianRandomProjection(
+            n_components=n_components, random_state=self.random_state
+        )
         self.rp_.fit(probe_unsup)  # GRP only needs n_features from shape, not actual values
-        self._log(f"fit GRP (unsup_features={probe_unsup.shape[1]} -> n_components={n_components}): {perf_counter() - t0:.2f}s")
+        self._log(
+            f"fit GRP (unsup_features={probe_unsup.shape[1]} -> n_components={n_components}): {perf_counter() - t0:.2f}s"
+        )
         return self
 
     def transform(self, X):
         from time import perf_counter
+
         rep_names = ["raw", "diff", "periodogram", "ar"]
         t0 = perf_counter()
         transforms = [X] + [t.transform(X) for t in self._series_transformers]
@@ -520,7 +538,7 @@ class RSTSFCombinedTransformer(BaseEstimator, TransformerMixin):
         t0 = perf_counter()
         Xt_rand = np.hstack(rand_parts)
         Xt_unsup_proj = self.rp_.transform(np.hstack(unsup_parts))
-        self._log(f"GRP projection: {perf_counter() - t0:.2f}s  output={np.hstack((Xt_rand, Xt_unsup_proj)).shape}")
+        self._log(
+            f"GRP projection: {perf_counter() - t0:.2f}s  output={np.hstack((Xt_rand, Xt_unsup_proj)).shape}"
+        )
         return np.hstack((Xt_rand, Xt_unsup_proj))
-
-

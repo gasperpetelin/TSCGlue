@@ -6,8 +6,14 @@ import numpy as np
 import pytest
 from aeon.datasets import load_regression
 from sklearn.metrics import accuracy_score
-from tscglue.models import LokyStackerV10Base, TSCAGGlueClassifier, TSCGlueClassifier, TSCGlueRegressor
+
 from tscglue import utils
+from tscglue.models import (
+    LokyStackerV10Base,
+    TSCAGGlueClassifier,
+    TSCGlueClassifier,
+    TSCGlueRegressor,
+)
 
 
 def test_model_accuracy_on_coffee():
@@ -43,7 +49,11 @@ def test_v10base_feature_dtype(feature_dtype):
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = LokyStackerV10Base(
-            random_state=270, n_repetitions=1, k_folds=10, feature_dtype=feature_dtype, runs_dir=tmp_dir,
+            random_state=270,
+            n_repetitions=1,
+            k_folds=10,
+            feature_dtype=feature_dtype,
+            runs_dir=tmp_dir,
         )
         model.fit(X_train, y_train)
         y_pred = model.predict(X_test)
@@ -84,7 +94,9 @@ def test_label_dtype(encode_labels):
         y_test_expected = y_test
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10, n_jobs=1, runs_dir=tmp_dir)
+        model = TSCGlueClassifier(
+            random_state=270, n_repetitions=1, k_folds=10, n_jobs=1, runs_dir=tmp_dir
+        )
         model.fit(X_train, y_train_fit)
         y_pred = model.predict(X_test)
         proba_per_model = model.predict_proba_per_model(X_test)

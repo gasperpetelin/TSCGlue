@@ -2,7 +2,9 @@
 
 import argparse
 import time
+
 import numpy as np
+
 from tscglue.models_tsfm import Chronos2Embedding, MantisEmbedding
 
 if __name__ == "__main__":
@@ -12,13 +14,18 @@ if __name__ == "__main__":
     parser.add_argument("--series-len", type=int, default=512)
     args = parser.parse_args()
 
-    print(f"starting... n_train={args.n_train} n_test={args.n_test} series_len={args.series_len}", flush=True)
+    print(
+        f"starting... n_train={args.n_train} n_test={args.n_test} series_len={args.series_len}",
+        flush=True,
+    )
     rng = np.random.default_rng(42)
     X_train = rng.standard_normal((args.n_train, 1, args.series_len)).astype(np.float32)
     X_test = rng.standard_normal((args.n_test, 1, args.series_len)).astype(np.float32)
 
     models = {
-        "Chronos2Embedding": lambda device: Chronos2Embedding(include_diff=False, verbose=True, device=device),
+        "Chronos2Embedding": lambda device: Chronos2Embedding(
+            include_diff=False, verbose=True, device=device
+        ),
         "MantisEmbedding": lambda device: MantisEmbedding(include_diff=False, device=device),
     }
 

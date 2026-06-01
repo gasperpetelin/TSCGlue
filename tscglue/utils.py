@@ -23,6 +23,7 @@ class RidgeClassifierCVDecisionProba(RidgeClassifierCV):
 def require_torch():
     try:
         import torch
+
         return torch
     except ImportError as exc:
         raise ImportError(

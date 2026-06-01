@@ -43,18 +43,24 @@ def load_fold(dataset_spec: str, fold: int):
             raise ValueError("Subsetting is only supported for monash datasets")
         return load_ucr_fold(dataset_spec, fold)
 
+
 def load_fold_monash(dataset: str, fold: int = 0):
     repo_id = f"monster-monash/{dataset}"
 
     path_x = hf_hub_download(repo_id=repo_id, filename=f"{dataset}_X.npy", repo_type="dataset")
     path_y = hf_hub_download(repo_id=repo_id, filename=f"{dataset}_y.npy", repo_type="dataset")
-    path_fold = hf_hub_download(repo_id=repo_id, filename=f"test_indices_fold_{fold}.txt", repo_type="dataset")
+    path_fold = hf_hub_download(
+        repo_id=repo_id, filename=f"test_indices_fold_{fold}.txt", repo_type="dataset"
+    )
 
     X = np.load(path_x)
     y = np.load(path_y)
-    test_indices = pl.scan_csv(path_fold, has_header=False).with_columns(
-        pl.col("column_1").cast(pl.Int32)
-    ).collect()["column_1"].to_numpy()
+    test_indices = (
+        pl.scan_csv(path_fold, has_header=False)
+        .with_columns(pl.col("column_1").cast(pl.Int32))
+        .collect()["column_1"]
+        .to_numpy()
+    )
 
     all_indices = np.arange(len(y))
     train_mask = np.ones(len(y), dtype=bool)

@@ -5,9 +5,10 @@ import pytest
 from aeon.transformations.collection.convolution_based import MultiRocket
 from aeon.transformations.collection.convolution_based._hydra import HydraTransformer
 from aeon.transformations.collection.interval_based import QUANTTransformer
-from tscglue.models_tsfm import Chronos2Embedding, MantisEmbedding
-from tscglue.models import RDSTFloat64
+
 from tscglue.interval_models import RSTSFRandomTransformer
+from tscglue.models import RDSTFloat64
+from tscglue.models_tsfm import Chronos2Embedding, MantisEmbedding
 
 
 def _X(n_samples=20, n_channels=1, n_timepoints=64, seed=0):
@@ -26,7 +27,10 @@ TRANSFORMERS = [
     pytest.param(lambda: HydraTransformer(n_jobs=1, random_state=0), id="hydra"),
     pytest.param(lambda: QUANTTransformer(), id="quant"),
     pytest.param(lambda: RDSTFloat64(n_jobs=1, random_state=0), id="rdst"),
-    pytest.param(lambda: RSTSFRandomTransformer(n_intervals=30, random_state=0, n_jobs=1, verbose=False), id="rstsf-random"),
+    pytest.param(
+        lambda: RSTSFRandomTransformer(n_intervals=30, random_state=0, n_jobs=1, verbose=False),
+        id="rstsf-random",
+    ),
     pytest.param(lambda: Chronos2Embedding(include_diff=False), id="chronos2"),
     pytest.param(lambda: MantisEmbedding(include_diff=False), id="mantis"),
 ]
@@ -60,7 +64,9 @@ def test_rstsf_random_modes_match():
     X = _X()
     Xt = {}
     for mode in ["fast", "default"]:
-        t = RSTSFRandomTransformer(n_intervals=30, random_state=42, n_jobs=1, verbose=False, mode=mode)
+        t = RSTSFRandomTransformer(
+            n_intervals=30, random_state=42, n_jobs=1, verbose=False, mode=mode
+        )
         Xt[mode] = t.fit_transform(X)
     assert Xt["fast"].shape == Xt["default"].shape
     np.testing.assert_allclose(Xt["fast"], Xt["default"], rtol=1e-5, atol=1e-5)
