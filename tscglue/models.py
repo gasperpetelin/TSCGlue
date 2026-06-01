@@ -102,7 +102,7 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
 
 
 
-def get_model_v6(name, seed=None, n_jobs=1):
+def get_model_v6(name, seed=None, n_jobs=1, model_dir=None):
     """Returns (DictMultiScaler, classifier) for feature/stacking models, or (None, pipe) for series models."""
     if name == "multirockethydra-ridgecv":
         scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
@@ -150,6 +150,13 @@ def get_model_v6(name, seed=None, n_jobs=1):
         from sklearn.neural_network import MLPClassifier
         scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
         clf = MLPClassifier(hidden_layer_sizes=(100,), max_iter=500, random_state=seed)
+        return scaler, clf
+    elif name == "probability-autogluon":
+        from autogluon.tabular.experimental import TabularClassifier
+        import tempfile
+        ag_path = str(Path(model_dir) / f"ag_{uuid.uuid4().hex[:8]}") if model_dir else tempfile.mkdtemp()
+        scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
+        clf = TabularClassifier(path=ag_path, time_limit=60, presets="medium_quality", verbosity=0)
         return scaler, clf
     elif name == "multirockethydra-bestk-p-ridgecv":
         scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
@@ -375,7 +382,7 @@ def _train_one_model_v10(fold_number, model_id, model_name, is_series, train_idx
     y = read_array("y", directory)
     feature_dict = _load_feature_dict_v10(directory, feature_specs)
 
-    scaler, clf = get_model_v6(model_name, seed=model_seed)
+    scaler, clf = get_model_v6(model_name, seed=model_seed, model_dir=model_dir)
     start_train = perf_counter()
 
     if is_series:
@@ -1225,6 +1232,16 @@ class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
     def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1, n_gpus=0, runs_dir=None):
         assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
         super().__init__(random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs, keep_features=False, verbose=verbose, n_gpus=n_gpus, runs_dir=runs_dir)
+
+
+class TSCAGGlueClassifier(LokyStackerV10RSTSFRandom):
+    def __init__(self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1, n_gpus=0, runs_dir=None):
+        assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
+        super().__init__(
+            random_state=random_state, n_repetitions=n_repetitions, k_folds=k_folds, n_jobs=n_jobs,
+            keep_features=False, verbose=verbose, n_gpus=n_gpus, runs_dir=runs_dir,
+            stacking_models=["probability-autogluon"],
+        )
 
 
 class AutoSelectKBestRegressor(BaseEstimator, RegressorMixin):

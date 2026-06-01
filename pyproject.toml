@@ -55,12 +55,8 @@ dev = [
     "awscli",
     "moto[s3]",
 ]
-notebooks = [
-    "jupyter",
-    "jupyterlab",
-    "ipykernel",
-    "hvplot",
-    "pandas",
+autogluon = [
+    "autogluon.tabular",
 ]
 
 [build-system]

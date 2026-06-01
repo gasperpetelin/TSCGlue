@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from aeon.datasets import load_regression
 from sklearn.metrics import accuracy_score
-from tscglue.models import LokyStackerV10Base, TSCGlueClassifier, TSCGlueRegressor
+from tscglue.models import LokyStackerV10Base, TSCAGGlueClassifier, TSCGlueClassifier, TSCGlueRegressor
 from tscglue import utils
 
 
@@ -15,6 +15,19 @@ def test_model_accuracy_on_coffee():
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = TSCGlueClassifier(random_state=270, n_repetitions=1, k_folds=10, runs_dir=tmp_dir)
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+
+    accuracy = accuracy_score(y_test, y_pred)
+    assert accuracy > 0.1, f"Accuracy {accuracy} is too low (<=0.1)"
+    assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
+
+
+def test_ag_stacking_on_coffee():
+    X_train, y_train, X_test, y_test = utils.load_dataset("Coffee")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCAGGlueClassifier(random_state=270, n_repetitions=1, k_folds=10, runs_dir=tmp_dir)
         model.fit(X_train, y_train)
         y_pred = model.predict(X_test)
 
