@@ -1163,29 +1163,11 @@ class LokyStackerV10Base(BaseClassifier):
         return {name: self.classes_[np.argmax(proba, axis=1)] for name, proba in proba_per_model.items()}
 
 
-class LokyStackerV10TabICL(LokyStackerV10Base):
-    STACKING_MODEL = "probability-tabicl"
-
-
-class LokyStackerV10FM(LokyStackerV10Base):
-    """LokyStackerV10Base + mantis/chronos2 foundation model features with RidgeCV."""
-
-    DEFAULT_MODEL_NAMES = LokyStackerV10Base.DEFAULT_MODEL_NAMES + ["fm-p-ridgecv"]
-
-
-class LokyStackerV10FMTSFresh(LokyStackerV10FM):
-    """LokyStackerV10FM + TSFresh efficient features with RotationForest."""
-
-    DEFAULT_MODEL_NAMES = LokyStackerV10FM.DEFAULT_MODEL_NAMES + ["tsfresh-rotf"]
-
 
 class LokyStackerV10RSTSFRandom(LokyStackerV10Base):
-    """LokyStackerV10FMTSFresh with rstsf replaced by 2-stage rstsf-random-etc.
-
-    Identical to LokyStackerV10FMTSFresh but splits RSTSF into a feature
-    extraction transformer (RandomIntervals on 4 series representations) and a
-    separately trained ExtraTreesClassifier. SERIES_MODELS is empty so all
-    models go through the feature caching pipeline.
+    """Splits RSTSF into a feature extraction transformer (RandomIntervals on 4 series
+    representations) and a separately trained ExtraTreesClassifier. SERIES_MODELS is
+    empty so all models go through the feature caching pipeline.
     """
 
     DEFAULT_MODEL_NAMES = [
@@ -1208,18 +1190,6 @@ class LokyStackerV10RSTSFRandomMultiStack(LokyStackerV10RSTSFRandom):
             selection=selection,
         )
 
-
-def make_ablation_model(component: str, random_state=None, n_jobs=1, verbose=0) -> LokyStackerV10RSTSFRandom:
-    """Single LokyStackerV10RSTSFRandom subcomponent without a stacking layer.
-
-    The model runs only the given component and predicts directly from it,
-    bypassing the probability-ridgecv meta-learner.
-    """
-    return LokyStackerV10RSTSFRandom(
-        random_state=random_state, n_jobs=n_jobs, verbose=verbose,
-        model_names=[component],
-        stacking_models=[],
-    )
 
 def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
     all_folds = []
@@ -1694,45 +1664,6 @@ class SparseScaler:
 
 
 
-class MultiRocketHydra(BaseCollectionTransformer):
-    _tags = {
-        "output_data_type": "Tabular",
-        "capability:multivariate": True,
-        "capability:multithreading": True,
-        "algorithm_type": "convolution",
-        "X_inner_type": "numpy3D",
-    }
-
-    def __init__(
-        self,
-        n_jobs=1,
-        random_state=None,
-    ):
-        self.n_jobs = n_jobs
-        self.random_state = random_state
-        self.multirocket_ = MultiRocket(random_state=self.random_state, n_jobs=self.n_jobs)
-        self.hydra_ = HydraTransformer(random_state=self.random_state, n_jobs=self.n_jobs)
-        self.n_multirocket_features_ = None
-        self.n_hydra_features_ = None
-        super().__init__()
-
-    def _fit(self, X, y=None):
-        self.hydra_.fit(X)
-        self.multirocket_.fit(X)
-        return self
-
-    def _transform(self, X, y=None):
-        X_hydra_t = self.hydra_.transform(X)
-        X_multirocket_t = self.multirocket_.transform(X)
-        Xt = np.concatenate((X_hydra_t, X_multirocket_t), axis=1)
-        self.n_multirocket_features_ = X_multirocket_t.shape[1]
-        self.n_hydra_features_ = X_hydra_t.shape[1]
-
-        schema = [f"hydra_{x}" for x in range(self.n_hydra_features_)] + [
-            f"multirocket_{x}" for x in range(self.n_multirocket_features_)
-        ]
-        return pl.DataFrame(Xt, schema=schema)
-
 
 class DictMultiScaler(BaseEstimator, TransformerMixin):
     """
@@ -1833,35 +1764,3 @@ class RSTSFUnsupervisedTransformer:
         return self.fit(X).transform(X)
 
 
-class RSTSFUnsupervisedClassifier(BaseClassifier):
-    def __init__(self, n_intervals=1000, random_state=None, n_jobs=-1, n_estimators=500):
-        super().__init__()
-        self.n_intervals = n_intervals
-        self.random_state = random_state
-        self.n_jobs = n_jobs
-        self.n_estimators = n_estimators
-
-    def _fit(self, X, y):
-        self.pipeline_ = make_pipeline(
-            RSTSFUnsupervisedTransformer(
-                n_intervals=self.n_intervals,
-                random_state=self.random_state,
-                n_jobs=self.n_jobs,
-            ),
-            ExtraTreesClassifier(
-                n_estimators=self.n_estimators,
-                criterion="entropy",
-                class_weight="balanced",
-                max_features="sqrt",
-                random_state=self.random_state,
-                n_jobs=self.n_jobs,
-            )
-        )
-        self.pipeline_.fit(X, y)
-        return self
-
-    def _predict_proba(self, X):
-        return self.pipeline_.predict_proba(X)
-
-    def _predict(self, X):
-        return self.pipeline_.predict(X)
