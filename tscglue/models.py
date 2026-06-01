@@ -108,7 +108,7 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
         return self.classifier_.predict_proba(X)
 
 
-def get_model_v6(name, seed=None, n_jobs=1, model_dir=None):
+def get_model_v6(name, seed=None, n_jobs=1, model_dir=None, **kwargs):
     """Returns (DictMultiScaler, classifier) for feature/stacking models, or (None, pipe) for series models."""
     if name == "multirockethydra-ridgecv":
         scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
@@ -173,7 +173,12 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None):
             str(Path(model_dir) / f"ag_{uuid.uuid4().hex[:8]}") if model_dir else tempfile.mkdtemp()
         )
         scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
-        clf = TabularClassifier(path=ag_path, time_limit=60, presets="medium_quality", verbosity=0)
+        clf = TabularClassifier(
+            path=ag_path,
+            time_limit=kwargs.get("ag_time_limit", 60),
+            presets=kwargs.get("ag_preset", "medium_quality"),
+            verbosity=0,
+        )
         return scaler, clf
     elif name == "multirockethydra-bestk-p-ridgecv":
         scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
@@ -467,13 +472,14 @@ def _train_one_model_v10(
     directory,
     feature_specs,
     model_dir,
+    model_kwargs=None,
 ):
     """Training function - loads data via read_array, saves model to disk."""
     X = read_array("X", directory)
     y = read_array("y", directory)
     feature_dict = _load_feature_dict_v10(directory, feature_specs)
 
-    scaler, clf = get_model_v6(model_name, seed=model_seed, model_dir=model_dir)
+    scaler, clf = get_model_v6(model_name, seed=model_seed, model_dir=model_dir, **(model_kwargs or {}))
     start_train = perf_counter()
 
     if is_series:
@@ -604,6 +610,8 @@ class LokyStackerV10Base(BaseClassifier):
         selection=None,
         n_gpus=0,
         runs_dir=None,
+        ag_preset=None,
+        ag_time_limit=None,
     ):
         super().__init__()
         self.k_folds = int(k_folds)
@@ -619,6 +627,8 @@ class LokyStackerV10Base(BaseClassifier):
         )
         self.selection = selection
         self.runs_dir = runs_dir
+        self.ag_preset = ag_preset
+        self.ag_time_limit = ag_time_limit
 
         self.cv_splits = None
         self.feature_seed = np.random.default_rng(random_state)
@@ -1151,7 +1161,8 @@ class LokyStackerV10Base(BaseClassifier):
                     start_time=fit_start,
                 )
 
-                futures = {executor.submit(_train_one_model_v10, *t): t for t in stack_tasks}
+                ag_kwargs = {"ag_preset": self.ag_preset, "ag_time_limit": self.ag_time_limit}
+                futures = {executor.submit(_train_one_model_v10, *t, model_kwargs=ag_kwargs): t for t in stack_tasks}
                 model_groups = defaultdict(list)
                 model_train_times: dict[str, list[float]] = defaultdict(list)
 
@@ -1535,6 +1546,8 @@ class TSCAGGlueClassifier(LokyStackerV10RSTSFRandom):
         n_repetitions=1,
         n_gpus=0,
         runs_dir=None,
+        ag_preset="medium_quality",
+        ag_time_limit=60,
     ):
         assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
         super().__init__(
@@ -1547,6 +1560,8 @@ class TSCAGGlueClassifier(LokyStackerV10RSTSFRandom):
             n_gpus=n_gpus,
             runs_dir=runs_dir,
             stacking_models=["probability-autogluon"],
+            ag_preset=ag_preset,
+            ag_time_limit=ag_time_limit,
         )
 
 
