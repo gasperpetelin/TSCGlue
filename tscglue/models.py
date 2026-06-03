@@ -140,6 +140,17 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None, **kwargs):
         scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
         clf = RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 20))
         return scaler, clf
+    elif name == "probability-logisticcv":
+        from sklearn.linear_model import LogisticRegressionCV
+
+        scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
+        clf = LogisticRegressionCV(
+            Cs=np.logspace(-3, 3, 20),
+            solver="lbfgs",
+            max_iter=1000,
+            multi_class="multinomial",
+        )
+        return scaler, clf
     elif name == "probability-tabicl":
         from tabicl import TabICLClassifier
 
@@ -1533,6 +1544,33 @@ class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
             verbose=verbose,
             n_gpus=n_gpus,
             runs_dir=runs_dir,
+        )
+
+
+class TSCGlueLogisticClassifier(LokyStackerV10RSTSFRandom):
+    STACKING_MODEL = "probability-logisticcv"
+
+    def __init__(
+        self,
+        random_state=None,
+        k_folds=10,
+        n_jobs=1,
+        verbose=0,
+        n_repetitions=1,
+        n_gpus=0,
+        runs_dir=None,
+    ):
+        assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
+        super().__init__(
+            random_state=random_state,
+            n_repetitions=n_repetitions,
+            k_folds=k_folds,
+            n_jobs=n_jobs,
+            keep_features=False,
+            verbose=verbose,
+            n_gpus=n_gpus,
+            runs_dir=runs_dir,
+            stacking_models=["probability-logisticcv"],
         )
 
 
