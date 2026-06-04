@@ -260,6 +260,7 @@ def save_model(model, name, directory, repetition=None, fold=None):
     rep_suffix = f"_r_{repetition}" if repetition is not None else ""
     fold_suffix = f"_f_{fold}" if fold is not None else ""
     path = f"{directory}/{name}{rep_suffix}{fold_suffix}.pkl"
+    os.makedirs(directory, exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump(model, f)
     size = os.path.getsize(path)
