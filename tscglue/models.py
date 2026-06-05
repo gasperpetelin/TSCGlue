@@ -624,6 +624,7 @@ class LokyStackerV10Base(BaseClassifier):
         runs_dir=None,
         ag_preset=None,
         ag_time_limit=None,
+        eval_metric="accuracy",
     ):
         super().__init__()
         self.k_folds = int(k_folds)
@@ -641,6 +642,7 @@ class LokyStackerV10Base(BaseClassifier):
         self.runs_dir = runs_dir
         self.ag_preset = ag_preset
         self.ag_time_limit = ag_time_limit
+        self.eval_metric = eval_metric
 
         self.cv_splits = None
         self.feature_seed = np.random.default_rng(random_state)
@@ -811,17 +813,35 @@ class LokyStackerV10Base(BaseClassifier):
         classes = list(meta[1:])
         return prob_array, level, classes
 
-    def _compute_oof_accuracy(self, y, model_name) -> float:
+    def _compute_oof_score(self, y, model_name) -> float:
         prob_array, _level, classes = self._load_model_predictions(model_name)
         valid = ~np.isnan(prob_array).any(axis=1)
         if not np.any(valid):
             return 0.0
-        pred_idx = np.argmax(prob_array[valid], axis=1)
-        preds = np.asarray(classes)[pred_idx]
         y_true = y[np.where(valid)[0]]
-        y_true_str = np.asarray(y_true, dtype=str)
-        preds_str = np.asarray(preds, dtype=str)
-        return float(accuracy_score(y_true_str, preds_str))
+        proba = prob_array[valid]
+
+        if self.eval_metric == "accuracy":
+            pred_idx = np.argmax(proba, axis=1)
+            preds = np.asarray(classes)[pred_idx]
+            return float(accuracy_score(np.asarray(y_true, dtype=str), np.asarray(preds, dtype=str)))
+        elif self.eval_metric == "log_loss":
+            from sklearn.metrics import log_loss
+            return float(log_loss(y_true, proba, labels=classes))
+        elif self.eval_metric == "roc_auc":
+            from sklearn.metrics import roc_auc_score
+            if len(classes) == 2:
+                return float(roc_auc_score(y_true, proba[:, 1]))
+            return float(roc_auc_score(y_true, proba, multi_class="ovr", labels=classes))
+        elif self.eval_metric == "average_precision":
+            from sklearn.metrics import average_precision_score
+            from sklearn.preprocessing import label_binarize
+            if len(classes) == 2:
+                return float(average_precision_score(y_true, proba[:, 1]))
+            y_bin = label_binarize(y_true, classes=classes)
+            return float(average_precision_score(y_bin, proba, average="macro"))
+        else:
+            raise ValueError(f"Unknown eval_metric: {self.eval_metric!r}")
 
     def _build_probability_array(self, n_samples: int):
         d = self._require_tmpdir()
@@ -985,6 +1005,12 @@ class LokyStackerV10Base(BaseClassifier):
             level=1,
             start_time=fit_start,
         )
+        _direction = "minimize" if self.eval_metric == "log_loss" else "maximize"
+        self.log(
+            f"Eval metric: {self.eval_metric} ({_direction})",
+            level=1,
+            start_time=fit_start,
+        )
 
         os.makedirs(self._model_dir, exist_ok=True)
         os.makedirs(self._tmpdir, exist_ok=True)
@@ -1112,17 +1138,18 @@ class LokyStackerV10Base(BaseClassifier):
                         predictions = self._save_model_predictions(
                             predictions, model_id_result, n_samples=X.shape[0], level=0
                         )
-                        oof_acc = self._compute_oof_accuracy(y, model_id_result)
+                        oof_score = self._compute_oof_score(y, model_id_result)
                         self._oof_scores.append(
                             {
                                 "model": model_id_result,
                                 "level": 0,
-                                "oof_accuracy": oof_acc,
+                                "eval_metric": self.eval_metric,
+                                "oof_score": oof_score,
                                 "train_time": model_train_times.pop(model_id_result),
                             }
                         )
                         self.log(
-                            f"OOF acc (base) {model_id_result}: {oof_acc}",
+                            f"OOF {self.eval_metric} (base) {model_id_result}: {oof_score}",
                             level=1,
                             start_time=fit_start,
                         )
@@ -1227,17 +1254,18 @@ class LokyStackerV10Base(BaseClassifier):
                         predictions = self._save_model_predictions(
                             predictions, model_id_result, n_samples=X.shape[0], level=1
                         )
-                        oof_acc = self._compute_oof_accuracy(y, model_id_result)
+                        oof_score = self._compute_oof_score(y, model_id_result)
                         self._oof_scores.append(
                             {
                                 "model": model_id_result,
                                 "level": 1,
-                                "oof_accuracy": oof_acc,
+                                "eval_metric": self.eval_metric,
+                                "oof_score": oof_score,
                                 "train_time": model_train_times.pop(model_id_result),
                             }
                         )
                         self.log(
-                            f"OOF acc (stack) {model_id_result}: {oof_acc}",
+                            f"OOF {self.eval_metric} (stack) {model_id_result}: {oof_score}",
                             level=1,
                             start_time=fit_start,
                         )
@@ -1272,7 +1300,10 @@ class LokyStackerV10Base(BaseClassifier):
             raise ValueError(f"Unknown selection strategy: {self.selection!r}")
         if not candidates:
             return
-        self.best_model = max(candidates, key=lambda s: s["oof_accuracy"])["model"]
+        higher_is_better = self.eval_metric != "log_loss"
+        self.best_model = (max if higher_is_better else min)(
+            candidates, key=lambda s: s["oof_score"]
+        )["model"]
         self.log(f"Selected best model ({self.selection}): {self.best_model}", level=1)
 
     # ----------------- inspection helpers -----------------
@@ -1315,6 +1346,61 @@ class LokyStackerV10Base(BaseClassifier):
         if return_transforms:
             return self._transform_times + self._oof_scores
         return self._oof_scores
+
+    def optimize_for_inference(self, drop_unused_features: bool = True) -> None:
+        """Print how many features are never selected across any fold, per feature transform."""
+        if not drop_unused_features:
+            return
+
+        def _print_line(name, n_used, n_total):
+            n_unused = n_total - n_used
+            pct = 100 * n_unused / n_total if n_total else 0.0
+            print(f"  {name + ':':<14}{n_used}/{n_total} used, {n_unused} unused ({pct:.1f}%)")
+
+        def _group_counts(scaler, clf):
+            """Feature count per scaler group; NoScaler groups inferred from clf input dim."""
+            known, unknown = {}, []
+            for key, s in scaler.scalers_.items():
+                if hasattr(s, "n_features_in_"):
+                    known[key] = int(s.n_features_in_)
+                elif hasattr(s, "mu"):
+                    known[key] = len(s.mu)
+                else:
+                    unknown.append(key)
+            total = int(getattr(clf, "n_features_in_", sum(known.values())))
+            if len(unknown) == 1:
+                known[unknown[0]] = total - sum(known.values())
+            else:
+                for key in unknown:
+                    known[key] = 0
+            return known
+
+        for spec in self.model_specs:
+            model_id = spec.get_model_id()
+            print(f"{model_id}:")
+            if spec.model_name == "multirockethydra-bestk-p-ridgecv":
+                n_folds = self.k_folds * spec.n_repetitions
+                hydra_union: set[int] = set()
+                multirocket_union: set[int] = set()
+                n_hydra = n_multirocket = None
+                for fold in range(n_folds):
+                    scaler, clf = read_model(model_id, str(self._model_dir), None, fold)
+                    if n_hydra is None:
+                        n_hydra = len(scaler.scalers_["hydra"].mu)
+                        n_multirocket = int(scaler.scalers_["multirocket"].n_features_in_)
+                    pipe = clf.classifier_
+                    var_ix = pipe["var"].get_support(indices=True)
+                    sel_ix = pipe["select"].get_support(indices=True)
+                    final = var_ix[sel_ix]
+                    hydra_union.update(final[final < n_hydra].tolist())
+                    multirocket_union.update((final[final >= n_hydra] - n_hydra).tolist())
+                _print_line("hydra", len(hydra_union), n_hydra)
+                _print_line("multirocket", len(multirocket_union), n_multirocket)
+                print("  (dropping unused features not yet implemented — kernel-to-feature mapping required)")
+            else:
+                scaler, clf = read_model(model_id, str(self._model_dir), None, 0)
+                for key, n in _group_counts(scaler, clf).items():
+                    _print_line(key, n, n)
 
     # ----------------- inference -----------------
 
@@ -1524,6 +1610,9 @@ def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
     return all_folds
 
 
+_VALID_EVAL_METRICS = {"accuracy", "log_loss", "roc_auc"}
+
+
 class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
     def __init__(
         self,
@@ -1534,8 +1623,13 @@ class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
         n_repetitions=1,
         n_gpus=0,
         runs_dir=None,
+        eval_metric="accuracy",
+        time_limit=None,
     ):
         assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
+        assert eval_metric in _VALID_EVAL_METRICS, f"eval_metric must be one of {_VALID_EVAL_METRICS}; got {eval_metric!r}"
+        assert time_limit is None, "time_limit is currently not supported"
+        stacking = ["probability-ridgecv"] if eval_metric == "accuracy" else ["probability-logisticcv"]
         super().__init__(
             random_state=random_state,
             n_repetitions=n_repetitions,
@@ -1545,6 +1639,8 @@ class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
             verbose=verbose,
             n_gpus=n_gpus,
             runs_dir=runs_dir,
+            stacking_models=stacking,
+            eval_metric=eval_metric,
         )
 
 
@@ -1560,8 +1656,10 @@ class TSCGlueLogisticClassifier(LokyStackerV10RSTSFRandom):
         n_repetitions=1,
         n_gpus=0,
         runs_dir=None,
+        eval_metric="accuracy",
     ):
         assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
+        assert eval_metric in _VALID_EVAL_METRICS, f"eval_metric must be one of {_VALID_EVAL_METRICS}; got {eval_metric!r}"
         super().__init__(
             random_state=random_state,
             n_repetitions=n_repetitions,
@@ -1572,6 +1670,7 @@ class TSCGlueLogisticClassifier(LokyStackerV10RSTSFRandom):
             n_gpus=n_gpus,
             runs_dir=runs_dir,
             stacking_models=["probability-logisticcv"],
+            eval_metric=eval_metric,
         )
 
 
@@ -1771,8 +1870,16 @@ class TSCGlueRegressor(BaseRegressor):
         return all_models
 
     def __init__(
-        self, random_state=None, k_folds=10, n_jobs=1, verbose=0, n_repetitions=1, runs_dir=None
+        self,
+        random_state=None,
+        k_folds=10,
+        n_jobs=1,
+        verbose=0,
+        n_repetitions=1,
+        runs_dir=None,
+        time_limit=None,
     ):
+        assert time_limit is None, "time_limit is currently not supported"
         super().__init__()
         self.random_state = random_state
         self.k_folds = int(k_folds)
