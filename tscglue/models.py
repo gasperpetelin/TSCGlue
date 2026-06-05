@@ -1642,6 +1642,7 @@ class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
             stacking_models=stacking,
             eval_metric=eval_metric,
         )
+        self.time_limit = time_limit
 
 
 class TSCGlueLogisticClassifier(LokyStackerV10RSTSFRandom):
@@ -1881,6 +1882,7 @@ class TSCGlueRegressor(BaseRegressor):
     ):
         assert time_limit is None, "time_limit is currently not supported"
         super().__init__()
+        self.time_limit = time_limit
         self.random_state = random_state
         self.k_folds = int(k_folds)
         self.n_jobs = int(n_jobs)
