@@ -28,7 +28,7 @@ from aeon.transformations.collection.shapelet_based import RandomDilatedShapelet
 from aeon.utils.numba.general import first_order_differences_3d
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, TransformerMixin, clone
 from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor, RandomForestClassifier
-from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif, f_regression
+from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
 from sklearn.linear_model import RidgeClassifierCV, RidgeCV
 from sklearn.metrics import accuracy_score, r2_score
 from sklearn.pipeline import Pipeline
@@ -37,6 +37,54 @@ from threadpoolctl import threadpool_limits
 
 from tscglue import utils
 from tscglue.utils import RidgeClassifierCVDecisionProba
+
+
+class RareClassSafeLogisticCV(BaseEstimator, ClassifierMixin):
+    """LogisticRegressionCV that won't crash on rare classes.
+
+    LogisticRegressionCV runs an internal stratified CV to choose C. When a class
+    has a single member in the data it is handed, one fold's training split omits
+    that class and the multinomial coefficient paths become ragged, so the
+    internal ``np.reshape`` raises "inhomogeneous shape". This wrapper drops the
+    internal CV (fixed-C ``LogisticRegression``) only in that singleton case and
+    is otherwise bit-identical to the original ``LogisticRegressionCV``.
+    """
+
+    def __init__(self, Cs=10, fixed_C=1.0, solver="lbfgs", max_iter=1000):
+        self.Cs = Cs
+        self.fixed_C = fixed_C
+        self.solver = solver
+        self.max_iter = max_iter
+
+    def fit(self, X, y):
+        from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
+
+        min_count = int(np.unique(y, return_counts=True)[1].min())
+        if min_count < 2:
+            # A singleton class would make the internal CV crash; skip it.
+            self.estimator_ = LogisticRegression(
+                C=self.fixed_C,
+                solver=self.solver,
+                max_iter=self.max_iter,
+                multi_class="multinomial",
+            )
+        else:
+            # Identical to the original stacker: default cv=5, multinomial.
+            self.estimator_ = LogisticRegressionCV(
+                Cs=self.Cs,
+                solver=self.solver,
+                max_iter=self.max_iter,
+                multi_class="multinomial",
+            )
+        self.estimator_.fit(X, y)
+        self.classes_ = self.estimator_.classes_
+        return self
+
+    def predict(self, X):
+        return self.estimator_.predict(X)
+
+    def predict_proba(self, X):
+        return self.estimator_.predict_proba(X)
 
 
 class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
@@ -141,15 +189,8 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None, **kwargs):
         clf = RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 20))
         return scaler, clf
     elif name == "probability-logisticcv":
-        from sklearn.linear_model import LogisticRegressionCV
-
         scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
-        clf = LogisticRegressionCV(
-            Cs=np.logspace(-3, 3, 20),
-            solver="lbfgs",
-            max_iter=1000,
-            multi_class="multinomial",
-        )
+        clf = RareClassSafeLogisticCV(Cs=np.logspace(-3, 3, 20))
         return scaler, clf
     elif name == "probability-tabicl":
         from tabicl import TabICLClassifier
@@ -316,6 +357,10 @@ def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1, devic
             from tscglue.interval_models import RSTSFRandomTransformer
 
             return RSTSFRandomTransformer(n_jobs=n_jobs, random_state=seed)
+        case "drcif":
+            from tscglue.drcif_features import DrCIFExtractor
+
+            return DrCIFExtractor(random_state=seed, n_jobs=n_jobs)
         case _:
             raise ValueError(f"Unknown feature transformer type: {feature_type}")
 
@@ -1602,10 +1647,29 @@ class LokyStackerV10RSTSFRandomMultiStack(LokyStackerV10RSTSFRandom):
         )
 
 
-def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0):
+def _robust_r2(y, pred):
+    """Outlier-robust R²: ordinary R² on predictions clipped to the target range.
+
+    Standard R² is dominated by its single largest squared residual, so one
+    off-scale prediction (a high-leverage ridge extrapolation, e.g. -4 on a
+    target in [0, 0.18]) can drive it to large negative values even when the
+    model is good on the other 99% of samples. Clipping predictions to
+    [min(y), max(y)] before scoring neutralises such nonsensical values — and is
+    a no-op for well-behaved models (ETR, clipped variants), so it only changes
+    the pathological cases. It also matches how ``ClippedRegressor`` actually
+    serves predictions, and stays on the same scale as ``r2_score``.
+    """
+    y = np.asarray(y, dtype=float)
+    pred = np.asarray(pred, dtype=float)
+    return float(r2_score(y, np.clip(pred, np.nanmin(y), np.nanmax(y))))
+
+
+def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0, stratify=True):
     all_folds = []
     for i in range(n_repetitions):
-        folds = utils.get_folds(X, y, n_splits=n_splits, random_state=random_state + i)
+        folds = utils.get_folds(
+            X, y, n_splits=n_splits, random_state=random_state + i, stratify=stratify
+        )
         all_folds.extend(folds)
     return all_folds
 
@@ -1705,34 +1769,18 @@ class TSCAGGlueClassifier(LokyStackerV10RSTSFRandom):
 
 
 class AutoSelectKBestRegressor(BaseEstimator, RegressorMixin):
-    def __init__(
-        self, regressor=None, k=None, k_min=6000, k_max=35000, midpoint=300, steepness=0.010
-    ):
+    def __init__(self, regressor=None):
         self.regressor = regressor
-        self.k = k
-        self.k_min = k_min
-        self.k_max = k_max
-        self.midpoint = midpoint
-        self.steepness = steepness
-
-    def _optimal_k(self, n_train: int) -> int:
-        return int(
-            self.k_min
-            + (self.k_max - self.k_min)
-            / (1.0 + np.exp(-self.steepness * (n_train - self.midpoint)))
-        )
 
     def fit(self, X, y):
-        k = self.k if self.k is not None else min(self._optimal_k(X.shape[0]), X.shape[1])
         reg = (
-            RidgeCV(alphas=np.logspace(-3, 3, 10))
+            RidgeCV(alphas=np.logspace(5, 6, 13))
             if self.regressor is None
             else clone(self.regressor)
         )
         self.regressor_ = Pipeline(
             [
                 ("var", VarianceThreshold()),
-                ("select", SelectKBest(score_func=f_regression, k=k)),
                 ("reg", reg),
             ]
         )
@@ -1747,26 +1795,110 @@ class AutoSelectKBestRegressor(BaseEstimator, RegressorMixin):
         return self.regressor_.predict(X)
 
 
+class ClippedRegressor(BaseEstimator, RegressorMixin):
+    """Wrap a regressor and clip predictions to the training target range.
+
+    Lets a linear model (e.g. RidgeCV) keep its signal on ROCKET-style features
+    while preventing the rare p >> n fold from extrapolating off-scale, the way
+    tree models are bounded implicitly.
+    """
+
+    def __init__(self, regressor=None):
+        self.regressor = regressor
+
+    def fit(self, X, y):
+        self.regressor_ = clone(self.regressor)
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self.regressor_.fit(X, y)
+        self.y_min_ = float(np.min(y))
+        self.y_max_ = float(np.max(y))
+        return self
+
+    def predict(self, X):
+        return np.clip(self.regressor_.predict(X), self.y_min_, self.y_max_)
+
+
 def get_model_reg(name, seed=None, n_jobs=1):
-    if name == "multirockethydra-bestk-ridgecv":
+    if name == "multirockethydra-etr":
         scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
-        return scaler, AutoSelectKBestRegressor()
+        # ExtraTrees instead of RidgeCV: trees predict a bounded average of seen
+        # targets, so they can't extrapolate off-scale like ridge does at p >> n.
+        return scaler, ExtraTreesRegressor(
+            n_estimators=200, max_features="sqrt", random_state=seed, n_jobs=n_jobs
+        )
+    elif name == "multirockethydra-ridgecv":
+        scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
+        return scaler, RidgeCV(alphas=np.logspace(-4, 14, 65))
+    elif name == "multirockethydra-clipped-ridgecv":
+        scaler = DictMultiScaler(scalers={"hydra": SparseScaler(), "multirocket": StandardScaler()})
+        # RidgeCV keeps ROCKET's linear signal; clipping bounds predictions to the
+        # training target range so a rare under-regularized fold can't blow up.
+        return scaler, ClippedRegressor(regressor=RidgeCV(alphas=np.logspace(-4, 14, 65)))
     elif name == "quant-etr":
         scaler = DictMultiScaler(scalers={"quant": NoScaler()})
         return scaler, ExtraTreesRegressor(
             n_estimators=200, max_features=0.1, random_state=seed, n_jobs=n_jobs
         )
+    elif name == "quant-ridgecv":
+        scaler = DictMultiScaler(scalers={"quant": NoScaler()})
+        return scaler, RidgeCV(alphas=np.logspace(-4, 14, 65))
+    elif name == "quant-clipped-ridgecv":
+        scaler = DictMultiScaler(scalers={"quant": NoScaler()})
+        return scaler, ClippedRegressor(regressor=RidgeCV(alphas=np.logspace(-4, 14, 65)))
+    elif name == "rdst-etr":
+        scaler = DictMultiScaler(scalers={"rdst": StandardScaler()})
+        return scaler, ExtraTreesRegressor(
+            n_estimators=200, max_features="sqrt", random_state=seed, n_jobs=n_jobs
+        )
     elif name == "rdst-ridgecv":
         scaler = DictMultiScaler(scalers={"rdst": StandardScaler()})
-        return scaler, RidgeCV(alphas=np.logspace(-4, 4, 20))
+        return scaler, RidgeCV(alphas=np.logspace(-4, 14, 65))
+    elif name == "rdst-clipped-ridgecv":
+        scaler = DictMultiScaler(scalers={"rdst": StandardScaler()})
+        return scaler, ClippedRegressor(regressor=RidgeCV(alphas=np.logspace(-4, 14, 65)))
     elif name == "rstsf-random-etr":
         scaler = DictMultiScaler(scalers={"rstsf-random": NoScaler()})
         return scaler, ExtraTreesRegressor(
             n_estimators=200, max_features="sqrt", random_state=seed, n_jobs=n_jobs
         )
-    elif name == "prediction-ridgecv":
+    elif name == "rstsf-random-ridgecv":
+        scaler = DictMultiScaler(scalers={"rstsf-random": NoScaler()})
+        return scaler, RidgeCV(alphas=np.logspace(-4, 14, 65))
+    elif name == "rstsf-random-clipped-ridgecv":
+        scaler = DictMultiScaler(scalers={"rstsf-random": NoScaler()})
+        return scaler, ClippedRegressor(regressor=RidgeCV(alphas=np.logspace(-4, 14, 65)))
+    elif name == "fm-etr":
+        scaler = DictMultiScaler(scalers={"mantis": StandardScaler(), "chronos2": StandardScaler()})
+        return scaler, ExtraTreesRegressor(
+            n_estimators=200, max_features="sqrt", random_state=seed, n_jobs=n_jobs
+        )
+    elif name == "fm-ridgecv":
+        scaler = DictMultiScaler(scalers={"mantis": StandardScaler(), "chronos2": StandardScaler()})
+        return scaler, RidgeCV(alphas=np.logspace(-4, 14, 65))
+    elif name == "fm-clipped-ridgecv":
+        scaler = DictMultiScaler(scalers={"mantis": StandardScaler(), "chronos2": StandardScaler()})
+        return scaler, ClippedRegressor(regressor=RidgeCV(alphas=np.logspace(-4, 14, 65)))
+    elif name == "tsfresh-rotf":
+        # FreshPRINCE: efficient TSFresh features + Rotation Forest regressor.
+        from aeon.regression.sklearn import RotationForestRegressor
+
+        scaler = DictMultiScaler(scalers={"tsfresh": NoScaler()})
+        return scaler, RotationForestRegressor(
+            n_estimators=200, n_jobs=n_jobs, random_state=seed
+        )
+    elif name == "drcif-etr":
+        # DrCIF-like: fixed DrCIF interval features + a random-subspace ExtraTrees
+        # whose per-split sqrt subsampling re-creates DrCIF's per-tree randomisation.
+        scaler = DictMultiScaler(scalers={"drcif": NoScaler()})
+        return scaler, ExtraTreesRegressor(
+            n_estimators=200, max_features="sqrt", random_state=seed, n_jobs=n_jobs
+        )
+    elif name == "prediction-etr":
         scaler = DictMultiScaler(scalers={"predictions": StandardScaler()})
-        return scaler, RidgeCV(alphas=np.logspace(-3, 3, 20))
+        return scaler, ExtraTreesRegressor(n_estimators=200, random_state=seed, n_jobs=n_jobs)
     else:
         raise ValueError(f"Unknown regressor model: {name}")
 
@@ -1804,25 +1936,57 @@ def _predict_one_model_reg(model_id, directory, feature_specs, model_dir, fold):
 
 class TSCGlueRegressor(BaseRegressor):
     _tags = {"capability:multivariate": True}
-    DEFAULT_MODEL_NAMES = ["quant-etr", "rstsf-random-etr"]
-    STACKING_MODEL = "prediction-ridgecv"
+    DEFAULT_MODEL_NAMES = [
+        "multirockethydra-etr",
+        "multirockethydra-ridgecv",
+        "multirockethydra-clipped-ridgecv",
+        "quant-etr",
+        "quant-ridgecv",
+        "quant-clipped-ridgecv",
+        "rdst-etr",
+        "rdst-ridgecv",
+        "rdst-clipped-ridgecv",
+        "rstsf-random-etr",
+        "rstsf-random-ridgecv",
+        "rstsf-random-clipped-ridgecv",
+        "fm-etr",
+        "fm-ridgecv",
+        "fm-clipped-ridgecv",
+        "tsfresh-rotf",
+        "drcif-etr",
+    ]
+    STACKING_MODEL = "prediction-etr"
     NO_SUBPROCESS_FEATURES: set[str] = {"multirocket", "rdst", "rstsf-random"}
 
     def _get_feature_names(self, model_name: str) -> tuple[str, ...]:
-        if model_name == "multirockethydra-bestk-ridgecv":
+        if model_name in (
+            "multirockethydra-etr",
+            "multirockethydra-ridgecv",
+            "multirockethydra-clipped-ridgecv",
+        ):
             return ("multirocket", "hydra")
-        elif model_name == "quant-etr":
+        elif model_name in ("quant-etr", "quant-ridgecv", "quant-clipped-ridgecv"):
             return ("quant",)
-        elif model_name == "rdst-ridgecv":
+        elif model_name in ("rdst-etr", "rdst-ridgecv", "rdst-clipped-ridgecv"):
             return ("rdst",)
-        elif model_name == "rstsf-random-etr":
+        elif model_name in (
+            "rstsf-random-etr",
+            "rstsf-random-ridgecv",
+            "rstsf-random-clipped-ridgecv",
+        ):
             return ("rstsf-random",)
+        elif model_name in ("fm-etr", "fm-ridgecv", "fm-clipped-ridgecv"):
+            return ("mantis", "chronos2")
+        elif model_name == "tsfresh-rotf":
+            return ("tsfresh",)
+        elif model_name == "drcif-etr":
+            return ("drcif",)
         else:
             raise ValueError(f"Unknown model {model_name}")
 
     def _make_feature_spec(self, feature_name: str, group_rng: np.random.Generator) -> FeatureSpec:
         use_subprocess = feature_name not in self.NO_SUBPROCESS_FEATURES
-        if feature_name == "quant":
+        if feature_name in ("quant", "mantis", "chronos2", "tsfresh"):
             return FeatureSpec(feature_name=feature_name, use_subprocess=use_subprocess)
         return FeatureSpec(
             feature_name=feature_name,
@@ -1879,6 +2043,7 @@ class TSCGlueRegressor(BaseRegressor):
         n_repetitions=1,
         runs_dir=None,
         time_limit=None,
+        drop_nonpositive_r2=True,
     ):
         assert time_limit is None, "time_limit is currently not supported"
         super().__init__()
@@ -1889,6 +2054,10 @@ class TSCGlueRegressor(BaseRegressor):
         self.verbose = int(verbose)
         self.n_repetitions = int(n_repetitions)
         self.runs_dir = runs_dir
+        # When True, base models whose OOF R² <= 0 (no better than predicting the
+        # mean) are excluded from the stacking matrix so off-scale / no-skill
+        # columns can't poison the stacker.
+        self.drop_nonpositive_r2 = bool(drop_nonpositive_r2)
 
         self._rng = np.random.default_rng(random_state)
         self._run_id = uuid.uuid4().hex[:16]
@@ -2028,13 +2197,18 @@ class TSCGlueRegressor(BaseRegressor):
         self._fit_transform_features(X, fit_start_time=fit_start)
 
         n_samples = X.shape[0]
-        oof_preds = {spec.get_model_id(): np.zeros(n_samples) for spec in self.model_specs}
-        oof_counts = {
-            spec.get_model_id(): np.zeros(n_samples, dtype=int) for spec in self.model_specs
+        # One OOF vector per repetition (each repetition's k folds cover every
+        # sample exactly once); combined across repetitions with the median so a
+        # single extrapolating fold can't dominate the OOF estimate.
+        oof_pred_mats = {
+            spec.get_model_id(): np.full((spec.n_repetitions, n_samples), np.nan)
+            for spec in self.model_specs
         }
+        oof_preds: dict[str, np.ndarray] = {}
         expected_folds = {
             spec.get_model_id(): self.k_folds * spec.n_repetitions for spec in self.model_specs
         }
+        base_oof_r2: dict[str, float] = {}
 
         tasks = []
         for spec in self.model_specs:
@@ -2042,7 +2216,8 @@ class TSCGlueRegressor(BaseRegressor):
             fold_counter = 0
             for fold_seed in spec.fold_seeds:
                 for train_idx, val_idx in generate_folds(
-                    X, y, n_splits=self.k_folds, n_repetitions=1, random_state=fold_seed
+                    X, y, n_splits=self.k_folds, n_repetitions=1, random_state=fold_seed,
+                    stratify=False,
                 ):
                     fold_model_seed = int(fold_rng.integers(0, 2**31 - 1))
                     tasks.append(
@@ -2090,31 +2265,45 @@ class TSCGlueRegressor(BaseRegressor):
                         level=2,
                         start_time=fit_start,
                     )
-                    oof_preds[model_id_result][val_idx] += preds
-                    oof_counts[model_id_result][val_idx] += 1
+                    repetition = fold_number // self.k_folds
+                    oof_pred_mats[model_id_result][repetition, val_idx] = preds
                     model_groups[model_id_result].append(fold_number)
                     model_train_times[model_id_result].append(train_dur)
 
                     if len(model_groups[model_id_result]) == expected_folds[model_id_result]:
                         del model_groups[model_id_result]
-                        counts = oof_counts[model_id_result]
-                        oof_preds[model_id_result] = np.where(
-                            counts > 0, oof_preds[model_id_result] / counts, np.nan
+                        # TODO(debug): remove — temporary per-rep OOF matrices for
+                        # diagnosing median-vs-mean OOF blowups (e.g. rocket-ridge).
+                        self.__dict__.setdefault("_dbg_oof_mats", {})[model_id_result] = (
+                            oof_pred_mats[model_id_result].copy()
+                        )
+                        oof_preds[model_id_result] = np.nanmedian(
+                            oof_pred_mats[model_id_result], axis=0
                         )
                         residuals = y - oof_preds[model_id_result]
                         oof_rmse = float(np.sqrt(np.nanmean(residuals**2)))
+                        oof_mae = float(np.nanmean(np.abs(residuals)))
                         oof_r2 = float(r2_score(y, oof_preds[model_id_result]))
+                        # Outlier-robust R² (predictions clipped to the target
+                        # range before scoring) so a single off-scale sample
+                        # (high-leverage ridge extrapolation) can't dominate it.
+                        oof_r2_robust = _robust_r2(y, oof_preds[model_id_result])
+                        base_oof_r2[model_id_result] = oof_r2
                         self._oof_scores.append(
                             {
                                 "model": model_id_result,
                                 "level": 0,
                                 "oof_rmse": oof_rmse,
+                                "oof_mae": oof_mae,
                                 "oof_r2": oof_r2,
+                                "oof_r2_robust": oof_r2_robust,
                                 "train_time": model_train_times.pop(model_id_result),
                             }
                         )
                         self.log(
-                            f"OOF RMSE (base) {model_id_result}: {oof_rmse:.4f}  R²: {oof_r2:.4f}",
+                            f"OOF  {model_id_result:<48}"
+                            f"RMSE {oof_rmse:7.4f}   MAE {oof_mae:7.4f}   "
+                            f"R² {oof_r2:>10.4f}   robust R² {oof_r2_robust:>8.4f}",
                             level=1,
                             start_time=fit_start,
                         )
@@ -2122,13 +2311,46 @@ class TSCGlueRegressor(BaseRegressor):
                 if not self.stacking_models:
                     return
 
-                self._stacking_model_order = [spec.get_model_id() for spec in self.model_specs]
+                all_base_models = [spec.get_model_id() for spec in self.model_specs]
+                if self.drop_nonpositive_r2:
+                    kept = [m for m in all_base_models if base_oof_r2.get(m, 0.0) > 0.0]
+                    removed = [m for m in all_base_models if m not in kept]
+                    # Don't let an aggressive cut leave the stacker with nothing:
+                    # if every model is non-positive, fall back to the single best.
+                    if not kept:
+                        best = max(all_base_models, key=lambda m: base_oof_r2.get(m, float("-inf")))
+                        kept = [best]
+                        removed = [m for m in all_base_models if m != best]
+                        self.log(
+                            "All base models have OOF R² <= 0; keeping best-R² model "
+                            f"{best} ({base_oof_r2.get(best, float('nan')):.4f}) for stacking.",
+                            level=1,
+                        )
+                    for m in removed:
+                        self.log(
+                            f"Stacking: REMOVED {m} (OOF R² {base_oof_r2.get(m, float('nan')):.4f} <= 0)",
+                            level=1,
+                        )
+                    for m in kept:
+                        self.log(
+                            f"Stacking: KEPT    {m} (OOF R² {base_oof_r2.get(m, float('nan')):.4f})",
+                            level=1,
+                        )
+                    self.log(
+                        f"Stacking: kept {len(kept)}/{len(all_base_models)} base models "
+                        f"(dropped {len(removed)} with R² <= 0)",
+                        level=1,
+                    )
+                    self._stacking_model_order = kept
+                else:
+                    self._stacking_model_order = all_base_models
                 oof_matrix = np.column_stack([oof_preds[mid] for mid in self._stacking_model_order])
                 save_array(oof_matrix, "Xt_predictions", str(self._tmpdir))
 
                 stacker_fold_seed = self._get_seed()
                 stacker_splits = generate_folds(
-                    X, y, n_splits=self.k_folds, n_repetitions=1, random_state=stacker_fold_seed
+                    X, y, n_splits=self.k_folds, n_repetitions=1, random_state=stacker_fold_seed,
+                    stratify=False,
                 )
                 stack_oof_preds = {m: np.zeros(n_samples) for m in self.stacking_models}
                 stack_oof_counts = {m: np.zeros(n_samples, dtype=int) for m in self.stacking_models}
@@ -2190,18 +2412,21 @@ class TSCGlueRegressor(BaseRegressor):
                         )
                         residuals = y - avg_preds
                         oof_rmse = float(np.sqrt(np.nanmean(residuals**2)))
+                        oof_mae = float(np.nanmean(np.abs(residuals)))
                         oof_r2 = float(r2_score(y, avg_preds))
                         self._oof_scores.append(
                             {
                                 "model": model_id_result,
                                 "level": 1,
                                 "oof_rmse": oof_rmse,
+                                "oof_mae": oof_mae,
                                 "oof_r2": oof_r2,
                                 "train_time": model_train_times.pop(model_id_result),
                             }
                         )
                         self.log(
-                            f"OOF RMSE (stack) {model_id_result}: {oof_rmse:.4f}  R²: {oof_r2:.4f}",
+                            f"OOF  {model_id_result:<48}"
+                            f"RMSE {oof_rmse:7.4f}   MAE {oof_mae:7.4f}   R² {oof_r2:>10.4f}",
                             level=1,
                             start_time=fit_start,
                         )
@@ -2214,6 +2439,26 @@ class TSCGlueRegressor(BaseRegressor):
                 self._tmpdir = None
 
     def _predict(self, X):
+        # predict_per_model computes every base model's prediction and runs the
+        # stacker(s) on top; the final prediction is just the stacker output
+        # (median across stacking models if there is more than one).
+        per_model = self.predict_per_model(X)
+        if not self.stacking_models:
+            keys = [spec.get_model_id() for spec in self.model_specs]
+        else:
+            keys = list(self.stacking_models)
+        return np.median(np.stack([per_model[k] for k in keys]), axis=0)
+
+    def predict_per_model(self, X: np.ndarray) -> dict[str, np.ndarray]:
+        """Return the test prediction of every base model, keyed by model id.
+
+        Predictions are the median over each model's folds, the same way they feed
+        the stacker. Includes models excluded from stacking (see
+        ``drop_nonpositive_r2``) so their individual skill can still be measured,
+        e.g. ``{m: r2_score(y_test, p) for m, p in reg.predict_per_model(X).items()}``.
+        The stacking model(s) are included too (keyed by stacking model name), so
+        the same dict also holds the final stacked prediction.
+        """
         predict_start = perf_counter()
         features_infer = self._base_dir / "features_inference"
         features_stack = self._base_dir / "features_stack"
@@ -2227,10 +2472,7 @@ class TSCGlueRegressor(BaseRegressor):
                 save_array(X, "X", str(features_infer), dtype=self._feature_dtype)
                 self._compute_features(X, str(features_infer), start_time=predict_start)
 
-                base_preds_sum = {
-                    spec.get_model_id(): np.zeros(X.shape[0]) for spec in self.model_specs
-                }
-                base_preds_count = {spec.get_model_id(): 0 for spec in self.model_specs}
+                base_pred_folds = {spec.get_model_id(): [] for spec in self.model_specs}
 
                 tasks = [
                     (
@@ -2250,16 +2492,18 @@ class TSCGlueRegressor(BaseRegressor):
                         preds, predict_dur, model_id_res = future.result()
                     except Exception as e:
                         raise RuntimeError(f"Worker failed predicting {model_id_task}: {e}") from e
-                    base_preds_sum[model_id_res] += preds
-                    base_preds_count[model_id_res] += 1
+                    base_pred_folds[model_id_res].append(preds)
 
                 base_preds = {
-                    mid: base_preds_sum[mid] / base_preds_count[mid] for mid in base_preds_sum
+                    mid: np.median(np.stack(folds), axis=0)
+                    for mid, folds in base_pred_folds.items()
                 }
 
                 if not self.stacking_models:
-                    return np.mean(list(base_preds.values()), axis=0)
+                    return base_preds
 
+                # Run the stacker(s) on the base predictions and add them to the
+                # returned dict, keyed by stacking model name.
                 stacking_matrix = np.column_stack(
                     [base_preds[mid] for mid in self._stacking_model_order]
                 )
@@ -2267,8 +2511,7 @@ class TSCGlueRegressor(BaseRegressor):
                 save_array(X, "X", str(features_stack), dtype=self._feature_dtype)
                 save_array(stacking_matrix, "Xt_predictions", str(features_stack))
 
-                stack_preds_sum = np.zeros(X.shape[0])
-                stack_count = 0
+                stack_pred_folds = {m: [] for m in self.stacking_models}
                 stack_tasks = [
                     (
                         model_name,
@@ -2289,11 +2532,11 @@ class TSCGlueRegressor(BaseRegressor):
                         raise RuntimeError(
                             f"Worker failed stacking predict {model_id_task}: {e}"
                         ) from e
-                    stack_preds_sum += preds
-                    stack_count += 1
+                    stack_pred_folds[model_id_res].append(preds)
 
-                return stack_preds_sum / stack_count
-
+                for m, folds in stack_pred_folds.items():
+                    base_preds[m] = np.median(np.stack(folds), axis=0)
+                return base_preds
         finally:
             for d in (features_infer, features_stack):
                 if d.exists():
