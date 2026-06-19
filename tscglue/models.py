@@ -1693,7 +1693,13 @@ class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
         assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
         assert eval_metric in _VALID_EVAL_METRICS, f"eval_metric must be one of {_VALID_EVAL_METRICS}; got {eval_metric!r}"
         assert time_limit is None, "time_limit is currently not supported"
-        stacking = ["probability-ridgecv"] if eval_metric == "accuracy" else ["probability-logisticcv"]
+        # Hardcoded best stacker per metric (from the critical-difference study):
+        # ridge wins on accuracy; ExtraTrees wins log-loss and AUC.
+        stacking = {
+            "accuracy": ["probability-ridgecv"],
+            "log_loss": ["probability-et"],
+            "roc_auc": ["probability-et"],
+        }[eval_metric]
         super().__init__(
             random_state=random_state,
             n_repetitions=n_repetitions,
