@@ -41,6 +41,49 @@ def test_ag_stacking_on_coffee():
     assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
 
 
+def _make_classification_data(n_per_class=10, n_classes=15, n_timesteps=16, seed=0):
+    """Synthetic multiclass series with INTEGER labels 0..n_classes-1.
+
+    15 integer-labeled classes is what exercises the multiclass roc_auc
+    label-ordering path (labels 10..14 sort differently by repr vs numerically).
+    """
+    rng = np.random.default_rng(seed)
+    X, y = [], []
+    for c in range(n_classes):
+        center = rng.standard_normal(n_timesteps) + c
+        for _ in range(n_per_class):
+            X.append((center + 0.3 * rng.standard_normal(n_timesteps))[None, :])
+            y.append(c)
+    return np.asarray(X, dtype=np.float32), np.asarray(y, dtype=int)
+
+
+@pytest.mark.parametrize("eval_metric", ["accuracy", "log_loss", "roc_auc"])
+def test_classifier_eval_metrics_multiclass(eval_metric):
+    # 15 integer-labeled classes -> roc_auc would raise "labels must be ordered"
+    # before the label-sorting fix.
+    X_train, y_train = _make_classification_data(seed=0)
+    X_test, y_test = _make_classification_data(seed=1)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCGlueClassifier(
+            random_state=0,
+            n_repetitions=1,
+            k_folds=3,
+            n_jobs=2,
+            eval_metric=eval_metric,
+            runs_dir=tmp_dir,
+        )
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        proba = model.predict_proba(X_test)
+
+    assert y_pred.shape == (len(X_test),)
+    assert set(np.unique(y_pred)).issubset(set(np.unique(y_train)))
+    assert proba.shape == (len(X_test), len(np.unique(y_train)))
+    assert np.isfinite(proba).all()
+    np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
+
+
 @pytest.mark.parametrize("feature_dtype", [None, "float32", "float64"])
 def test_v10base_feature_dtype(feature_dtype):
     """Test that LokyStackerV10Base fit+predict works with different feature_dtype values."""

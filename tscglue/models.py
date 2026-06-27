@@ -749,16 +749,12 @@ class LokyStackerV10Base(BaseClassifier):
     def _label_to_python(self, value: Any) -> Any:
         return value.item() if isinstance(value, np.generic) else value
 
-    def _label_sort_key(self, value: Any) -> tuple[str, str]:
-        value = self._label_to_python(value)
-        return type(value).__name__, repr(value)
-
     def _probability_key(self, level: int, model_name: str, cls: Any) -> tuple[int, str, Any]:
         return int(level), model_name, self._label_to_python(cls)
 
-    def _probability_sort_key(self, key: tuple[int, str, Any]) -> tuple[int, str, tuple[str, str]]:
+    def _probability_sort_key(self, key: tuple[int, str, Any]) -> tuple[int, str, Any]:
         level, model_name, cls = key
-        return level, model_name, self._label_sort_key(cls)
+        return level, model_name, self._label_to_python(cls)
 
     def _aggregate_prediction_matrix(
         self,
@@ -833,9 +829,7 @@ class LokyStackerV10Base(BaseClassifier):
         model_preds = [p for p in predictions if p["model"] == model_name]
         if not model_preds:
             return predictions
-        classes = sorted(
-            {self._label_to_python(p["class"]) for p in model_preds}, key=self._label_sort_key
-        )
+        classes = sorted({self._label_to_python(p["class"]) for p in model_preds})
         class_to_idx = {c: i for i, c in enumerate(classes)}
         prob_sum = np.zeros((n_samples, len(classes)), dtype=np.float64)
         prob_count = np.zeros((n_samples, len(classes)), dtype=np.int32)
