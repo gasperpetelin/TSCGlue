@@ -915,9 +915,10 @@ class LokyStackerV10Base(BaseClassifier):
         directory = str(self._tmpdir)
         X_path = str(self._tmpdir / "X.npy")
 
+        _GPU_FEATURE_NAMES = {"mantis", "chronos2"}
         use_gpu = self._device != "cpu"
-        gpu_features = [ft for ft in self.features_list if ft.feature_name != "raw" and ft.use_subprocess and use_gpu]
-        cpu_features = [ft for ft in self.features_list if ft.feature_name != "raw" and (not ft.use_subprocess or not use_gpu)]
+        gpu_features = [ft for ft in self.features_list if ft.feature_name != "raw" and ft.feature_name in _GPU_FEATURE_NAMES and use_gpu]
+        cpu_features = [ft for ft in self.features_list if ft.feature_name != "raw" and (ft.feature_name not in _GPU_FEATURE_NAMES or not use_gpu)]
         gpu_error: list[BaseException] = []
 
         def _log_feature(ft, t0):
