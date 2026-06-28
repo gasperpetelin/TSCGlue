@@ -1,5 +1,6 @@
 import multiprocessing
 import os
+import threading
 import pickle
 import shutil
 import uuid
@@ -903,13 +904,67 @@ class LokyStackerV10Base(BaseClassifier):
     # ----------------- features: train transformers + compute arrays -----------------
 
     def fit_transform_features(self, X: np.ndarray, fit_start_time=None) -> None:
-        """Fit transformers and compute features, optionally in a subprocess per transformer."""
+        """Fit transformers and compute features.
+
+        When a GPU is available, GPU-bound features (use_subprocess=True) run in a
+        background thread while CPU features run on the main thread, so both processors
+        are used simultaneously. When no GPU is available all features run sequentially
+        on the main thread, identical to the previous behaviour.
+        """
         os.makedirs(self._model_dir, exist_ok=True)
         directory = str(self._tmpdir)
         X_path = str(self._tmpdir / "X.npy")
-        for ft in self.features_list:
-            if ft.feature_name == "raw":
-                continue
+
+        use_gpu = self._device != "cpu"
+        gpu_features = [ft for ft in self.features_list if ft.feature_name != "raw" and ft.use_subprocess and use_gpu]
+        cpu_features = [ft for ft in self.features_list if ft.feature_name != "raw" and (not ft.use_subprocess or not use_gpu)]
+        gpu_error: list[BaseException] = []
+
+        def _log_feature(ft, t0):
+            Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
+            size_mb = Xt.nbytes / (1024 * 1024)
+            elapsed = perf_counter() - t0
+            self.log(
+                f"Fit+transformed {ft.get_feature_id()} features {Xt.shape} ({size_mb:.2f} MB) dtype={Xt.dtype} in {elapsed:.4f}s",
+                level=1,
+                start_time=fit_start_time,
+            )
+            self._transform_times.append(
+                {
+                    "model": ft.get_feature_id(),
+                    "level": None,
+                    "oof_accuracy": None,
+                    "train_time": [elapsed],
+                }
+            )
+
+        def _run_gpu_queue():
+            try:
+                for ft in gpu_features:
+                    t0 = perf_counter()
+                    _run_in_subprocess(
+                        _fit_transform_in_subprocess,
+                        (
+                            ft.feature_name,
+                            ft.feature_seed,
+                            self.n_jobs,
+                            X_path,
+                            str(self._model_dir),
+                            directory,
+                            ft.get_feature_id(),
+                            self.feature_dtype,
+                            self.verbose,
+                            self._device,
+                        ),
+                    )
+                    _log_feature(ft, t0)
+            except Exception as e:
+                gpu_error.append(e)
+
+        gpu_thread = threading.Thread(target=_run_gpu_queue, daemon=True)
+        gpu_thread.start()
+
+        for ft in cpu_features:
             t0 = perf_counter()
             if ft.use_subprocess:
                 _run_in_subprocess(
@@ -939,22 +994,11 @@ class LokyStackerV10Base(BaseClassifier):
                     self.feature_dtype,
                     self._device,
                 )
-            Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
-            size_mb = Xt.nbytes / (1024 * 1024)
-            elapsed = perf_counter() - t0
-            self.log(
-                f"Fit+transformed {ft.get_feature_id()} features {Xt.shape} ({size_mb:.2f} MB) dtype={Xt.dtype} in {elapsed:.4f}s",
-                level=1,
-                start_time=fit_start_time,
-            )
-            self._transform_times.append(
-                {
-                    "model": ft.get_feature_id(),
-                    "level": None,
-                    "oof_accuracy": None,
-                    "train_time": [elapsed],
-                }
-            )
+            _log_feature(ft, t0)
+
+        gpu_thread.join()
+        if gpu_error:
+            raise RuntimeError("GPU feature extraction failed") from gpu_error[0]
 
     def compute_features(self, X: np.ndarray, directory: str, start_time=None) -> None:
         compute_start = perf_counter()
