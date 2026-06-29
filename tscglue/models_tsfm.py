@@ -91,23 +91,28 @@ class MantisEmbedding(BaseEstimator, TransformerMixin):
     def __init__(self, device="cpu", include_diff=True):
         self.device = device
         self.include_diff = include_diff
+        self._model = None
 
     def fit(self, X, y=None):
         return self
 
+    def _get_model(self):
+        if self._model is None:
+            from mantis.architecture import MantisV2
+            from mantis.trainer import MantisTrainer
+
+            network = MantisV2(device=self.device).from_pretrained("paris-noah/MantisV2")
+            self._model = MantisTrainer(device=self.device, network=network)
+        return self._model
+
     def _embed_channel(self, X):
         torch = _require_torch()
         import torch.nn.functional as F
-        from mantis.architecture import MantisV2
-        from mantis.trainer import MantisTrainer
 
-        network = MantisV2(device=self.device)
-        network = network.from_pretrained("paris-noah/MantisV2")
-        model = MantisTrainer(device=self.device, network=network)
         X_r = F.interpolate(
             torch.tensor(X, dtype=torch.float), size=512, mode="linear", align_corners=False
         ).numpy()
-        return model.transform(X_r)
+        return self._get_model().transform(X_r)
 
     def _embed(self, X):
         if X.shape[1] == 1:
