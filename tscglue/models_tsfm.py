@@ -93,6 +93,11 @@ class MantisEmbedding(BaseEstimator, TransformerMixin):
         self.include_diff = include_diff
         self._model = None
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_model"] = None
+        return state
+
     def fit(self, X, y=None):
         return self
 
