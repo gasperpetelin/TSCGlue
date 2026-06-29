@@ -1004,9 +1004,45 @@ class LokyStackerV10Base(BaseClassifier):
     def compute_features(self, X: np.ndarray, directory: str, start_time=None) -> None:
         compute_start = perf_counter()
         X_path = f"{directory}/X.npy"
-        for ft in self.features_list:
-            if ft.feature_name == "raw":
-                continue
+
+        _GPU_FEATURE_NAMES = {"mantis", "chronos2"}
+        use_gpu = self._device != "cpu"
+        gpu_features = [ft for ft in self.features_list if ft.feature_name != "raw" and ft.feature_name in _GPU_FEATURE_NAMES and use_gpu]
+        cpu_features = [ft for ft in self.features_list if ft.feature_name != "raw" and (ft.feature_name not in _GPU_FEATURE_NAMES or not use_gpu)]
+        gpu_error: list[BaseException] = []
+
+        def _log_feature(ft, t0):
+            Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
+            size_mb = Xt.nbytes / (1024 * 1024)
+            self.log(
+                f"Computed {ft.get_feature_id()} features {Xt.shape} ({size_mb:.2f} MB) dtype={Xt.dtype} in {perf_counter() - t0:.4f}s",
+                level=1,
+                start_time=compute_start if start_time is None else start_time,
+            )
+
+        def _run_gpu_queue():
+            try:
+                for ft in gpu_features:
+                    t0 = perf_counter()
+                    _run_in_subprocess(
+                        _transform_in_subprocess,
+                        (
+                            ft.get_feature_id(),
+                            X_path,
+                            str(self._model_dir),
+                            directory,
+                            self.feature_dtype,
+                            self.verbose,
+                        ),
+                    )
+                    _log_feature(ft, t0)
+            except Exception as e:
+                gpu_error.append(e)
+
+        gpu_thread = threading.Thread(target=_run_gpu_queue, daemon=True)
+        gpu_thread.start()
+
+        for ft in cpu_features:
             t0 = perf_counter()
             if ft.use_subprocess:
                 _run_in_subprocess(
@@ -1028,13 +1064,11 @@ class LokyStackerV10Base(BaseClassifier):
                     directory,
                     self.feature_dtype,
                 )
-            Xt = read_array(f"Xt_{ft.get_feature_id()}", directory)
-            size_mb = Xt.nbytes / (1024 * 1024)
-            self.log(
-                f"Computed {ft.get_feature_id()} features {Xt.shape} ({size_mb:.2f} MB) dtype={Xt.dtype} in {perf_counter() - t0:.4f}s",
-                level=1,
-                start_time=compute_start if start_time is None else start_time,
-            )
+            _log_feature(ft, t0)
+
+        gpu_thread.join()
+        if gpu_error:
+            raise RuntimeError("GPU feature extraction failed") from gpu_error[0]
 
     # ----------------- fallback -----------------
 
