@@ -18,22 +18,17 @@ from aeon.classification.base import BaseClassifier
 from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.classification.interval_based import RSTSF
 from aeon.regression.base import BaseRegressor
-from aeon.transformations.collection import (
-    ARCoefficientTransformer,
-    PeriodogramTransformer,
-)
 from aeon.transformations.collection.convolution_based import MultiRocket
 from aeon.transformations.collection.convolution_based._hydra import HydraTransformer
-from aeon.transformations.collection.interval_based import QUANTTransformer, RandomIntervals
+from aeon.transformations.collection.interval_based import QUANTTransformer
 from aeon.transformations.collection.shapelet_based import RandomDilatedShapeletTransform
-from aeon.utils.numba.general import first_order_differences_3d
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, TransformerMixin, clone
 from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor, RandomForestClassifier
 from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
 from sklearn.linear_model import RidgeClassifierCV, RidgeCV
 from sklearn.metrics import accuracy_score, r2_score
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import FunctionTransformer, StandardScaler
+from sklearn.preprocessing import StandardScaler
 from threadpoolctl import threadpool_limits
 
 from tscglue import utils
@@ -2716,41 +2711,3 @@ class RidgeClassifierCVIndicator(RidgeClassifierCV):
     def fit(self, X, y):
         with threadpool_limits(limits=1):
             return super().fit(X, y)
-
-
-class RSTSFUnsupervisedTransformer:
-    def __init__(self, n_intervals=2500, random_state=None, n_jobs=1):
-        self.n_intervals = n_intervals
-        self.random_state = random_state
-        self.n_jobs = n_jobs
-
-    def fit(self, X, y=None):
-        lags = int(12 * (X.shape[2] / 100.0) ** 0.25)
-
-        self._series_transformers = [
-            FunctionTransformer(func=first_order_differences_3d, validate=False),
-            PeriodogramTransformer(),
-            ARCoefficientTransformer(order=lags, replace_nan=True),
-        ]
-
-        transforms = [X] + [t.fit_transform(X) for t in self._series_transformers]
-
-        self._transformers = []
-        for t in transforms:
-            ri = RandomIntervals(
-                n_intervals=self.n_intervals,
-                random_state=self.random_state,
-                n_jobs=self.n_jobs,
-                dilation=[1, 2, 4],
-            )
-            ri.fit(t)
-            self._transformers.append(ri)
-
-        return self
-
-    def transform(self, X):
-        transforms = [X] + [t.transform(X) for t in self._series_transformers]
-        return np.hstack([self._transformers[i].transform(t) for i, t in enumerate(transforms)])
-
-    def fit_transform(self, X, y=None):
-        return self.fit(X).transform(X)
