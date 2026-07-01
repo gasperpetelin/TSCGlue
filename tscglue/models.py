@@ -255,17 +255,6 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None, **kwargs):
         return scaler, clf
     elif name == "rstsf":
         return None, RSTSF(random_state=seed, n_jobs=n_jobs, n_estimators=100)
-    elif name == "rstsf-combined-etc":
-        scaler = DictMultiScaler(scalers={"rstsf-combined": NoScaler()})
-        clf = ExtraTreesClassifier(
-            n_estimators=200,
-            criterion="entropy",
-            class_weight="balanced",
-            max_features="sqrt",
-            n_jobs=n_jobs,
-            random_state=seed,
-        )
-        return scaler, clf
     elif name == "rstsf-random-etc":
         scaler = DictMultiScaler(scalers={"rstsf-random": NoScaler()})
         clf = ExtraTreesClassifier(
@@ -350,10 +339,6 @@ def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1, devic
             from aeon.transformations.collection.feature_based import TSFresh
 
             return TSFresh(default_fc_parameters="efficient", n_jobs=n_jobs)
-        case "rstsf-combined":
-            from tscglue.interval_models import RSTSFCombinedTransformer
-
-            return RSTSFCombinedTransformer(n_jobs=n_jobs, random_state=seed)
         case "rstsf-random":
             from tscglue.interval_models import RSTSFRandomTransformer
 
@@ -581,8 +566,6 @@ class LokyStackerV10Base(BaseClassifier):
             return ("rdst",)
         elif model_name == "rstsf":
             return ("raw",)
-        elif model_name == "rstsf-combined-etc":
-            return ("rstsf-combined",)
         elif model_name == "rstsf-random-etc":
             return ("rstsf-random",)
         elif model_name in ("fm-dummy", "fm-p-ridgecv"):
@@ -2351,11 +2334,6 @@ class TSCGlueRegressor(BaseRegressor):
 
                     if len(model_groups[model_id_result]) == expected_folds[model_id_result]:
                         del model_groups[model_id_result]
-                        # TODO(debug): remove — temporary per-rep OOF matrices for
-                        # diagnosing median-vs-mean OOF blowups (e.g. rocket-ridge).
-                        self.__dict__.setdefault("_dbg_oof_mats", {})[model_id_result] = (
-                            oof_pred_mats[model_id_result].copy()
-                        )
                         oof_preds[model_id_result] = np.nanmedian(
                             oof_pred_mats[model_id_result], axis=0
                         )
@@ -2685,22 +2663,26 @@ class DictMultiScaler(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X: dict[str, np.ndarray], idx=None):
+        select = (lambda arr: arr[idx]) if idx is not None else (lambda arr: arr)
         keys = [key for key in self.scalers_ if key in X]
         if not keys:
             return np.empty((next(iter(X.values())).shape[0], 0))
 
-        n_samples = X[keys[0]][idx].shape[0] if idx is not None else X[keys[0]].shape[0]
         widths = [X[key].shape[1] for key in keys]
+        n_samples = select(X[keys[0]]).shape[0]
         dtype = np.result_type(*(X[key].dtype for key in keys))
 
+        # Pre-allocate the full output once; fill it column-by-column so at most
+        # one scaled feature-group chunk exists alongside it at any given time,
+        # instead of holding every chunk plus a freshly hstack'd copy at once.
         out = np.empty((n_samples, sum(widths)), dtype=dtype)
         col = 0
         for key, width in zip(keys, widths):
-            chunk = X[key][idx] if idx is not None else X[key]
-            scaled = self.scalers_[key].transform(chunk)
+            scaled = self.scalers_[key].transform(select(X[key]))
             out[:, col:col + width] = scaled
             del scaled
             col += width
+
         return out
 
     def fit_transform(self, X: dict[str, np.ndarray], y=None, idx=None):

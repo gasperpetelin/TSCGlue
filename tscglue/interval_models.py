@@ -1,6 +1,6 @@
-"""RSTSF variants: RandomIntervals and UnsupervisedIntervals + GaussianRandomProjection."""
+"""RSTSF variants: RandomIntervals and UnsupervisedIntervals."""
 
-__all__ = ["UnsupervisedIntervals", "RSTSFRandomTransformer", "RSTSFCombinedTransformer"]
+__all__ = ["UnsupervisedIntervals", "RSTSFRandomTransformer"]
 
 import inspect
 
@@ -30,7 +30,6 @@ from joblib import Parallel, delayed
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.preprocessing import FunctionTransformer
-from sklearn.random_projection import GaussianRandomProjection
 from sklearn.utils import check_random_state
 
 
@@ -289,11 +288,12 @@ class _FastRandomIntervals:
         return self
 
     def transform(self, X):
-        parts = []
-        for start, end, dim, feature, dilation in self._ri.intervals_:
+        intervals = self._ri.intervals_
+        Xt = np.empty((X.shape[0], len(intervals)), dtype=X.dtype)
+        for i, (start, end, dim, feature, dilation) in enumerate(intervals):
             seg = X[:, dim, start:end:dilation]  # (n_samples, length)
-            parts.append(feature(seg).reshape(-1, 1))
-        return np.hstack(parts)
+            Xt[:, i] = feature(seg)
+        return Xt
 
 
 def _make_series_transforms(X):
@@ -405,140 +405,19 @@ class RSTSFRandomTransformer(BaseEstimator, TransformerMixin):
     def transform(self, X):
         from time import perf_counter
 
-        t0 = perf_counter()
-        transforms = [X] + [t.transform(X) for t in self._series_transformers]
-        self._log(f"transform series reps: {perf_counter() - t0:.2f}s")
-
+        # Derive each representation (diff/periodogram/AR) one at a time instead of
+        # holding X plus all 3 full-size derived series simultaneously: at most X
+        # plus one derived representation is alive at any point.
+        reps = [None, *self._series_transformers]
         parts = []
-        for name, ri, t in zip(self._REP_NAMES, self._ri_transformers, transforms):
+        for name, ri, series_transformer in zip(self._REP_NAMES, self._ri_transformers, reps):
+            t0 = perf_counter()
+            t = X if series_transformer is None else series_transformer.transform(X)
+            self._log(f"transform series rep={name}: {perf_counter() - t0:.2f}s")
+
             t0 = perf_counter()
             part = ri.transform(t)
+            del t
             self._log(f"transform RI  rep={name}: {perf_counter() - t0:.2f}s")
             parts.append(part)
         return np.hstack(parts)
-
-
-class RSTSFCombinedTransformer(BaseEstimator, TransformerMixin):
-    """Feature extraction stage of RSTSFCombined, usable as a standalone transformer.
-
-    Applies RandomIntervals and UnsupervisedIntervals to the same 4 series
-    representations as RSTSF (original, first differences, periodogram, AR
-    coefficients). Unsupervised features are compressed with
-    GaussianRandomProjection, then concatenated with the random interval features.
-    The result is a fixed-width feature matrix that can be fed to any downstream
-    classifier (e.g. RidgeCV with StandardScaler).
-
-    Parameters
-    ----------
-    n_intervals_random : int, default=600
-    n_intervals_unsupervised : int, default=50
-    min_interval_length : int, default=3
-    n_components : int or "auto", default="auto"
-    random_state : None, int or RandomState, default=None
-    n_jobs : int, default=1
-    verbose : bool, default=False
-    """
-
-    def __init__(
-        self,
-        n_intervals_random=600,
-        n_intervals_unsupervised=50,
-        min_interval_length=3,
-        n_components="auto",
-        random_state=None,
-        n_jobs=1,
-        verbose=False,
-    ):
-        self.n_intervals_random = n_intervals_random
-        self.n_intervals_unsupervised = n_intervals_unsupervised
-        self.min_interval_length = min_interval_length
-        self.n_components = n_components
-        self.random_state = random_state
-        self.n_jobs = n_jobs
-        self.verbose = verbose
-
-    def _log(self, msg):
-        if self.verbose:
-            print(f"[RSTSFCombinedTransformer] {msg}")
-
-    def fit(self, X, y=None):
-        from time import perf_counter
-
-        self._n_jobs = check_n_jobs(self.n_jobs)
-        t0 = perf_counter()
-        transforms, self._series_transformers = _make_series_transforms(X)
-        self._log(f"series transforms: {perf_counter() - t0:.2f}s")
-
-        self._ri_transformers = []
-        self._ui_transformers = []
-
-        rep_names = ["raw", "diff", "periodogram", "ar"]
-        Xt_unsup_probe = []
-        for i, t in enumerate(transforms):
-            t0 = perf_counter()
-            ri = RandomIntervals(
-                n_intervals=self.n_intervals_random,
-                min_interval_length=self.min_interval_length,
-                n_jobs=self._n_jobs,
-                random_state=self.random_state,
-            )
-            ri.fit(t)
-            self._ri_transformers.append(ri)
-            self._log(f"fit RI  rep={rep_names[i]}: {perf_counter() - t0:.2f}s")
-
-            t0 = perf_counter()
-            ui = UnsupervisedIntervals(
-                n_intervals=self.n_intervals_unsupervised,
-                min_interval_length=self.min_interval_length,
-                n_jobs=self._n_jobs,
-                random_state=self.random_state,
-            )
-            ui.fit(t[:1])
-            self._ui_transformers.append(ui)
-            Xt_unsup_probe.append(ui.transform(t[:1]))
-            self._log(f"fit UI  rep={rep_names[i]}: {perf_counter() - t0:.2f}s")
-
-        t0 = perf_counter()
-        probe_unsup = np.hstack(Xt_unsup_probe)
-        n_components = self.n_components
-        if n_components == "auto":
-            from sklearn.random_projection import johnson_lindenstrauss_min_dim
-
-            n_components = min(
-                johnson_lindenstrauss_min_dim(X.shape[0], eps=0.1),
-                probe_unsup.shape[1],
-            )
-        self.rp_ = GaussianRandomProjection(
-            n_components=n_components, random_state=self.random_state
-        )
-        self.rp_.fit(probe_unsup)  # GRP only needs n_features from shape, not actual values
-        self._log(
-            f"fit GRP (unsup_features={probe_unsup.shape[1]} -> n_components={n_components}): {perf_counter() - t0:.2f}s"
-        )
-        return self
-
-    def transform(self, X):
-        from time import perf_counter
-
-        rep_names = ["raw", "diff", "periodogram", "ar"]
-        t0 = perf_counter()
-        transforms = [X] + [t.transform(X) for t in self._series_transformers]
-        self._log(f"transform series reps: {perf_counter() - t0:.2f}s")
-
-        rand_parts, unsup_parts = [], []
-        for i, t in enumerate(transforms):
-            t0 = perf_counter()
-            rand_parts.append(self._ri_transformers[i].transform(t))
-            self._log(f"transform RI  rep={rep_names[i]}: {perf_counter() - t0:.2f}s")
-
-            t0 = perf_counter()
-            unsup_parts.append(self._ui_transformers[i].transform(t))
-            self._log(f"transform UI  rep={rep_names[i]}: {perf_counter() - t0:.2f}s")
-
-        t0 = perf_counter()
-        Xt_rand = np.hstack(rand_parts)
-        Xt_unsup_proj = self.rp_.transform(np.hstack(unsup_parts))
-        self._log(
-            f"GRP projection: {perf_counter() - t0:.2f}s  output={np.hstack((Xt_rand, Xt_unsup_proj)).shape}"
-        )
-        return np.hstack((Xt_rand, Xt_unsup_proj))
