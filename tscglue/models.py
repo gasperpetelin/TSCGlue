@@ -1593,7 +1593,6 @@ class LokyStackerV10Base(BaseClassifier):
                     probability_columns=self._probability_columns,
                 )
 
-                save_array(X, "X", str(features_stack), dtype=self.feature_dtype)
                 save_array(prob_array, "Xt_probabilities", str(features_stack))
 
                 # ---- stacking predictions ----
@@ -2568,7 +2567,6 @@ class TSCGlueRegressor(BaseRegressor):
                     [base_preds[mid] for mid in self._stacking_model_order]
                 )
                 os.makedirs(features_stack, exist_ok=True)
-                save_array(X, "X", str(features_stack), dtype=self._feature_dtype)
                 save_array(stacking_matrix, "Xt_predictions", str(features_stack))
 
                 stack_pred_folds = {m: [] for m in self.stacking_models}
