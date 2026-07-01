@@ -388,7 +388,9 @@ def _transform_in_subprocess(
     Xt = transformer.transform(X)
     if verbose >= 3:
         print(f"[subprocess] transform {feature_id}: {perf_counter() - t0:.4f}s")
-    save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
+    if dtype is not None:
+        Xt = np.asarray(Xt, dtype=dtype)
+    save_array(Xt, f"Xt_{feature_id}", output_dir)
 
 
 def _fit_transform_in_subprocess(
@@ -412,14 +414,18 @@ def _fit_transform_in_subprocess(
     if verbose >= 3:
         print(f"[subprocess] fit_transform {feature_id}: {perf_counter() - t0:.4f}s")
     save_model(transformer, f"transformer_{feature_id}", model_dir)
-    save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
+    if dtype is not None:
+        Xt = np.asarray(Xt, dtype=dtype)
+    save_array(Xt, f"Xt_{feature_id}", output_dir)
 
 
 def _transform_inline(feature_id, X_path, model_dir, output_dir, dtype=np.float64):
     X = np.load(X_path, allow_pickle=True)
     transformer = read_model(f"transformer_{feature_id}", model_dir)
     Xt = transformer.transform(X)
-    save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
+    if dtype is not None:
+        Xt = np.asarray(Xt, dtype=dtype)
+    save_array(Xt, f"Xt_{feature_id}", output_dir)
 
 
 def _fit_transform_inline(
@@ -439,7 +445,9 @@ def _fit_transform_inline(
     )
     Xt = transformer.fit_transform(X)
     save_model(transformer, f"transformer_{feature_id}", model_dir)
-    save_array(Xt, f"Xt_{feature_id}", output_dir, dtype=dtype)
+    if dtype is not None:
+        Xt = np.asarray(Xt, dtype=dtype)
+    save_array(Xt, f"Xt_{feature_id}", output_dir)
 
 
 @dataclass(frozen=True)
