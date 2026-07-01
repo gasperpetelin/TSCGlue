@@ -2629,32 +2629,34 @@ class SparseScaler:
         self.mask = mask
         self.exponent = exponent
 
+    def _prep(self, X):
+        return np.sqrt(np.clip(X, 0, None))
+
+    def _fit_stats(self, Xt, dtype):
+        # epsilon = mean((X == 0)) ** exponent + 1e-8 (bool array, no float copy needed)
+        zero_frac = (Xt == 0).mean(axis=0)
+        self.epsilon = zero_frac**self.exponent + 1e-8
+
+        self.mu = Xt.mean(axis=0).astype(dtype)
+        self.sigma = (Xt.std(axis=0) + self.epsilon).astype(dtype)
+
+    def _apply(self, Xt):
+        if self.mask:
+            return ((Xt - self.mu) * (Xt != 0)) / self.sigma
+        else:
+            return (Xt - self.mu) / self.sigma
+
     def fit(self, X, y=None):
-        # clamp(0) → clip to minimum 0
-        X = np.clip(X, 0, None)
-        X = np.sqrt(X)
-
-        # epsilon = mean((X == 0)) ** exponent + 1e-8
-        zero_mask = (X == 0).astype(float)
-        self.epsilon = zero_mask.mean(axis=0) ** self.exponent + 1e-8
-
-        self.mu = X.mean(axis=0)
-        self.sigma = X.std(axis=0) + self.epsilon
-
+        self._fit_stats(self._prep(X), X.dtype)
         return self
 
     def transform(self, X, y=None):
-        X = np.clip(X, 0, None)
-        X = np.sqrt(X)
-
-        if self.mask:
-            mask = (X != 0).astype(float)
-            return ((X - self.mu) * mask) / self.sigma
-        else:
-            return (X - self.mu) / self.sigma
+        return self._apply(self._prep(X))
 
     def fit_transform(self, X, y=None):
-        return self.fit(X).transform(X)
+        Xt = self._prep(X)
+        self._fit_stats(Xt, X.dtype)
+        return self._apply(Xt)
 
 
 class DictMultiScaler(BaseEstimator, TransformerMixin):
@@ -2683,14 +2685,23 @@ class DictMultiScaler(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X: dict[str, np.ndarray], idx=None):
-        parts = []
-        for key in self.scalers_:
-            if key in X:
-                if idx is not None:
-                    parts.append(self.scalers_[key].transform(X[key][idx]))
-                else:
-                    parts.append(self.scalers_[key].transform(X[key]))
-        return np.hstack(parts) if parts else np.empty((next(iter(X.values())).shape[0], 0))
+        keys = [key for key in self.scalers_ if key in X]
+        if not keys:
+            return np.empty((next(iter(X.values())).shape[0], 0))
+
+        n_samples = X[keys[0]][idx].shape[0] if idx is not None else X[keys[0]].shape[0]
+        widths = [X[key].shape[1] for key in keys]
+        dtype = np.result_type(*(X[key].dtype for key in keys))
+
+        out = np.empty((n_samples, sum(widths)), dtype=dtype)
+        col = 0
+        for key, width in zip(keys, widths):
+            chunk = X[key][idx] if idx is not None else X[key]
+            scaled = self.scalers_[key].transform(chunk)
+            out[:, col:col + width] = scaled
+            del scaled
+            col += width
+        return out
 
     def fit_transform(self, X: dict[str, np.ndarray], y=None, idx=None):
         return self.fit(X, y, idx=idx).transform(X, idx=idx)
