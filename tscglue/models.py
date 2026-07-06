@@ -16,6 +16,7 @@ import numpy as np
 import polars as pl
 from aeon.classification.base import BaseClassifier
 from aeon.classification.convolution_based import MultiRocketHydraClassifier
+from aeon.classification.dictionary_based._weasel_v2 import WEASELTransformerV2
 from aeon.classification.interval_based import RSTSF
 from aeon.regression.base import BaseRegressor
 from aeon.transformations.collection.convolution_based import MultiRocket
@@ -24,7 +25,7 @@ from aeon.transformations.collection.interval_based import QUANTTransformer
 from aeon.transformations.collection.shapelet_based import RandomDilatedShapeletTransform
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, TransformerMixin, clone
 from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor, RandomForestClassifier
-from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
+from sklearn.feature_selection import SelectKBest, VarianceThreshold, chi2, f_classif
 from sklearn.linear_model import RidgeClassifierCV, RidgeCV
 from sklearn.metrics import accuracy_score, r2_score
 from sklearn.pipeline import Pipeline
@@ -85,7 +86,14 @@ class RareClassSafeLogisticCV(BaseEstimator, ClassifierMixin):
 
 class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
     def __init__(
-        self, classifier=None, k=None, k_min=6000, k_max=35000, midpoint=300, steepness=0.010
+        self,
+        classifier=None,
+        k=None,
+        k_min=6000,
+        k_max=35000,
+        midpoint=300,
+        steepness=0.010,
+        score_func=f_classif,
     ):
         self.classifier = classifier
         self.k = k
@@ -93,6 +101,7 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
         self.k_max = k_max
         self.midpoint = midpoint
         self.steepness = steepness
+        self.score_func = score_func
 
     def _optimal_k(self, n_train: int) -> int:
         return int(
@@ -113,6 +122,7 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
     # internal helpers
     def _fit(self, X, y):
         k = self.k if self.k is not None else self._optimal_k(X.shape[0])
+        k = min(k, X.shape[1])
 
         if self.classifier is None:
             clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10))
@@ -122,7 +132,7 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
         self.classifier_ = Pipeline(
             [
                 ("var", VarianceThreshold()),
-                ("select", SelectKBest(score_func=f_classif, k=k)),
+                ("select", SelectKBest(score_func=self.score_func, k=k)),
                 ("clf", clf),
             ]
         )
@@ -238,6 +248,10 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None, **kwargs):
         scaler = DictMultiScaler(scalers={"mantis": NoScaler(), "chronos2": NoScaler()})
         clf = DummyClassifier(strategy="prior")
         return scaler, clf
+    elif name == "weasel-bestk-p-ridgecv":
+        scaler = DictMultiScaler(scalers={"weasel": NoScaler()})
+        clf = AutoSelectKBestClassifier(k=30000, score_func=chi2)
+        return scaler, clf
     elif name == "fm-p-ridgecv":
         scaler = DictMultiScaler(scalers={"mantis": StandardScaler(), "chronos2": StandardScaler()})
         clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10))
@@ -308,6 +322,41 @@ class RDSTFloat64(RandomDilatedShapeletTransform):
     def _fit(self, X, y=None):
         return super()._fit(np.asarray(X, dtype=np.float64), y)
 
+
+class WEASELTransformerV2Unsupervised(WEASELTransformerV2):
+    """WEASELTransformerV2 usable in this project's unsupervised feature pipeline.
+
+    Upstream always does ``y.copy()`` in fit_transform, but feature_selection="none"
+    means y is otherwise unused, so a placeholder y stands in for the real labels
+    that the shared feature-fitting call sites don't have access to.
+    """
+
+    def __init__(
+        self,
+        min_window=4,
+        norm_options=(False,),
+        word_lengths=(7, 8),
+        use_first_differences=(True, False),
+        max_feature_count=30_000,
+        random_state=None,
+        n_jobs=4,
+    ):
+        super().__init__(
+            min_window=min_window,
+            norm_options=norm_options,
+            word_lengths=word_lengths,
+            use_first_differences=use_first_differences,
+            feature_selection="none",
+            max_feature_count=max_feature_count,
+            random_state=random_state,
+            n_jobs=n_jobs,
+        )
+
+    def fit_transform(self, X, y=None):
+        if y is None:
+            y = np.zeros(X.shape[0], dtype=int)
+        return super().fit_transform(X, y)
+
     def _transform(self, X, y=None):
         return super()._transform(np.asarray(X, dtype=np.float64), y)
 
@@ -342,6 +391,8 @@ def get_feature_transformer(feature_type: str, seed: int, n_jobs: int = 1, devic
             from tscglue.drcif_features import DrCIFExtractor
 
             return DrCIFExtractor(random_state=seed, n_jobs=n_jobs)
+        case "weasel":
+            return WEASELTransformerV2Unsupervised(random_state=seed, n_jobs=n_jobs)
         case _:
             raise ValueError(f"Unknown feature transformer type: {feature_type}")
 
@@ -573,6 +624,8 @@ class LokyStackerV10Base(BaseClassifier):
             return ("rstsf-random",)
         elif model_name in ("fm-dummy", "fm-p-ridgecv"):
             return ("mantis", "chronos2")
+        elif model_name == "weasel-bestk-p-ridgecv":
+            return ("weasel",)
         elif model_name == "tsfresh-rotf":
             return ("tsfresh",)
         else:
@@ -1772,6 +1825,14 @@ class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
             eval_metric=eval_metric,
         )
         self.time_limit = time_limit
+
+
+class TSCGlueWeaselV2(TSCGlueClassifier):
+    """TSCGlueClassifier plus the WEASELTransformerV2 feature/model."""
+
+    DEFAULT_MODEL_NAMES = LokyStackerV10RSTSFRandom.DEFAULT_MODEL_NAMES + [
+        "weasel-bestk-p-ridgecv"
+    ]
 
 
 class TSCGlueLogisticClassifier(LokyStackerV10RSTSFRandom):
