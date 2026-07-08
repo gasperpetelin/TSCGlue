@@ -11,6 +11,7 @@ from tscglue.models import (
     LokyStackerV10Base,
     TSCAGGlueClassifier,
     TSCGlueClassifier,
+    TSCGlueDual,
     TSCGlueRegressor,
 )
 
@@ -151,6 +152,49 @@ def test_label_dtype(encode_labels):
     accuracy = accuracy_score(y_test_expected, y_pred)
     assert accuracy > 0.1, f"Accuracy {accuracy} is too low (<=0.1)"
     assert accuracy <= 1.0, f"Accuracy {accuracy} is invalid (>1.0)"
+
+
+def test_dual_shares_feature_specs():
+    """Both heads of each representation must reuse the identical cached feature (same seed)."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCGlueDual(random_state=0, runs_dir=tmp_dir)
+
+    assert len(model.model_specs) == 12
+    # 12 models but only 8 transforms: multirocket, hydra, quant, rdst,
+    # rstsf-random, mantis, chronos2, weasel
+    assert len(model.features_list) == 8
+
+    specs = {spec.model_name: spec for spec in model.model_specs}
+    for ridge_name, etc_name in [
+        ("multirockethydra-bestk-p-ridgecv", "multirockethydra-etc"),
+        ("quant-p-ridgecv", "quant-etc"),
+        ("rdst-p-ridgecv", "rdst-etc"),
+        ("rstsf-random-p-ridgecv", "rstsf-random-etc"),
+        ("fm-p-ridgecv", "fm-etc"),
+        ("weasel-bestk-p-ridgecv", "weasel-etc"),
+    ]:
+        ridge_ids = [ft.get_feature_id() for ft in specs[ridge_name].features]
+        etc_ids = [ft.get_feature_id() for ft in specs[etc_name].features]
+        assert ridge_ids == etc_ids, f"{ridge_name} and {etc_name} do not share features"
+
+
+def test_dual_fit_predict():
+    X_train, y_train = _make_classification_data(seed=0)
+    X_test, _ = _make_classification_data(seed=1)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCGlueDual(
+            random_state=0, n_repetitions=1, k_folds=3, n_jobs=2, runs_dir=tmp_dir
+        )
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        proba = model.predict_proba(X_test)
+
+    assert y_pred.shape == (len(X_test),)
+    assert set(np.unique(y_pred)).issubset(set(np.unique(y_train)))
+    assert proba.shape == (len(X_test), len(np.unique(y_train)))
+    assert np.isfinite(proba).all()
+    np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
 
 
 def _make_regression_data(n_train=40, n_test=15, n_channels=1, n_timesteps=30, seed=0):

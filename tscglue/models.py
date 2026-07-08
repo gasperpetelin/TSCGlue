@@ -162,6 +162,17 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
         return self.classifier_.predict_proba(X)
 
 
+def _dual_etc(seed, n_jobs):
+    """Shared ExtraTrees head used by the TSCGlueDual second-head "-etc" models."""
+    return ExtraTreesClassifier(
+        n_estimators=200,
+        criterion="entropy",
+        max_features="sqrt",
+        random_state=seed,
+        n_jobs=n_jobs,
+    )
+
+
 def get_model_v6(name, seed=None, n_jobs=1, model_dir=None, **kwargs):
     """Returns (DictMultiScaler, classifier) for feature/stacking models, or (None, pipe) for series models."""
     if name == "multirockethydra-ridgecv":
@@ -274,6 +285,30 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None, **kwargs):
             n_jobs=n_jobs,
             random_state=seed,
         )
+        return scaler, clf
+    elif name == "multirockethydra-etc":
+        scaler = DictMultiScaler(scalers={"hydra": NoScaler(), "multirocket": NoScaler()})
+        clf = _dual_etc(seed, n_jobs)
+        return scaler, clf
+    elif name == "rdst-etc":
+        scaler = DictMultiScaler(scalers={"rdst": NoScaler()})
+        clf = _dual_etc(seed, n_jobs)
+        return scaler, clf
+    elif name == "fm-etc":
+        scaler = DictMultiScaler(scalers={"mantis": NoScaler(), "chronos2": NoScaler()})
+        clf = _dual_etc(seed, n_jobs)
+        return scaler, clf
+    elif name == "weasel-etc":
+        scaler = DictMultiScaler(scalers={"weasel": NoScaler()})
+        clf = _dual_etc(seed, n_jobs)
+        return scaler, clf
+    elif name == "quant-p-ridgecv":
+        scaler = DictMultiScaler(scalers={"quant": StandardScaler()})
+        clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10))
+        return scaler, clf
+    elif name == "rstsf-random-p-ridgecv":
+        scaler = DictMultiScaler(scalers={"rstsf-random": StandardScaler()})
+        clf = RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10))
         return scaler, clf
     else:
         raise ValueError(f"Unknown model name: {name}")
@@ -612,19 +647,20 @@ class LokyStackerV10Base(BaseClassifier):
             "multirockethydra-bestk-p-ridgecv",
             "multirockethydra-p-ridgecv",
             "multirockethydra-ridgecv",
+            "multirockethydra-etc",
         ):
             return ("multirocket", "hydra")
-        elif model_name == "quant-etc":
+        elif model_name in ("quant-etc", "quant-p-ridgecv"):
             return ("quant",)
-        elif model_name in ("rdst-p-ridgecv", "rdst-ridgecv"):
+        elif model_name in ("rdst-p-ridgecv", "rdst-ridgecv", "rdst-etc"):
             return ("rdst",)
         elif model_name == "rstsf":
             return ("raw",)
-        elif model_name == "rstsf-random-etc":
+        elif model_name in ("rstsf-random-etc", "rstsf-random-p-ridgecv"):
             return ("rstsf-random",)
-        elif model_name in ("fm-dummy", "fm-p-ridgecv"):
+        elif model_name in ("fm-dummy", "fm-p-ridgecv", "fm-etc"):
             return ("mantis", "chronos2")
-        elif model_name == "weasel-bestk-p-ridgecv":
+        elif model_name in ("weasel-bestk-p-ridgecv", "weasel-etc"):
             return ("weasel",)
         elif model_name == "tsfresh-rotf":
             return ("tsfresh",)
@@ -1832,6 +1868,30 @@ class TSCGlueWeaselV2(TSCGlueClassifier):
 
     DEFAULT_MODEL_NAMES = LokyStackerV10RSTSFRandom.DEFAULT_MODEL_NAMES + [
         "weasel-bestk-p-ridgecv"
+    ]
+
+
+class TSCGlueDual(TSCGlueClassifier):
+    """TSCGlueWeaselV2 with both a RidgeCV and an ExtraTrees head per base representation.
+
+    Each representation is computed once (all names are distinct, so build_model_specs
+    puts them in one group with a single FeatureSpec/seed per feature name) and feeds
+    two level-0 models whose OOF probabilities are stacked together.
+    """
+
+    DEFAULT_MODEL_NAMES = [
+        "multirockethydra-bestk-p-ridgecv",
+        "multirockethydra-etc",
+        "quant-etc",
+        "quant-p-ridgecv",
+        "rdst-p-ridgecv",
+        "rdst-etc",
+        "rstsf-random-etc",
+        "rstsf-random-p-ridgecv",
+        "fm-p-ridgecv",
+        "fm-etc",
+        "weasel-bestk-p-ridgecv",
+        "weasel-etc",
     ]
 
 
