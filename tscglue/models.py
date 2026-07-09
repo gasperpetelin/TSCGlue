@@ -2017,13 +2017,17 @@ class TSCGlueBrierSelect(TSCGlueWeaselV2):
 
 
 class TSCGlueMean(TSCGlueBrierSelect):
-    """TSCGlueBrierSelect that always serves the stack-mean instead of the Brier winner.
+    """TSCGlueBrierSelect on the TSCGlueDual base pool, always serving the stack-mean.
 
-    Training is identical (same competing stackers; per-stacker Brier scores are
-    still computed and reported in ``summary()``), but predictions always use the
-    element-wise mean of the calibrated stackers' probabilities
+    Level 0 uses the TSCGlueDual model list: every representation feeds both a
+    RidgeCV and an ExtraTrees head (12 base models). Stacking is identical to
+    TSCGlueBrierSelect (same competing stackers; per-stacker Brier scores are
+    still computed and reported in ``summary()``), but predictions always use
+    the element-wise mean of the calibrated stackers' probabilities
     (``MEAN_STACKER_EXCLUDE`` members excluded).
     """
+
+    DEFAULT_MODEL_NAMES = TSCGlueDual.DEFAULT_MODEL_NAMES
 
     def _select_best_model(self):
         super()._select_best_model()
