@@ -1895,6 +1895,142 @@ class TSCGlueDual(TSCGlueClassifier):
     ]
 
 
+class TSCGlueBrierSelect(TSCGlueWeaselV2):
+    """TSCGlueWeaselV2 with several competing stackers, serving the OOF Brier winner.
+
+    OOF accuracy is a 0/1 count statistic and too noisy to pick a winner on
+    small datasets, so the served stacker is the one with the lowest OOF
+    multiclass Brier score instead — smooth and bounded, so tree stackers
+    emitting exact-0 probabilities aren't catastrophically punished the way
+    log-loss would. A virtual level-2 candidate — the element-wise mean of the
+    calibrated stackers' probabilities — competes alongside the individual
+    stackers. ``eval_metric`` only affects the scores reported in
+    ``summary()``, not which stacker is served.
+    """
+
+    DEFAULT_STACKING_MODELS = [
+        "probability-ridgecv",
+        "probability-logisticcv",
+        "probability-et",
+        "probability-nn",
+        "probability-rf",
+    ]
+
+    # Virtual candidate averaging the stackers' probabilities. Ridge is excluded
+    # because its decision-function pseudo-probabilities are uncalibrated and
+    # would poison the mean.
+    MEAN_STACKER_NAME = "probability-stack-mean"
+    MEAN_STACKER_EXCLUDE = ("probability-ridgecv",)
+
+    def __init__(
+        self,
+        random_state=None,
+        k_folds=10,
+        n_jobs=1,
+        verbose=0,
+        n_repetitions=1,
+        n_gpus=0,
+        runs_dir=None,
+        eval_metric="accuracy",
+        stacking_models=None,
+    ):
+        assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
+        assert eval_metric in _VALID_EVAL_METRICS, f"eval_metric must be one of {_VALID_EVAL_METRICS}; got {eval_metric!r}"
+        # Skips TSCGlueClassifier.__init__: its only job is hardcoding one
+        # stacker per eval_metric, which the competing pool replaces.
+        LokyStackerV10RSTSFRandom.__init__(
+            self,
+            random_state=random_state,
+            n_repetitions=n_repetitions,
+            k_folds=k_folds,
+            n_jobs=n_jobs,
+            keep_features=False,
+            verbose=verbose,
+            n_gpus=n_gpus,
+            runs_dir=runs_dir,
+            stacking_models=(
+                list(stacking_models)
+                if stacking_models is not None
+                else list(self.DEFAULT_STACKING_MODELS)
+            ),
+            eval_metric=eval_metric,
+        )
+
+    def _mean_members(self) -> list[str]:
+        return [m for m in self.stacking_models if m not in self.MEAN_STACKER_EXCLUDE]
+
+    @staticmethod
+    def _brier(proba, y_true, classes) -> float:
+        onehot = (
+            np.asarray(y_true, dtype=str)[:, None] == np.asarray(classes, dtype=str)[None, :]
+        ).astype(np.float64)
+        return float(np.mean(np.sum((proba - onehot) ** 2, axis=1)))
+
+    def _oof_brier_score(self, y, model_name) -> float:
+        prob_array, _level, classes = self._load_model_predictions(model_name)
+        valid = ~np.isnan(prob_array).any(axis=1)
+        if not np.any(valid):
+            return float("inf")
+        return self._brier(prob_array[valid], y[valid], classes)
+
+    def _oof_mean_brier_score(self, y, members) -> float:
+        arrays, classes_ref = [], None
+        valid = np.ones(len(y), dtype=bool)
+        for name in members:
+            prob_array, _level, classes = self._load_model_predictions(name)
+            if classes_ref is None:
+                classes_ref = classes
+            elif classes != classes_ref:
+                raise ValueError(f"Stacker class orderings differ: {classes} vs {classes_ref}")
+            valid &= ~np.isnan(prob_array).any(axis=1)
+            arrays.append(prob_array)
+        if not np.any(valid):
+            return float("inf")
+        mean_proba = np.mean([a[valid] for a in arrays], axis=0)
+        return self._brier(mean_proba, y[valid], classes_ref)
+
+    def _select_best_model(self):
+        y = read_array("y", str(self._require_tmpdir()))
+        brier_scores = {name: self._oof_brier_score(y, name) for name in self.stacking_models}
+        members = self._mean_members()
+        if len(members) >= 2:
+            brier_scores[self.MEAN_STACKER_NAME] = self._oof_mean_brier_score(y, members)
+        for name, score in brier_scores.items():
+            self._oof_scores.append(
+                {
+                    "model": name,
+                    "level": 2 if name == self.MEAN_STACKER_NAME else 1,
+                    "eval_metric": "brier",
+                    "oof_score": score,
+                    "train_time": None,
+                }
+            )
+            self.log(f"OOF brier (stack) {name}: {score}", level=1)
+        self.best_model = min(brier_scores, key=brier_scores.get)
+        self.log(f"Selected stacker by OOF Brier: {self.best_model}", level=1)
+
+    def _predict_proba(self, X):
+        if self.best_model != self.MEAN_STACKER_NAME or self._fallback_path.exists():
+            return super()._predict_proba(X)
+        probas = self.predict_proba_per_model(X)
+        return np.mean([probas[m] for m in self._mean_members()], axis=0)
+
+
+class TSCGlueMean(TSCGlueBrierSelect):
+    """TSCGlueBrierSelect that always serves the stack-mean instead of the Brier winner.
+
+    Training is identical (same competing stackers; per-stacker Brier scores are
+    still computed and reported in ``summary()``), but predictions always use the
+    element-wise mean of the calibrated stackers' probabilities
+    (``MEAN_STACKER_EXCLUDE`` members excluded).
+    """
+
+    def _select_best_model(self):
+        super()._select_best_model()
+        self.best_model = self.MEAN_STACKER_NAME
+        self.log(f"Serving stack-mean: {self.best_model}", level=1)
+
+
 class TSCGlueLogisticClassifier(LokyStackerV10RSTSFRandom):
     STACKING_MODEL = "probability-logisticcv"
 
