@@ -2050,20 +2050,24 @@ class TSCGlueET(TSCGlueBrierSelect):
     DEFAULT_MODEL_NAMES = TSCGlueDual.DEFAULT_MODEL_NAMES
     LEVEL2_NAME = "probability-et-l2"
 
-    def _stacker_oof_matrix(self, y):
-        """Concatenate the stackers' OOF probabilities into the level-2 training matrix.
+    def _level2_input_models(self) -> list[str]:
+        """Model names whose OOF/test probabilities feed the level-2 model."""
+        return list(self.stacking_models)
 
-        Each stacker's block is reordered to ``self.classes_`` column order so the
-        matrix matches what ``predict_proba_per_model`` produces at predict time.
+    def _level2_oof_matrix(self, y):
+        """Concatenate input models' OOF probabilities into the level-2 training matrix.
+
+        Each block is reordered to ``self.classes_`` column order so the matrix
+        matches what ``predict_proba_per_model`` produces at predict time.
         """
         blocks, classes_ref = [], None
         valid = np.ones(len(y), dtype=bool)
-        for name in self.stacking_models:
+        for name in self._level2_input_models():
             prob_array, _level, classes = self._load_model_predictions(name)
             if classes_ref is None:
                 classes_ref = classes
             elif classes != classes_ref:
-                raise ValueError(f"Stacker class orderings differ: {classes} vs {classes_ref}")
+                raise ValueError(f"Model class orderings differ: {classes} vs {classes_ref}")
             meta_to_col = {str(c): i for i, c in enumerate(classes)}
             idx = [meta_to_col[str(c)] for c in self.classes_]
             valid &= ~np.isnan(prob_array).any(axis=1)
@@ -2076,7 +2080,7 @@ class TSCGlueET(TSCGlueBrierSelect):
         super()._select_best_model()
 
         y = read_array("y", str(self._require_tmpdir()))
-        X2, valid = self._stacker_oof_matrix(y)
+        X2, valid = self._level2_oof_matrix(y)
         y_valid = np.asarray(y[valid])
         seed = self._get_feature_seed()
         self.level2_model_ = ExtraTreesClassifier(
@@ -2115,12 +2119,27 @@ class TSCGlueET(TSCGlueBrierSelect):
         if self._fallback_path.exists() or getattr(self, "level2_model_", None) is None:
             return super()._predict_proba(X)
         probas = self.predict_proba_per_model(X)
-        X2 = np.hstack([probas[name] for name in self.stacking_models])
+        X2 = np.hstack([probas[name] for name in self._level2_input_models()])
         proba = self.level2_model_.predict_proba(X2)
         # Align ET's column order with self.classes_ (they should already match).
         et_classes = np.asarray(self.level2_model_.classes_, dtype=str)
         order = [int(np.where(et_classes == s)[0][0]) for s in np.asarray(self.classes_, dtype=str)]
         return proba[:, order]
+
+
+class TSCGlueETAll(TSCGlueET):
+    """TSCGlueET whose level-2 ExtraTrees also sees the base models' probabilities.
+
+    Level-2 input = the five stackers' OOF probabilities plus the 12 base
+    models' OOF probabilities (a stacking skip connection). Everything else —
+    base pool, stackers, diagnostics, serving — is identical to TSCGlueET.
+    """
+
+    LEVEL2_NAME = "probability-et-l2-all"
+
+    def _level2_input_models(self) -> list[str]:
+        base_ids = sorted(spec.get_model_id() for spec in self.model_specs)
+        return list(self.stacking_models) + base_ids
 
 
 class TSCGlueLogisticClassifier(LokyStackerV10RSTSFRandom):
