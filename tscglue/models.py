@@ -2035,6 +2035,94 @@ class TSCGlueMean(TSCGlueBrierSelect):
         self.log(f"Serving stack-mean: {self.best_model}", level=1)
 
 
+class TSCGlueET(TSCGlueBrierSelect):
+    """Three-layer stack: TSCGlueDual base pool, five stackers, level-2 ExtraTrees.
+
+    Level 0: the TSCGlueDual model list (12 base models). Level 1: the same five
+    competing stackers as TSCGlueMean, trained on the base models' OOF
+    probabilities. Level 2: an ExtraTreesClassifier trained on the concatenated
+    OOF probabilities of all level-1 stackers; its predictions are served.
+    Level-1 stacker OOF rows come from fold models that never saw those rows,
+    so the level-2 training inputs are leak-free. Per-stacker Brier scores are
+    still computed and reported in ``summary()`` as diagnostics.
+    """
+
+    DEFAULT_MODEL_NAMES = TSCGlueDual.DEFAULT_MODEL_NAMES
+    LEVEL2_NAME = "probability-et-l2"
+
+    def _stacker_oof_matrix(self, y):
+        """Concatenate the stackers' OOF probabilities into the level-2 training matrix.
+
+        Each stacker's block is reordered to ``self.classes_`` column order so the
+        matrix matches what ``predict_proba_per_model`` produces at predict time.
+        """
+        blocks, classes_ref = [], None
+        valid = np.ones(len(y), dtype=bool)
+        for name in self.stacking_models:
+            prob_array, _level, classes = self._load_model_predictions(name)
+            if classes_ref is None:
+                classes_ref = classes
+            elif classes != classes_ref:
+                raise ValueError(f"Stacker class orderings differ: {classes} vs {classes_ref}")
+            meta_to_col = {str(c): i for i, c in enumerate(classes)}
+            idx = [meta_to_col[str(c)] for c in self.classes_]
+            valid &= ~np.isnan(prob_array).any(axis=1)
+            blocks.append(np.asarray(prob_array)[:, idx])
+        return np.hstack(blocks), valid
+
+    def _select_best_model(self):
+        from sklearn.model_selection import StratifiedKFold, cross_val_predict
+
+        super()._select_best_model()
+
+        y = read_array("y", str(self._require_tmpdir()))
+        X2, valid = self._stacker_oof_matrix(y)
+        y_valid = np.asarray(y[valid])
+        seed = self._get_feature_seed()
+        self.level2_model_ = ExtraTreesClassifier(
+            n_estimators=1000, random_state=seed, n_jobs=self.n_jobs
+        )
+
+        # Diagnostic OOF Brier for the level-2 model itself, comparable to the
+        # stacker/mean rows appended by super().
+        counts = np.unique(y_valid, return_counts=True)[1]
+        n_splits = int(min(self.k_folds, counts.min()))
+        if n_splits >= 2:
+            oof = cross_val_predict(
+                self.level2_model_,
+                X2[valid],
+                y_valid,
+                cv=StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed),
+                method="predict_proba",
+            )
+            l2_brier = self._brier(oof, y_valid, np.unique(y_valid))
+            self._oof_scores.append(
+                {
+                    "model": self.LEVEL2_NAME,
+                    "level": 2,
+                    "eval_metric": "brier",
+                    "oof_score": l2_brier,
+                    "train_time": None,
+                }
+            )
+            self.log(f"OOF brier (level-2) {self.LEVEL2_NAME}: {l2_brier}", level=1)
+
+        self.level2_model_.fit(X2[valid], y_valid)
+        self.best_model = self.LEVEL2_NAME
+        self.log(f"Serving level-2 ExtraTrees: {self.best_model}", level=1)
+
+    def _predict_proba(self, X):
+        if self._fallback_path.exists() or getattr(self, "level2_model_", None) is None:
+            return super()._predict_proba(X)
+        probas = self.predict_proba_per_model(X)
+        X2 = np.hstack([probas[name] for name in self.stacking_models])
+        proba = self.level2_model_.predict_proba(X2)
+        # Align ET's column order with self.classes_ (they should already match).
+        et_classes = np.asarray(self.level2_model_.classes_, dtype=str)
+        order = [int(np.where(et_classes == s)[0][0]) for s in np.asarray(self.classes_, dtype=str)]
+        return proba[:, order]
+
+
 class TSCGlueLogisticClassifier(LokyStackerV10RSTSFRandom):
     STACKING_MODEL = "probability-logisticcv"
 
