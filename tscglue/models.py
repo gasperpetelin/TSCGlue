@@ -2035,6 +2035,26 @@ class TSCGlueMean(TSCGlueBrierSelect):
         self.log(f"Serving stack-mean: {self.best_model}", level=1)
 
 
+class TSCGlueMeanV2(TSCGlueMean):
+    """TSCGlueMean with a probabilistic fallback.
+
+    The fallback is MRHydraET (multirocket+hydra features, ExtraTrees head with
+    clipped probabilities) instead of the ridge-based MultiRocketHydraClassifier,
+    whose one-hot probabilities cost ~34.5 log-loss per misclassified sample on
+    fallback datasets. The main pipeline is identical to TSCGlueMean.
+    """
+
+    def _fit_fallback(self, X, y, fit_start_time):
+        # Local import: tscglue.fallback imports from this module.
+        from tscglue.fallback import MRHydraET
+
+        self.log("Falling back to MRHydraET", level=1, start_time=fit_start_time)
+        fallback = MRHydraET(random_state=self.random_state, n_jobs=self.n_jobs)
+        fallback.fit(X, y)
+        save_model(fallback, "fallback", str(self._model_dir))
+        self.log("Fallback model trained successfully", level=1, start_time=fit_start_time)
+
+
 class TSCGlueET(TSCGlueBrierSelect):
     """Three-layer stack: TSCGlueDual base pool, five stackers, level-2 ExtraTrees.
 
