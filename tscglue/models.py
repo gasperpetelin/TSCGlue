@@ -47,11 +47,12 @@ class RareClassSafeLogisticCV(BaseEstimator, ClassifierMixin):
     is otherwise bit-identical to the original ``LogisticRegressionCV``.
     """
 
-    def __init__(self, Cs=10, fixed_C=1.0, solver="lbfgs", max_iter=1000):
+    def __init__(self, Cs=10, fixed_C=1.0, solver="lbfgs", max_iter=1000, class_weight=None):
         self.Cs = Cs
         self.fixed_C = fixed_C
         self.solver = solver
         self.max_iter = max_iter
+        self.class_weight = class_weight
 
     def fit(self, X, y):
         from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
@@ -64,6 +65,7 @@ class RareClassSafeLogisticCV(BaseEstimator, ClassifierMixin):
                 solver=self.solver,
                 max_iter=self.max_iter,
                 multi_class="multinomial",
+                class_weight=self.class_weight,
             )
         else:
             # Identical to the original stacker: default cv=5, multinomial.
@@ -72,6 +74,7 @@ class RareClassSafeLogisticCV(BaseEstimator, ClassifierMixin):
                 solver=self.solver,
                 max_iter=self.max_iter,
                 multi_class="multinomial",
+                class_weight=self.class_weight,
             )
         self.estimator_.fit(X, y)
         self.classes_ = self.estimator_.classes_
@@ -205,9 +208,17 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None, **kwargs):
         scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
         clf = RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 20))
         return scaler, clf
+    elif name == "probability-ridgecv-balanced":
+        scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
+        clf = RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 20), class_weight="balanced")
+        return scaler, clf
     elif name == "probability-logisticcv":
         scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
         clf = RareClassSafeLogisticCV(Cs=np.logspace(-3, 3, 20))
+        return scaler, clf
+    elif name == "probability-logisticcv-balanced":
+        scaler = DictMultiScaler(scalers={"probabilities": StandardScaler()})
+        clf = RareClassSafeLogisticCV(Cs=np.logspace(-3, 3, 20), class_weight="balanced")
         return scaler, clf
     elif name == "probability-tabicl":
         from tabicl import TabICLClassifier
@@ -223,9 +234,24 @@ def get_model_v6(name, seed=None, n_jobs=1, model_dir=None, **kwargs):
             n_jobs=n_jobs,
         )
         return scaler, clf
+    elif name == "probability-et-balanced":
+        scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
+        clf = ExtraTreesClassifier(
+            n_estimators=1000,
+            class_weight="balanced",
+            random_state=seed,
+            n_jobs=n_jobs,
+        )
+        return scaler, clf
     elif name == "probability-rf":
         scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
         clf = RandomForestClassifier(n_estimators=200, random_state=seed, n_jobs=-1)
+        return scaler, clf
+    elif name == "probability-rf-balanced":
+        scaler = DictMultiScaler(scalers={"probabilities": NoScaler()})
+        clf = RandomForestClassifier(
+            n_estimators=200, class_weight="balanced", random_state=seed, n_jobs=-1
+        )
         return scaler, clf
     elif name == "probability-nn":
         from sklearn.neural_network import MLPClassifier
@@ -2053,6 +2079,31 @@ class TSCGlueMeanV2(TSCGlueMean):
         fallback.fit(X, y)
         save_model(fallback, "fallback", str(self._model_dir))
         self.log("Fallback model trained successfully", level=1, start_time=fit_start_time)
+
+
+class TSCGlueMeanBalanced(TSCGlueMean):
+    """TSCGlueMean with class-weight-balanced stackers.
+
+    Base pool, stack-mean serving and Brier diagnostics are identical to
+    TSCGlueMean; only the level-1 pool changes: RidgeCV, LogisticCV, ExtraTrees
+    and RandomForest are all fit with ``class_weight="balanced"``, so a minority
+    class contributes as much loss as a majority one. ``probability-nn`` stays
+    as-is — MLPClassifier has no ``class_weight`` (and no ``sample_weight`` in
+    ``fit``), so there is nothing to balance. The balanced stackers use distinct
+    model names, so their OOF predictions never collide with the unbalanced ones.
+    """
+
+    DEFAULT_STACKING_MODELS = [
+        "probability-ridgecv-balanced",
+        "probability-logisticcv-balanced",
+        "probability-et-balanced",
+        "probability-nn",
+        "probability-rf-balanced",
+    ]
+
+    # Same rationale as the parent: ridge's decision-function pseudo-probabilities
+    # are uncalibrated and would poison the mean.
+    MEAN_STACKER_EXCLUDE = ("probability-ridgecv-balanced",)
 
 
 class TSCGlueET(TSCGlueBrierSelect):
