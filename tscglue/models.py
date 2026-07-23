@@ -2160,6 +2160,13 @@ class TSCGlueET(TSCGlueBrierSelect):
             blocks.append(np.asarray(prob_array)[:, idx])
         return np.hstack(blocks), valid
 
+    def _make_level2_model(self, seed):
+        """Build the level-2 estimator served on top of the stacker/base OOF
+        matrix. Subclasses can swap in a different head; it only needs
+        ``fit`` / ``predict_proba`` / ``classes_``.
+        """
+        return ExtraTreesClassifier(n_estimators=1000, random_state=seed, n_jobs=self.n_jobs)
+
     def _select_best_model(self):
         from sklearn.model_selection import StratifiedKFold, cross_val_predict
 
@@ -2169,9 +2176,7 @@ class TSCGlueET(TSCGlueBrierSelect):
         X2, valid = self._level2_oof_matrix(y)
         y_valid = np.asarray(y[valid])
         seed = self._get_feature_seed()
-        self.level2_model_ = ExtraTreesClassifier(
-            n_estimators=1000, random_state=seed, n_jobs=self.n_jobs
-        )
+        self.level2_model_ = self._make_level2_model(seed)
 
         # Diagnostic OOF Brier for the level-2 model itself, comparable to the
         # stacker/mean rows appended by super().
@@ -2199,7 +2204,7 @@ class TSCGlueET(TSCGlueBrierSelect):
 
         self.level2_model_.fit(X2[valid], y_valid)
         self.best_model = self.LEVEL2_NAME
-        self.log(f"Serving level-2 ExtraTrees: {self.best_model}", level=1)
+        self.log(f"Serving level-2 model: {self.best_model}", level=1)
 
     def _predict_proba(self, X):
         if self._fallback_path.exists() or getattr(self, "level2_model_", None) is None:
@@ -2207,9 +2212,9 @@ class TSCGlueET(TSCGlueBrierSelect):
         probas = self.predict_proba_per_model(X)
         X2 = np.hstack([probas[name] for name in self._level2_input_models()])
         proba = self.level2_model_.predict_proba(X2)
-        # Align ET's column order with self.classes_ (they should already match).
-        et_classes = np.asarray(self.level2_model_.classes_, dtype=str)
-        order = [int(np.where(et_classes == s)[0][0]) for s in np.asarray(self.classes_, dtype=str)]
+        # Align the level-2 model's column order with self.classes_ (usually already matching).
+        l2_classes = np.asarray(self.level2_model_.classes_, dtype=str)
+        order = [int(np.where(l2_classes == s)[0][0]) for s in np.asarray(self.classes_, dtype=str)]
         return proba[:, order]
 
 
@@ -2246,6 +2251,32 @@ class TSCGlueETAllV2(TSCGlueETAll):
         fallback.fit(X, y)
         save_model(fallback, "fallback", str(self._model_dir))
         self.log("Fallback model trained successfully", level=1, start_time=fit_start_time)
+
+
+class TSCGlueRidgeAll(TSCGlueETAll):
+    """TSCGlueETAll with a RidgeCV level-2 head instead of ExtraTrees.
+
+    Identical to TSCGlueETAll — TSCGlueDual base pool (12 models), the same five
+    stackers, and a level-2 input of the stackers' *and* the base models' OOF
+    probabilities — except the level-2 combiner is the same ridge used by the
+    ``probability-ridgecv`` stacker: a ``RidgeClassifierCVIndicator`` behind a
+    ``StandardScaler``. Its probabilities are one-hot (all mass on the predicted
+    class), exactly like ``TSCGlueClassifier(eval_metric="accuracy")``'s served
+    head, just fed the stacker+base probability matrix instead of base features.
+    """
+
+    LEVEL2_NAME = "probability-ridge-l2-all"
+
+    def _make_level2_model(self, seed):
+        # Same configuration as the probability-ridgecv stacker: standardise the
+        # probability inputs, then a one-hot RidgeClassifierCVIndicator. Ridge is
+        # deterministic, so seed is unused.
+        return Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                ("ridge", RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 20))),
+            ]
+        )
 
 
 _ENHANCED_PRESETS = ("low", "medium", "high")
