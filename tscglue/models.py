@@ -966,6 +966,19 @@ class LokyStackerV10Base(BaseClassifier):
             pred_idx = np.argmax(proba, axis=1)
             preds = np.asarray(classes)[pred_idx]
             return float(accuracy_score(np.asarray(y_true, dtype=str), np.asarray(preds, dtype=str)))
+        elif self.eval_metric == "f1":
+            from sklearn.metrics import f1_score
+            pred_idx = np.argmax(proba, axis=1)
+            preds = np.asarray(classes)[pred_idx]
+            # Macro so every class weighs equally, matching the ovr/macro
+            # convention already used for roc_auc and average_precision here.
+            return float(
+                f1_score(
+                    np.asarray(y_true, dtype=str),
+                    np.asarray(preds, dtype=str),
+                    average="macro",
+                )
+            )
         elif self.eval_metric == "log_loss":
             from sklearn.metrics import log_loss
             return float(log_loss(y_true, proba, labels=classes))
@@ -1848,7 +1861,7 @@ def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0, stratify=T
     return all_folds
 
 
-_VALID_EVAL_METRICS = {"accuracy", "log_loss", "roc_auc"}
+_VALID_EVAL_METRICS = {"accuracy", "f1", "log_loss", "roc_auc"}
 
 
 class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
@@ -1868,9 +1881,11 @@ class TSCGlueClassifier(LokyStackerV10RSTSFRandom):
         assert eval_metric in _VALID_EVAL_METRICS, f"eval_metric must be one of {_VALID_EVAL_METRICS}; got {eval_metric!r}"
         assert time_limit is None, "time_limit is currently not supported"
         # Hardcoded best stacker per metric (from the critical-difference study):
-        # ridge wins on accuracy; ExtraTrees wins log-loss and AUC.
+        # ridge wins on accuracy; ExtraTrees wins log-loss and AUC. f1 follows the
+        # README proposal of matching accuracy (ridge).
         stacking = {
             "accuracy": ["probability-ridgecv"],
+            "f1": ["probability-ridgecv"],
             "log_loss": ["probability-et"],
             "roc_auc": ["probability-et"],
         }[eval_metric]
@@ -2221,6 +2236,128 @@ class TSCGlueETAllV2(TSCGlueETAll):
     whose one-hot probabilities cost ~34.5 log-loss per misclassified sample on
     fallback datasets. The main pipeline is identical to TSCGlueETAll.
     """
+
+    def _fit_fallback(self, X, y, fit_start_time):
+        # Local import: tscglue.fallback imports from this module.
+        from tscglue.fallback import MRHydraET
+
+        self.log("Falling back to MRHydraET", level=1, start_time=fit_start_time)
+        fallback = MRHydraET(random_state=self.random_state, n_jobs=self.n_jobs)
+        fallback.fit(X, y)
+        save_model(fallback, "fallback", str(self._model_dir))
+        self.log("Fallback model trained successfully", level=1, start_time=fit_start_time)
+
+
+_ENHANCED_PRESETS = ("low", "medium", "high")
+
+# low = medium minus the ``weasel`` and ``fm`` representations (README preset table).
+_ENHANCED_LOW_MODELS = [
+    name for name in LokyStackerV10RSTSFRandom.DEFAULT_MODEL_NAMES if name != "fm-p-ridgecv"
+]
+
+# The single low-preset stacker, chosen by ``eval_metric`` (same mapping as
+# TSCGlueClassifier): ridge for accuracy/f1, ExtraTrees for log_loss/roc_auc.
+# ``f1`` follows the README's proposal of matching accuracy (ridge).
+_ENHANCED_LOW_STACKER = {
+    "accuracy": ["probability-ridgecv"],
+    "f1": ["probability-ridgecv"],
+    "log_loss": ["probability-et"],
+    "roc_auc": ["probability-et"],
+}
+
+
+class TSCGlueEnhanced(TSCGlueETAll):
+    """Preset-composed TSCGlue stack — one class, three presets (low/medium/high).
+
+    Implements the preset composition the README documents. A single ``preset``
+    axis selects the level-0 representation/head pool, the level-1 stacker pool
+    and the level-2 serving head; the MRHydraET fallback is shared by all three.
+
+    ============ ============================ ========================= ==========================
+    preset       level 0 (base heads)         level 1 (stackers)        level 2 (served)
+    ============ ============================ ========================= ==========================
+    ``low``      4 reps, 1 head each           1, by ``eval_metric``     the single stacker, direct
+    ``medium``   6 reps, 1 head each           5 competing stackers      ``probability-stack-mean``
+    ``high``     6 reps, 2 heads each (12)      5 competing stackers      ``probability-et-l2-all``
+    ============ ============================ ========================= ==========================
+
+    * ``low`` = ``medium`` minus the ``weasel`` and ``fm`` representations. It
+      trains exactly one stacker, chosen by ``eval_metric`` (``probability-ridgecv``
+      for ``accuracy``/``f1``, ``probability-et`` for ``log_loss``/``roc_auc``), and
+      serves it directly — no Brier selection, no level-2 head.
+    * ``medium`` uses the six-representation ``TSCGlueWeaselV2`` base pool, trains
+      all five stackers and serves the element-wise mean of the calibrated ones
+      (ridge excluded, as in TSCGlueMean).
+    * ``high`` uses the twelve-model ``TSCGlueDual`` base pool (two heads per
+      representation), trains all five stackers and serves an ExtraTrees level-2
+      head fed by the stackers' *and* the base models' OOF probabilities
+      (TSCGlueETAll).
+
+    All presets fall back to MRHydraET when the stack cannot be built (a class
+    with fewer than two instances, or NaNs in the assembled OOF matrix).
+    """
+
+    def __init__(
+        self,
+        random_state=None,
+        k_folds=10,
+        n_jobs=1,
+        verbose=0,
+        n_repetitions=1,
+        n_gpus=0,
+        runs_dir=None,
+        eval_metric="accuracy",
+        preset="high",
+    ):
+        assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
+        assert eval_metric in _VALID_EVAL_METRICS, (
+            f"eval_metric must be one of {_VALID_EVAL_METRICS}; got {eval_metric!r}"
+        )
+        assert preset in _ENHANCED_PRESETS, (
+            f"preset must be one of {_ENHANCED_PRESETS}; got {preset!r}"
+        )
+        self.preset = preset
+
+        if preset == "low":
+            model_names = list(_ENHANCED_LOW_MODELS)
+            stacking_models = list(_ENHANCED_LOW_STACKER[eval_metric])
+        elif preset == "medium":
+            model_names = list(TSCGlueWeaselV2.DEFAULT_MODEL_NAMES)
+            stacking_models = list(self.DEFAULT_STACKING_MODELS)
+        else:  # high
+            model_names = list(TSCGlueDual.DEFAULT_MODEL_NAMES)
+            stacking_models = list(self.DEFAULT_STACKING_MODELS)
+
+        # Skips the intermediate __init__s (they hardcode the pool/stackers this
+        # preset logic replaces), matching how TSCGlueBrierSelect initialises.
+        LokyStackerV10RSTSFRandom.__init__(
+            self,
+            random_state=random_state,
+            n_repetitions=n_repetitions,
+            k_folds=k_folds,
+            n_jobs=n_jobs,
+            keep_features=False,
+            verbose=verbose,
+            n_gpus=n_gpus,
+            runs_dir=runs_dir,
+            model_names=model_names,
+            stacking_models=stacking_models,
+            eval_metric=eval_metric,
+        )
+
+    def _select_best_model(self):
+        if self.preset == "high":
+            # Level-2 ExtraTrees over stacker + base OOF (TSCGlueETAll).
+            super()._select_best_model()
+        elif self.preset == "medium":
+            # Brier diagnostics, then always serve the stack-mean (TSCGlueMean).
+            TSCGlueBrierSelect._select_best_model(self)
+            self.best_model = self.MEAN_STACKER_NAME
+            self.log(f"Serving stack-mean: {self.best_model}", level=1)
+        else:
+            # low: serve the single eval_metric-chosen stacker directly. selection
+            # is None, so this keeps best_model = stacking_models[0] from __init__.
+            LokyStackerV10Base._select_best_model(self)
 
     def _fit_fallback(self, X, y, fit_start_time):
         # Local import: tscglue.fallback imports from this module.
