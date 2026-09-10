@@ -316,7 +316,7 @@ def test_low_preset_serves_its_single_stacker(eval_metric, expected_head):
 
 def test_best_preset_serves_meta_stacker():
     """`best` = high plus a meta stacker over the base and stacker OOF probabilities."""
-    X_train, y_train = _make_classification_data(n_per_class=6, n_classes=3, seed=0)
+    X_train, y_train = _make_classification_data(n_per_class=9, n_classes=3, seed=0)
     X_test, _ = _make_classification_data(n_per_class=2, n_classes=3, seed=1)
 
     with tempfile.TemporaryDirectory() as tmp_dir:
