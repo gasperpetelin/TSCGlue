@@ -45,6 +45,14 @@ cu124 = [
     "transformers",
     "accelerate",
 ]
+cu132 = [
+    "torch",
+    "pytorch-lightning",
+    "chronos-forecasting",
+    "mantis-tsfm>=1.0.0",
+    "transformers",
+    "accelerate",
+]
 dev = [
     "ruff",
     "isort",
@@ -85,6 +93,7 @@ conflicts = [
     [
         { extra = "cpu" },
         { extra = "cu124" },
+        { extra = "cu132" },
     ],
 ]
 
@@ -92,6 +101,7 @@ conflicts = [
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
     { index = "pytorch-cu124", extra = "cu124" },
+    { index = "pytorch-cu132", extra = "cu132" },
 ]
 
 [[tool.uv.index]]
@@ -102,4 +112,9 @@ explicit = true
 [[tool.uv.index]]
 name = "pytorch-cu124"
 url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
 explicit = true

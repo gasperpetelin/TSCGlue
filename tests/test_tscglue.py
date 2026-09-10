@@ -162,7 +162,7 @@ def test_predict_batching_matches_unbatched():
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = TSCGlueClassifier(
-            random_state=0, k_folds=3, n_jobs=2, preset="low", runs_dir=tmp_dir
+            random_state=0, k_folds=3, n_jobs=2, preset="medium", n_gpus=0, runs_dir=tmp_dir
         )
         model.fit(X_train, y_train)
 
@@ -199,7 +199,7 @@ def test_predict_batch_size_from_constructor_and_per_call():
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = TSCGlueClassifier(
-            random_state=0, k_folds=3, n_jobs=2, preset="low", runs_dir=tmp_dir,
+            random_state=0, k_folds=3, n_jobs=2, preset="medium", n_gpus=0, runs_dir=tmp_dir,
             predict_batch_size=9,
         )
         model.fit(X_train, y_train)
@@ -227,7 +227,7 @@ def test_predict_batching_on_fallback_path():
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = TSCGlueClassifier(
-            random_state=0, k_folds=3, n_jobs=2, preset="low", runs_dir=tmp_dir
+            random_state=0, k_folds=3, n_jobs=2, preset="medium", n_gpus=0, runs_dir=tmp_dir
         )
         model.fit(X_train, y_train)
         assert model._fallback_path.exists(), "expected the fallback to be fitted"
@@ -312,6 +312,37 @@ def test_low_preset_serves_its_single_stacker(eval_metric, expected_head):
     assert model.best_model == expected_head
     assert proba.shape == (len(X_test), len(np.unique(y_train)))
     assert np.isfinite(proba).all()
+
+
+def test_best_preset_serves_meta_stacker():
+    """`best` = high plus a meta stacker over the base and stacker OOF probabilities."""
+    X_train, y_train = _make_classification_data(n_per_class=6, n_classes=3, seed=0)
+    X_test, _ = _make_classification_data(n_per_class=2, n_classes=3, seed=1)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCGlueClassifier(
+            random_state=0,
+            k_folds=3,
+            n_jobs=2,
+            preset="best",
+            eval_metric="log_loss",
+            runs_dir=tmp_dir,
+        )
+        assert len(model.model_specs) == 12
+        assert len(model.stacking_models) == 9
+        assert model.meta_stacking_models == ["meta-probability-et"]
+
+        model.fit(X_train, y_train)
+        proba = model.predict_proba(X_test)
+        per_model = model.predict_proba_per_model(X_test)
+
+    assert model.best_model == "meta-probability-et"
+    # 12 base models + 9 stackers, one column per class each.
+    assert len(model._meta_probability_columns) == (12 + 9) * 3
+    np.testing.assert_allclose(proba, per_model["meta-probability-et"])
+    assert proba.shape == (len(X_test), 3)
+    assert np.isfinite(proba).all()
+    np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
 
 
 def test_missing_classes_helper():

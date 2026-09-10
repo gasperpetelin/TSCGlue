@@ -116,6 +116,16 @@ MODELS_DICTIONARY = {
             n_jobs=n_jobs,
         ),
     ),
+    # Meta stacker of the ``best`` preset: probability-et, fed the level-0 and
+    # level-1 OOF probabilities side by side.
+    "meta-probability-et": (
+        {"meta-probabilities": NoScaler},
+        lambda seed=None, n_jobs=1, **_: ExtraTreesClassifier(
+            n_estimators=1000,
+            random_state=seed,
+            n_jobs=n_jobs,
+        ),
+    ),
     "probability-rf": (
         {"probabilities": NoScaler},
         lambda seed=None, n_jobs=1, **_: RandomForestClassifier(
@@ -547,6 +557,7 @@ class LokyStackerV10Base(BaseClassifier):
         runs_dir=None,
         eval_metric="accuracy",
         predict_batch_size=None,
+        meta_stacking_models=None,
     ):
         super().__init__()
         self.k_folds = int(k_folds)
@@ -561,6 +572,7 @@ class LokyStackerV10Base(BaseClassifier):
             stacking_models if stacking_models is not None else [self.STACKING_MODEL]
         )
         self.selection = selection
+        self.meta_stacking_models = list(meta_stacking_models or [])
         self.runs_dir = runs_dir
         self.eval_metric = eval_metric
         assert predict_batch_size is None or predict_batch_size > 0, (
@@ -599,6 +611,7 @@ class LokyStackerV10Base(BaseClassifier):
         self._oof_scores: list[dict] = []
         self._transform_times: list[dict] = []
         self._probability_columns: list[tuple[int, str, Any]] | None = None
+        self._meta_probability_columns: list[tuple[int, str, Any]] | None = None
 
         self._fallback_path: Path = self._model_dir / "fallback.pkl"
 
@@ -778,23 +791,27 @@ class LokyStackerV10Base(BaseClassifier):
             y[np.where(valid)[0]], prob_array[valid], classes, self.eval_metric
         )
 
-    def _build_probability_array(self, n_samples: int):
+    def _build_probability_array(self, n_samples: int, levels=(0,)):
+        """OOF probabilities of every model at ``levels``, side by side.
+
+        Returns the matrix and its column keys (``None, None`` when there are no
+        columns); inference rebuilds the same matrix from those keys.
+        """
         d = self._require_tmpdir()
         prob_files = sorted(p for p in d.glob("pred_*.npy") if not p.name.endswith("_meta.npy"))
         cols, names = [], []
         for path in prob_files:
             model_name = path.stem[5:]  # strip pred_
             prob_array, level, classes = self._load_model_predictions(model_name)
-            if level != 0:
+            if level not in levels:
                 continue
             for i, cls in enumerate(classes):
                 names.append(self._probability_key(level, model_name, cls))
                 cols.append(prob_array[:, i])
         if not cols:
-            return None
+            return None, None
         order = sorted(range(len(names)), key=lambda i: self._probability_sort_key(names[i]))
-        self._probability_columns = [names[i] for i in order]
-        return np.column_stack([cols[i] for i in order])
+        return np.column_stack([cols[i] for i in order]), [names[i] for i in order]
 
     # ----------------- features: train transformers + compute arrays -----------------
 
@@ -1184,7 +1201,9 @@ class LokyStackerV10Base(BaseClassifier):
                         )
 
                 # -------- stacking --------
-                prob_array = self._build_probability_array(n_samples=X.shape[0])
+                prob_array, self._probability_columns = self._build_probability_array(
+                    n_samples=X.shape[0]
+                )
                 if not self.stacking_models:
                     return
                 log(
@@ -1206,119 +1225,29 @@ class LokyStackerV10Base(BaseClassifier):
                 stacker_splits = generate_folds(
                     X, y, n_splits=self.k_folds, n_repetitions=1, random_state=stacker_fold_seed
                 )
-                stack_tasks = []
-                for model_name in self.stacking_models:
-                    stack_fold_rng = np.random.default_rng(self._get_feature_seed())
-                    for fold_no, (train_idx, val_idx) in enumerate(stacker_splits):
-                        stack_fold_seed = int(stack_fold_rng.integers(0, 2**31 - 1))
-                        stack_tasks.append(
-                            (
-                                fold_no,
-                                model_name,  # model_id = model_name for stacking
-                                model_name,
-                                train_idx,
-                                val_idx,
-                                stack_fold_seed,
-                                str(self._tmpdir),
-                                [FeatureSpec(feature_name="probabilities")],
-                                str(self._model_dir),
-                            )
-                        )
+                if not self._fit_stacking_level(
+                    executor, X, y, self.stacking_models, "probabilities", stacker_splits,
+                    level=1, fit_start=fit_start,
+                ):
+                    return
 
-                n_workers = min(self.n_jobs, len(stack_tasks))
-                log(
-                    f"Starting stacking training with {n_workers} workers for {len(stack_tasks)} models",
-                    level=2,
-                    start_time=fit_start,
-                    verbose=self.verbose,
-                )
-
-                futures = {executor.submit(_train_one_model_v10, *t): t for t in stack_tasks}
-                model_groups = defaultdict(list)
-                model_train_times: dict[str, list[float]] = defaultdict(list)
-
-                for future in as_completed(futures):
-                    task = futures[future]
-                    fold_number = task[0]
-                    model_id_task = task[1]
-                    try:
-                        (
-                            train_idx,
-                            val_idx,
-                            proba,
-                            classes_,
-                            model_size,
-                            train_dur,
-                            model_id_result,
-                            fold_number,
-                        ) = future.result()
-                    except Exception as e:
-                        raise RuntimeError(
-                            f"Worker failed during stacking training {model_id_task} fold {fold_number}: {e}"
-                        ) from e
-
-                    log(
-                        f"Trained {model_id_result} in {train_dur:.4f}s for f-{fold_number} "
-                        f"({model_size / (1024 * 1024):.2f} MB)",
-                        level=2,
-                        start_time=fit_start,
-                        verbose=self.verbose,
+                # -------- meta stacking --------
+                # Trained on the level-0 and level-1 OOF probabilities side by side. Its
+                # seeds are drawn only here, so presets without meta stackers keep theirs.
+                if self.meta_stacking_models:
+                    meta_array, self._meta_probability_columns = self._build_probability_array(
+                        n_samples=X.shape[0], levels=(0, 1)
                     )
-
-                    missing = self._missing_classes(classes_)
-                    if missing:
-                        log(
-                            f"Stacker {model_id_result} f-{fold_number} predicts "
-                            f"{len(classes_)}/{self.n_classes_} classes (missing {missing}), "
-                            "stacking not possible",
-                            level=1,
-                            start_time=fit_start,
-                            verbose=self.verbose,
-                        )
-                        for pending in futures:
-                            pending.cancel()
-                        self._fit_fallback(X, y, fit_start)
+                    save_array(meta_array, "Xt_meta-probabilities", str(self._tmpdir))
+                    meta_splits = generate_folds(
+                        X, y, n_splits=self.k_folds, n_repetitions=1,
+                        random_state=self._get_feature_seed(),
+                    )
+                    if not self._fit_stacking_level(
+                        executor, X, y, self.meta_stacking_models, "meta-probabilities",
+                        meta_splits, level=2, fit_start=fit_start,
+                    ):
                         return
-
-                    new_preds = self.add_probabilities(
-                        probas=proba,
-                        classes=classes_,
-                        model_name=model_id_result,
-                        level=1,
-                        indices=val_idx,
-                    )
-                    predictions.extend(new_preds)
-
-                    model_groups[model_id_result].append(fold_number)
-                    model_train_times[model_id_result].append(train_dur)
-                    if len(model_groups[model_id_result]) == self.k_folds:
-                        log(
-                            f"Completed training for model {model_id_result}",
-                            level=2,
-                            start_time=fit_start,
-                            verbose=self.verbose,
-                        )
-                        del model_groups[model_id_result]
-
-                        predictions = self._save_model_predictions(
-                            predictions, model_id_result, n_samples=X.shape[0], level=1
-                        )
-                        oof_score = self._compute_oof_score(y, model_id_result)
-                        self._oof_scores.append(
-                            {
-                                "model": model_id_result,
-                                "level": 1,
-                                "eval_metric": self.eval_metric,
-                                "oof_score": oof_score,
-                                "train_time": model_train_times.pop(model_id_result),
-                            }
-                        )
-                        log(
-                            f"OOF {self.eval_metric} (stack) {model_id_result}: {oof_score}",
-                            level=1,
-                            start_time=fit_start,
-                            verbose=self.verbose,
-                        )
 
                 log("Fit complete", level=1, start_time=fit_start, verbose=self.verbose)
                 self._select_best_model()
@@ -1337,6 +1266,132 @@ class LokyStackerV10Base(BaseClassifier):
             if self.keep_features and self._tmpdir:
                 self.features_training_dir_ = str(self._tmpdir)
             log("Executor shutdown complete", level=2, start_time=fit_start, verbose=self.verbose)
+
+    def _fit_stacking_level(
+        self, executor, X, y, model_names, feature_name, splits, level, fit_start
+    ) -> bool:
+        """Fold-train ``model_names`` on the saved ``Xt_<feature_name>`` array.
+
+        Saves each model's OOF probabilities under ``level`` and records its OOF score.
+        Returns False when a fold model misses a class; the fallback is fitted instead.
+        """
+        stack_tasks = []
+        for model_name in model_names:
+            stack_fold_rng = np.random.default_rng(self._get_feature_seed())
+            for fold_no, (train_idx, val_idx) in enumerate(splits):
+                stack_fold_seed = int(stack_fold_rng.integers(0, 2**31 - 1))
+                stack_tasks.append(
+                    (
+                        fold_no,
+                        model_name,  # model_id = model_name for stacking
+                        model_name,
+                        train_idx,
+                        val_idx,
+                        stack_fold_seed,
+                        str(self._tmpdir),
+                        [FeatureSpec(feature_name=feature_name)],
+                        str(self._model_dir),
+                    )
+                )
+
+        n_workers = min(self.n_jobs, len(stack_tasks))
+        log(
+            f"Starting stacking training with {n_workers} workers for {len(stack_tasks)} models",
+            level=2,
+            start_time=fit_start,
+            verbose=self.verbose,
+        )
+
+        predictions = []
+        futures = {executor.submit(_train_one_model_v10, *t): t for t in stack_tasks}
+        model_groups = defaultdict(list)
+        model_train_times: dict[str, list[float]] = defaultdict(list)
+
+        for future in as_completed(futures):
+            task = futures[future]
+            fold_number = task[0]
+            model_id_task = task[1]
+            try:
+                (
+                    train_idx,
+                    val_idx,
+                    proba,
+                    classes_,
+                    model_size,
+                    train_dur,
+                    model_id_result,
+                    fold_number,
+                ) = future.result()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Worker failed during stacking training {model_id_task} "
+                    f"fold {fold_number}: {e}"
+                ) from e
+
+            log(
+                f"Trained {model_id_result} in {train_dur:.4f}s for f-{fold_number} "
+                f"({model_size / (1024 * 1024):.2f} MB)",
+                level=2,
+                start_time=fit_start,
+                verbose=self.verbose,
+            )
+
+            missing = self._missing_classes(classes_)
+            if missing:
+                log(
+                    f"Stacker {model_id_result} f-{fold_number} predicts "
+                    f"{len(classes_)}/{self.n_classes_} classes (missing {missing}), "
+                    "stacking not possible",
+                    level=1,
+                    start_time=fit_start,
+                    verbose=self.verbose,
+                )
+                for pending in futures:
+                    pending.cancel()
+                self._fit_fallback(X, y, fit_start)
+                return False
+
+            new_preds = self.add_probabilities(
+                probas=proba,
+                classes=classes_,
+                model_name=model_id_result,
+                level=level,
+                indices=val_idx,
+            )
+            predictions.extend(new_preds)
+
+            model_groups[model_id_result].append(fold_number)
+            model_train_times[model_id_result].append(train_dur)
+            if len(model_groups[model_id_result]) == len(splits):
+                log(
+                    f"Completed training for model {model_id_result}",
+                    level=2,
+                    start_time=fit_start,
+                    verbose=self.verbose,
+                )
+                del model_groups[model_id_result]
+
+                predictions = self._save_model_predictions(
+                    predictions, model_id_result, n_samples=X.shape[0], level=level
+                )
+                oof_score = self._compute_oof_score(y, model_id_result)
+                self._oof_scores.append(
+                    {
+                        "model": model_id_result,
+                        "level": level,
+                        "eval_metric": self.eval_metric,
+                        "oof_score": oof_score,
+                        "train_time": model_train_times.pop(model_id_result),
+                    }
+                )
+                label = "stack" if level == 1 else "meta"
+                log(
+                    f"OOF {self.eval_metric} ({label}) {model_id_result}: {oof_score}",
+                    level=1,
+                    start_time=fit_start,
+                    verbose=self.verbose,
+                )
+        return True
 
     def _select_best_model(self):
         if self.selection is None:
@@ -1476,55 +1531,38 @@ class LokyStackerV10Base(BaseClassifier):
             save_array(prob_array, "Xt_probabilities", str(features_stack))
 
             # ---- stacking predictions ----
-            stack_tasks = []
-            for model_name in self.stacking_models:
-                for fold in range(self.k_folds):
-                    stack_tasks.append(
-                        (
-                            model_name,  # model_id = model_name for stacking
-                            model_name,
-                            str(features_stack),
-                            [FeatureSpec(feature_name="probabilities")],
-                            str(self._model_dir),
-                            fold,
-                        )
-                    )
-
-            log(
-                f"Starting prediction with {self.n_jobs} workers for {len(stack_tasks)} stacking models",
-                level=1,
-                start_time=predict_start,
-                verbose=self.verbose,
-            )
-
-            futures = {executor.submit(_predict_one_model_v10, *t): t for t in stack_tasks}
-            for future in as_completed(futures):
-                task = futures[future]
-                model_id_task = task[0]
-                try:
-                    proba, classes_, predict_dur, model_id_res = future.result()
-                except Exception as e:
-                    raise RuntimeError(
-                        f"Worker failed during stacking prediction {model_id_task}: {e}"
-                    ) from e
-
-                log(
-                    f"Predicted {model_id_res} in {predict_dur:.4f}s",
-                    level=2,
-                    start_time=predict_start,
-                    verbose=self.verbose,
+            predictions.extend(
+                self._predict_stacking_level(
+                    executor, self.stacking_models, "probabilities", features_stack,
+                    level=1, predict_start=predict_start,
                 )
-                predictions.extend(self.add_probabilities(proba, classes_, model_id_res, level=1))
-
-            log(
-                "Completed all stacking model predictions", level=1, start_time=predict_start,
-                verbose=self.verbose,
             )
 
-            model_ids = [spec.get_model_id() for spec in self.model_specs] + self.stacking_models
+            # ---- meta-stacking predictions ----
+            if self.meta_stacking_models:
+                meta_array = self._aggregate_prediction_matrix(
+                    predictions=predictions,
+                    n_samples=X.shape[0],
+                    probability_columns=self._meta_probability_columns,
+                )
+                save_array(meta_array, "Xt_meta-probabilities", str(features_stack))
+                predictions.extend(
+                    self._predict_stacking_level(
+                        executor, self.meta_stacking_models, "meta-probabilities",
+                        features_stack, level=2, predict_start=predict_start,
+                    )
+                )
+
+            levels = {m: 1 for m in self.stacking_models}
+            levels |= {m: 2 for m in self.meta_stacking_models}
+            model_ids = (
+                [spec.get_model_id() for spec in self.model_specs]
+                + self.stacking_models
+                + self.meta_stacking_models
+            )
             out = {}
             for model_id in model_ids:
-                level = 1 if model_id in self.stacking_models else 0
+                level = levels.get(model_id, 0)
                 cols = [self._probability_key(level, model_id, cls) for cls in self.classes_]
                 out[model_id] = self._aggregate_prediction_matrix(
                     predictions=predictions,
@@ -1538,6 +1576,58 @@ class LokyStackerV10Base(BaseClassifier):
                 if d.exists():
                     shutil.rmtree(d)
             self._tmpdir = None
+
+    def _predict_stacking_level(
+        self, executor, model_names, feature_name, directory, level, predict_start
+    ) -> list[dict]:
+        """Every fold model of ``model_names`` on the saved ``Xt_<feature_name>`` array."""
+        stack_tasks = []
+        for model_name in model_names:
+            for fold in range(self.k_folds):
+                stack_tasks.append(
+                    (
+                        model_name,  # model_id = model_name for stacking
+                        model_name,
+                        str(directory),
+                        [FeatureSpec(feature_name=feature_name)],
+                        str(self._model_dir),
+                        fold,
+                    )
+                )
+
+        label = "stacking" if level == 1 else "meta-stacking"
+        log(
+            f"Starting prediction with {self.n_jobs} workers for {len(stack_tasks)} {label} models",
+            level=1,
+            start_time=predict_start,
+            verbose=self.verbose,
+        )
+
+        predictions = []
+        futures = {executor.submit(_predict_one_model_v10, *t): t for t in stack_tasks}
+        for future in as_completed(futures):
+            task = futures[future]
+            model_id_task = task[0]
+            try:
+                proba, classes_, predict_dur, model_id_res = future.result()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Worker failed during {label} prediction {model_id_task}: {e}"
+                ) from e
+
+            log(
+                f"Predicted {model_id_res} in {predict_dur:.4f}s",
+                level=2,
+                start_time=predict_start,
+                verbose=self.verbose,
+            )
+            predictions.extend(self.add_probabilities(proba, classes_, model_id_res, level=level))
+
+        log(
+            f"Completed all {label} model predictions", level=1, start_time=predict_start,
+            verbose=self.verbose,
+        )
+        return predictions
 
     def predict_proba_per_model(
         self, X: np.ndarray, predict_batch_size=None
@@ -1675,7 +1765,7 @@ def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0, stratify=T
 _VALID_EVAL_METRICS = {"accuracy", "f1", "log_loss", "roc_auc"}
 
 
-_ENHANCED_PRESETS = ("low", "medium", "high")
+_ENHANCED_PRESETS = ("low", "medium", "high", "best")
 
 # Level-1 pools. ``high`` is the union of the plain and
 # balanced pools; ``probability-nn`` is a member of both (MLPClassifier has no
@@ -1699,6 +1789,10 @@ _ENHANCED_HIGH_STACKERS = _ENHANCED_PLAIN_STACKERS + [
     name for name in _ENHANCED_BALANCED_STACKERS if name not in _ENHANCED_PLAIN_STACKERS
 ]
 
+# Level-2 meta stacker of ``best``: trained on the level-0 and level-1 OOF
+# probabilities side by side, and served for every eval_metric.
+_ENHANCED_META_STACKER = "meta-probability-et"
+
 # The served head for every (preset, eval_metric) pair. At ``medium``/``high``
 # every head is trained regardless, so eval_metric only picks which already
 # fitted head is served — no extra compute. At ``low`` a single stacker is
@@ -1716,6 +1810,10 @@ _ENHANCED_SERVED_HEAD = {
     ("high", "f1"): "probability-stack-mean-balanced",
     ("high", "roc_auc"): "probability-stack-mean-balanced",
     ("high", "log_loss"): "probability-et",
+    ("best", "accuracy"): _ENHANCED_META_STACKER,
+    ("best", "f1"): _ENHANCED_META_STACKER,
+    ("best", "roc_auc"): _ENHANCED_META_STACKER,
+    ("best", "log_loss"): _ENHANCED_META_STACKER,
 }
 
 
@@ -1748,6 +1846,7 @@ class TSCGlueEnhancedV3(LokyStackerV10Base):
         )
         self.preset = preset
 
+        meta_stacking_models = None
         if preset == "low":
             model_names = list(_ENHANCED_LOW_MODELS)
             # Only one stacker is trained here, so the served head has to be
@@ -1756,9 +1855,12 @@ class TSCGlueEnhancedV3(LokyStackerV10Base):
         elif preset == "medium":
             model_names = list(_ENHANCED_MEDIUM_MODELS)
             stacking_models = list(_ENHANCED_PLAIN_STACKERS)
-        else:  # high
+        else:  # high, best
             model_names = list(_ENHANCED_HIGH_MODELS)
             stacking_models = list(_ENHANCED_HIGH_STACKERS)
+            if preset == "best":
+                # high, plus a meta stacker over the base and stacker OOF probabilities.
+                meta_stacking_models = [_ENHANCED_META_STACKER]
 
         super().__init__(
             random_state=random_state,
@@ -1771,6 +1873,7 @@ class TSCGlueEnhancedV3(LokyStackerV10Base):
             runs_dir=runs_dir,
             model_names=model_names,
             stacking_models=stacking_models,
+            meta_stacking_models=meta_stacking_models,
             eval_metric=eval_metric,
             compute_dtype=compute_dtype,
             predict_batch_size=predict_batch_size,

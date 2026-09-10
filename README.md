@@ -22,7 +22,13 @@ uv pip install "tscglue[cpu]"
 
 # CUDA 12.4 PyTorch (via uv)
 uv pip install "tscglue[cu124]"
+
+# CUDA 13.2 PyTorch (via uv)
+uv pip install "tscglue[cu132]"
 ```
+
+Neither CUDA build covers every card: `cu124` ships kernels for sm_50-sm_90, `cu132` for
+sm_75-sm_120. Pick `cu132` for Blackwell (sm_120) and `cu124` for pre-Turing cards.
 
 If you already have PyTorch installed, just install the base package — it won't reinstall torch.
 
@@ -51,67 +57,35 @@ print(f"Accuracy: {accuracy:.4f}")
 ```
 
 
-# TSCGlueV2 — preset composition
+# Preset composition
 
-## Representations
+Which models each `(preset, eval_metric)` pair actually uses to produce its prediction.
 
-Which representation is included in which preset.
+| Model | `low` Acc. | `low` LL | `medium` Acc. | `medium` LL | `high` Acc. | `high` LL | `best` any |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Level 0: base models** |  |  |  |  |  |  |  |
+| MultiRocket + Hydra | R | R | R | R | R, ET | R, ET | R, ET |
+| QUANT | ET | ET | ET | ET | R, ET | R, ET | R, ET |
+| RDST | R | R | R | R | R, ET | R, ET | R, ET |
+| RSTSF | ET | ET | ET | ET | R, ET | R, ET | R, ET |
+| MantisV2 + Chronos-2 |  |  | R | R | R, ET | R, ET | R, ET |
+| WEASEL 2.0 |  |  | R | R | R, ET | R, ET | R, ET |
+| **Number of representations** | **5** | **5** | **8** | **8** | **8** | **8** | **8** |
+| **Number of base models** | **4** | **4** | **6** | **6** | **12** | **12** | **12** |
+| **Level 1: stacking models used** |  |  |  |  |  |  |  |
+| R | ✓ |  |  |  |  |  | ✓ |
+| LR |  |  | ✓ |  |  |  | ✓ |
+| ET |  | ✓ | ✓ | ✓ |  | ✓ | ✓ |
+| RF |  |  | ✓ |  |  |  | ✓ |
+| MLP |  |  | ✓ |  | ✓ |  | ✓ |
+| R-b |  |  |  |  |  |  | ✓ |
+| LR-b |  |  |  |  | ✓ |  | ✓ |
+| ET-b |  |  |  |  | ✓ |  | ✓ |
+| RF-b |  |  |  |  | ✓ |  | ✓ |
+| **Number of stacking models used** | **1** | **1** | **4** | **1** | **4** | **1** | **9** |
+| **Level 2: combining model used** |  |  |  |  |  |  |  |
+| Mean\* |  |  | ✓ |  |  |  |  |
+| Mean-b\* |  |  |  |  | ✓ |  |  |
+| ET |  |  |  |  |  |  | ✓ |
 
-| Representation | Family | low | medium | high |
-|---|---|:--:|:--:|:--:|
-| `multirocket` + `hydra` | convolution | ✅ | ✅ | ✅ |
-| `quant` | interval quantile | ✅ | ✅ | ✅ |
-| `rstsf-random` | interval | ✅ | ✅ | ✅ |
-| `rdst` | shapelet | ✅ | ✅ | ✅ |
-| `weasel` | dictionary | ❌ | ✅ | ✅ |
-| `fm` (`mantis` + `chronos2`) | foundation | ❌ | ✅ | ✅ |
-| `drcif` | interval | ❌ | ❌ | ❌ |
-| `tsfresh` | feature-based | ❌ | ❌ | ❌ |
-
-## Base models (level 0)
-
-`low` = `medium` minus `weasel` and `fm` — identical model names and heads on the four shared
-representations. `high` = same six representations, but **two** heads each.
-
-| Representation | low | medium | high |
-|---|---|---|---|
-| `multirocket` + `hydra` | `bestk-ridgecv` | `bestk-ridgecv` | `bestk-ridgecv`, `et` |
-| `quant` | `et` | `et` | `ridgecv`, `et` |
-| `rstsf-random` | `et` | `et` | `ridgecv`, `et` |
-| `rdst` | `ridgecv` | `ridgecv` | `ridgecv`, `et` |
-| `weasel` | ❌ | `bestk-ridgecv` | `bestk-ridgecv`, `et` |
-| `fm` | ❌ | `ridgecv` | `ridgecv`, `et` |
-| **total models** | **4** | **6** | **12** |
-| **heads per representation** | 1 | 1 | 2 |
-
-## Stacking models (level 1)
-
-Trained on the level-0 models' OOF probabilities. `medium` and `high` train **all five**.
-`low` trains **exactly one**, chosen by `eval_metric`.
-
-| Stacking model | low | medium | high |
-|---|:--:|:--:|:--:|
-| `ridgecv` | ✅ \* | ✅ \*\* | ✅ \*\* |
-| `logisticcv` | ❌ | ✅ | ✅ |
-| `et` | ✅ \* | ✅ | ✅ |
-| `nn` | ❌ | ✅ | ✅ |
-| `rf` | ❌ | ✅ | ✅ |
-| **total stackers** | **1** | **5** | **5** |
-
-\* `low` trains only **one** of these two, chosen by `eval_metric`: `ridgecv` for `accuracy` /
-`f1`, `et` for `log_loss` / `roc_auc` — the existing `TSCGlueClassifier` mapping (ridge wins
-accuracy, ExtraTrees wins log-loss and AUC, per the critical-difference study). **`f1` is not
-in that mapping yet and needs a decision** (`ridgecv` proposed, matching `accuracy`).
-
-\*\* `ridgecv` is trained and Brier-scored, but **excluded from the stack-mean** — its
-decision-function pseudo-probabilities are uncalibrated and would skew the average. It is
-therefore only actually served if Brier selection picks it over the mean.
-
-## Level-2 head
-
-What combines the level-1 stackers into the served prediction. One head per preset.
-
-| Level-2 head | low | medium | high |
-|---|:--:|:--:|:--:|
-| `probability-stack-mean` | ❌ | ✅ | ❌ |
-| `probability-et-l2-all` | ❌ | ❌ | ✅ |
+\* From previous layer only.

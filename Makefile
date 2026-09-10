@@ -1,8 +1,8 @@
-.PHONY: help install-uv setup setup-cpu setup-cuda list clean tests format download-ucr download-models
+.PHONY: help install-uv setup setup-cpu setup-cuda-124 setup-cuda-132 list clean tests format download-ucr download-models
 .ONESHELL:
 
 help:   ## Show available commands
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
 install-uv:  ## Install uv package manager
 	curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -13,8 +13,11 @@ setup:  ## Install base dependencies (no PyTorch)
 setup-cpu:  ## Install with CPU PyTorch
 	uv sync --extra cpu
 
-setup-cuda:  ## Install with CUDA 12.4 PyTorch
+setup-cuda-124:  ## Install with CUDA 12.4 PyTorch (sm_50-sm_90)
 	uv sync --extra cu124
+
+setup-cuda-132:  ## Install with CUDA 13.2 PyTorch (sm_75-sm_120, incl. Blackwell)
+	uv sync --extra cu132
 
 list:
 	@LC_ALL=C $(MAKE) -pRrq -f $(firstword $(MAKEFILE_LIST)) : 2>/dev/null | awk -v RS= -F: '/(^|\n)# Files(\n|$$)/,/(^|\n)# Finished Make data base/ {if ($$1 !~ "^[#.]") {print $$1}}' | sort | grep -E -v -e '^[^[:alnum:]]' -e '^$@$$'

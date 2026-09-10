@@ -135,7 +135,8 @@ def require_torch():
             "This feature requires PyTorch. Install with:\n"
             "  pip install 'tscglue[torch]'\n"
             "  uv pip install 'tscglue[cpu]'\n"
-            "  uv pip install 'tscglue[cu124]'"
+            "  uv pip install 'tscglue[cu124]'\n"
+            "  uv pip install 'tscglue[cu132]'"
         ) from exc
 
 
