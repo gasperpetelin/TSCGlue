@@ -9,11 +9,11 @@ from sklearn.metrics import accuracy_score
 
 from tscglue import utils
 from tscglue.models import (
-    FeatureSpec,
     TSCGlueClassifier,
     get_feature_transformer,
 )
 from tscglue.models_regressor import TSCGlueRegressor
+from tscglue.utils import FeatureSpec
 
 
 def test_model_accuracy_on_coffee():
