@@ -157,7 +157,7 @@ BATCH_PROBA_ATOL = 1e-6
 def test_predict_batching_matches_unbatched():
     """A batched predict must agree with an unbatched one, head for head."""
     X_train, y_train, X_test, _ = utils.load_dataset("Coffee")
-    assert len(X_test) % 8 != 0, "batch size must leave a ragged final batch"
+    assert len(X_test) % 15 != 0, "batch size must leave a ragged final batch"
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = TSCGlueClassifier(
@@ -169,10 +169,10 @@ def test_predict_batching_matches_unbatched():
         ref_proba = model.predict_proba(X_test)
         ref_pred = model.predict(X_test)
 
-        batched_per_model = model.predict_proba_per_model(X_test, predict_batch_size=8)
-        batched_proba = model.predict_proba(X_test, predict_batch_size=8)
-        batched_pred = model.predict(X_test, predict_batch_size=8)
-        batched_labels = model.predict_per_model(X_test, predict_batch_size=8)
+        batched_per_model = model.predict_proba_per_model(X_test, predict_batch_size=15)
+        batched_proba = model.predict_proba(X_test, predict_batch_size=15)
+        batched_pred = model.predict(X_test, predict_batch_size=15)
+        batched_labels = model.predict_per_model(X_test, predict_batch_size=15)
 
         # a batch larger than the whole collection
         oversized = model.predict_proba(X_test, predict_batch_size=10 * len(X_test))
@@ -197,16 +197,16 @@ def test_predict_batch_size_from_constructor_and_per_call():
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = TSCGlueClassifier(
             random_state=0, k_folds=3, n_jobs=2, preset="medium", n_gpus=0, runs_dir=tmp_dir,
-            predict_batch_size=8,
+            predict_batch_size=15,
         )
         model.fit(X_train, y_train)
 
         from_constructor = model.predict_proba(X_test)
-        from_call = model.predict_proba(X_test, predict_batch_size=8)
+        from_call = model.predict_proba(X_test, predict_batch_size=15)
 
         # a per-call value must not be written back to the estimator
         model.predict_proba(X_test, predict_batch_size=10 * len(X_test))
-        assert model.predict_batch_size == 8
+        assert model.predict_batch_size == 15
         assert model._batch_for_call is None
         assert np.array_equal(model.predict_proba(X_test), from_constructor)
 
