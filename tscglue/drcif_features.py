@@ -110,6 +110,8 @@ class DrCIFExtractor(TransformerMixin, BaseEstimator):
         ]
 
     def fit(self, X, y=None):
+        # aeon>=1.6 catch22 is numba-typed for float64 and fails on float32 input.
+        X = np.asarray(X, dtype=np.float64)
         self.steps_ = []
         for i, rep in enumerate(self._representations()):
             Xr = rep.fit_transform(X) if rep is not None else X
@@ -126,6 +128,7 @@ class DrCIFExtractor(TransformerMixin, BaseEstimator):
         return self
 
     def transform(self, X):
+        X = np.asarray(X, dtype=np.float64)
         blocks = []
         for rep, ri in self.steps_:
             Xr = rep.transform(X) if rep is not None else X
