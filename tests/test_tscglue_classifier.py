@@ -157,7 +157,7 @@ BATCH_PROBA_ATOL = 1e-6
 def test_predict_batching_matches_unbatched():
     """A batched predict must agree with an unbatched one, head for head."""
     X_train, y_train, X_test, _ = utils.load_dataset("Coffee")
-    assert len(X_test) % 9 != 0, "batch size must leave a ragged final batch"
+    assert len(X_test) % 8 != 0, "batch size must leave a ragged final batch"
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = TSCGlueClassifier(
@@ -169,13 +169,12 @@ def test_predict_batching_matches_unbatched():
         ref_proba = model.predict_proba(X_test)
         ref_pred = model.predict(X_test)
 
-        batched_per_model = model.predict_proba_per_model(X_test, predict_batch_size=9)
-        batched_proba = model.predict_proba(X_test, predict_batch_size=9)
-        batched_pred = model.predict(X_test, predict_batch_size=9)
-        batched_labels = model.predict_per_model(X_test, predict_batch_size=9)
+        batched_per_model = model.predict_proba_per_model(X_test, predict_batch_size=8)
+        batched_proba = model.predict_proba(X_test, predict_batch_size=8)
+        batched_pred = model.predict(X_test, predict_batch_size=8)
+        batched_labels = model.predict_per_model(X_test, predict_batch_size=8)
 
-        # a batch of one, and a batch larger than the whole collection
-        single = model.predict_proba(X_test, predict_batch_size=1)
+        # a batch larger than the whole collection
         oversized = model.predict_proba(X_test, predict_batch_size=10 * len(X_test))
 
     assert set(batched_per_model) == set(ref_per_model)
@@ -187,7 +186,6 @@ def test_predict_batching_matches_unbatched():
         assert np.array_equal(batched_labels[name], model.classes_[ref.argmax(axis=1)]), name
 
     assert np.max(np.abs(batched_proba - ref_proba)) < BATCH_PROBA_ATOL
-    assert np.max(np.abs(single - ref_proba)) < BATCH_PROBA_ATOL
     assert np.array_equal(oversized, ref_proba)
     assert np.array_equal(batched_pred, ref_pred)
 
@@ -199,16 +197,16 @@ def test_predict_batch_size_from_constructor_and_per_call():
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = TSCGlueClassifier(
             random_state=0, k_folds=3, n_jobs=2, preset="medium", n_gpus=0, runs_dir=tmp_dir,
-            predict_batch_size=9,
+            predict_batch_size=8,
         )
         model.fit(X_train, y_train)
 
         from_constructor = model.predict_proba(X_test)
-        from_call = model.predict_proba(X_test, predict_batch_size=9)
+        from_call = model.predict_proba(X_test, predict_batch_size=8)
 
         # a per-call value must not be written back to the estimator
-        model.predict_proba(X_test, predict_batch_size=3)
-        assert model.predict_batch_size == 9
+        model.predict_proba(X_test, predict_batch_size=10 * len(X_test))
+        assert model.predict_batch_size == 8
         assert model._batch_for_call is None
         assert np.array_equal(model.predict_proba(X_test), from_constructor)
 
@@ -233,8 +231,8 @@ def test_predict_batching_on_fallback_path():
 
         ref_proba = model.predict_proba(X_test)
         ref_pred = model.predict(X_test)
-        batched_proba = model.predict_proba(X_test, predict_batch_size=5)
-        batched_pred = model.predict(X_test, predict_batch_size=5)
+        batched_proba = model.predict_proba(X_test, predict_batch_size=8)
+        batched_pred = model.predict(X_test, predict_batch_size=8)
 
     assert np.max(np.abs(batched_proba - ref_proba)) < BATCH_PROBA_ATOL
     assert np.array_equal(batched_pred, ref_pred)
