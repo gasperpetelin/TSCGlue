@@ -3,6 +3,8 @@
 import multiprocessing
 import os
 import pickle
+import subprocess
+from dataclasses import dataclass
 from time import perf_counter
 
 import numpy as np
@@ -138,6 +140,73 @@ def require_torch():
             "  uv pip install 'tscglue[cu124]'\n"
             "  uv pip install 'tscglue[cu132]'"
         ) from exc
+
+
+def count_gpus() -> tuple[int, int]:
+    """GPUs visible to (torch, nvidia-smi); 0 for whichever is unavailable."""
+    try:
+        import torch
+
+        n_torch = torch.cuda.device_count()
+    except Exception:
+        n_torch = 0
+    try:
+        n_smi = len(
+            subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+            .splitlines()
+        )
+    except Exception:
+        n_smi = 0
+    return n_torch, n_smi
+
+
+@dataclass(frozen=True)
+class FeatureSpec:
+    feature_name: str
+    feature_seed: int | None = None
+    use_subprocess: bool = True
+    support_gpu: bool = False
+
+    def get_feature_id(self):
+        return (
+            f"{self.feature_name}_s_{self.feature_seed}"
+            if self.feature_seed is not None
+            else self.feature_name
+        )
+
+    @staticmethod
+    def split_lanes(features) -> tuple[list["FeatureSpec"], list["FeatureSpec"]]:
+        """Split specs into (device lane, cpu lane) on ``support_gpu``, keeping order.
+
+        Only meaningful when a device is available; callers without one run every
+        spec on the main thread rather than splitting.
+        """
+        gpu: list[FeatureSpec] = []
+        cpu: list[FeatureSpec] = []
+        for ft in features:
+            (gpu if ft.support_gpu else cpu).append(ft)
+        return gpu, cpu
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    model_name: str
+    model_seed: int
+    level: int
+    features: tuple[FeatureSpec, ...]
+    fold_seeds: tuple[int, ...]
+
+    def get_model_id(self):
+        return f"{self.model_name}_s_{self.model_seed}"
+
+    @property
+    def n_repetitions(self) -> int:
+        return len(self.fold_seeds)
 
 
 def load_dataset(dataset_name):

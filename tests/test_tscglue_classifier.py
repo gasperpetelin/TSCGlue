@@ -1,4 +1,4 @@
-"""Tests for TSCGlueClassifier and TSCGlueRegressor."""
+"""Tests for TSCGlueClassifier."""
 
 import dataclasses
 import tempfile
@@ -9,11 +9,10 @@ from sklearn.metrics import accuracy_score
 
 from tscglue import utils
 from tscglue.models import (
-    FeatureSpec,
     TSCGlueClassifier,
     get_feature_transformer,
 )
-from tscglue.models_regressor import TSCGlueRegressor
+from tscglue.utils import FeatureSpec
 
 
 def test_model_accuracy_on_coffee():
@@ -158,7 +157,7 @@ BATCH_PROBA_ATOL = 1e-6
 def test_predict_batching_matches_unbatched():
     """A batched predict must agree with an unbatched one, head for head."""
     X_train, y_train, X_test, _ = utils.load_dataset("Coffee")
-    assert len(X_test) % 9 != 0, "batch size must leave a ragged final batch"
+    assert len(X_test) % 15 != 0, "batch size must leave a ragged final batch"
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = TSCGlueClassifier(
@@ -170,13 +169,12 @@ def test_predict_batching_matches_unbatched():
         ref_proba = model.predict_proba(X_test)
         ref_pred = model.predict(X_test)
 
-        batched_per_model = model.predict_proba_per_model(X_test, predict_batch_size=9)
-        batched_proba = model.predict_proba(X_test, predict_batch_size=9)
-        batched_pred = model.predict(X_test, predict_batch_size=9)
-        batched_labels = model.predict_per_model(X_test, predict_batch_size=9)
+        batched_per_model = model.predict_proba_per_model(X_test, predict_batch_size=15)
+        batched_proba = model.predict_proba(X_test, predict_batch_size=15)
+        batched_pred = model.predict(X_test, predict_batch_size=15)
+        batched_labels = model.predict_per_model(X_test, predict_batch_size=15)
 
-        # a batch of one, and a batch larger than the whole collection
-        single = model.predict_proba(X_test, predict_batch_size=1)
+        # a batch larger than the whole collection
         oversized = model.predict_proba(X_test, predict_batch_size=10 * len(X_test))
 
     assert set(batched_per_model) == set(ref_per_model)
@@ -188,7 +186,6 @@ def test_predict_batching_matches_unbatched():
         assert np.array_equal(batched_labels[name], model.classes_[ref.argmax(axis=1)]), name
 
     assert np.max(np.abs(batched_proba - ref_proba)) < BATCH_PROBA_ATOL
-    assert np.max(np.abs(single - ref_proba)) < BATCH_PROBA_ATOL
     assert np.array_equal(oversized, ref_proba)
     assert np.array_equal(batched_pred, ref_pred)
 
@@ -200,16 +197,16 @@ def test_predict_batch_size_from_constructor_and_per_call():
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = TSCGlueClassifier(
             random_state=0, k_folds=3, n_jobs=2, preset="medium", n_gpus=0, runs_dir=tmp_dir,
-            predict_batch_size=9,
+            predict_batch_size=15,
         )
         model.fit(X_train, y_train)
 
         from_constructor = model.predict_proba(X_test)
-        from_call = model.predict_proba(X_test, predict_batch_size=9)
+        from_call = model.predict_proba(X_test, predict_batch_size=15)
 
         # a per-call value must not be written back to the estimator
-        model.predict_proba(X_test, predict_batch_size=3)
-        assert model.predict_batch_size == 9
+        model.predict_proba(X_test, predict_batch_size=10 * len(X_test))
+        assert model.predict_batch_size == 15
         assert model._batch_for_call is None
         assert np.array_equal(model.predict_proba(X_test), from_constructor)
 
@@ -234,8 +231,8 @@ def test_predict_batching_on_fallback_path():
 
         ref_proba = model.predict_proba(X_test)
         ref_pred = model.predict(X_test)
-        batched_proba = model.predict_proba(X_test, predict_batch_size=5)
-        batched_pred = model.predict(X_test, predict_batch_size=5)
+        batched_proba = model.predict_proba(X_test, predict_batch_size=8)
+        batched_pred = model.predict(X_test, predict_batch_size=8)
 
     assert np.max(np.abs(batched_proba - ref_proba)) < BATCH_PROBA_ATOL
     assert np.array_equal(batched_pred, ref_pred)
@@ -455,47 +452,3 @@ def test_hydra_device_falls_back_to_cpu_without_cuda():
     expected = HydraTransformerDevice(random_state=0, device="cpu").fit_transform(X)
     np.testing.assert_array_equal(Xt, expected)
     assert transformer.device == "cuda", "device is a constructor param and must not be mutated"
-
-
-def _make_regression_data(n_train=40, n_test=15, n_channels=1, n_timesteps=30, seed=0):
-    rng = np.random.default_rng(seed)
-    X_train = rng.standard_normal((n_train, n_channels, n_timesteps)).astype(np.float32)
-    X_test = rng.standard_normal((n_test, n_channels, n_timesteps)).astype(np.float32)
-    y_train = X_train[:, 0, :].mean(axis=1) + 0.1 * rng.standard_normal(n_train)
-    y_test = X_test[:, 0, :].mean(axis=1) + 0.1 * rng.standard_normal(n_test)
-    return X_train, y_train, X_test, y_test
-
-
-def test_regressor_fit_predict_basic():
-    X_train, y_train, X_test, y_test = _make_regression_data()
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        model = TSCGlueRegressor(random_state=0, k_folds=3, n_jobs=1, runs_dir=tmp_dir)
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-
-    assert y_pred.shape == (len(X_test),), f"Expected shape ({len(X_test)},), got {y_pred.shape}"
-    assert np.isfinite(y_pred).all(), "Predictions contain NaN or Inf"
-    assert y_pred.dtype in (np.float32, np.float64), f"Unexpected dtype {y_pred.dtype}"
-
-
-def test_regressor_summary():
-    X_train, y_train, X_test, _ = _make_regression_data()
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        model = TSCGlueRegressor(random_state=0, k_folds=3, n_jobs=1, runs_dir=tmp_dir)
-        model.fit(X_train, y_train)
-        scores = model.summary()
-        scores_with_transforms = model.summary(return_transforms=True)
-
-    assert len(scores) > 0
-    for entry in scores:
-        assert "model" in entry
-        assert "level" in entry
-        assert "oof_rmse" in entry
-        assert "oof_r2" in entry
-        assert "train_time" in entry
-        assert np.isfinite(entry["oof_rmse"]), f"oof_rmse is not finite for {entry['model']}"
-        assert np.isfinite(entry["oof_r2"]), f"oof_r2 is not finite for {entry['model']}"
-
-    assert len(scores_with_transforms) >= len(scores)

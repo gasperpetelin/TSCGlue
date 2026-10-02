@@ -6,7 +6,6 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -14,7 +13,6 @@ from typing import Any
 import numpy as np
 import polars as pl
 from aeon.classification.base import BaseClassifier
-from aeon.classification.convolution_based import MultiRocketHydraClassifier
 from aeon.transformations.collection.convolution_based import MultiRocket
 from aeon.transformations.collection.convolution_based._hydra import HydraTransformer
 from aeon.transformations.collection.feature_based import TSFresh
@@ -22,7 +20,6 @@ from aeon.transformations.collection.interval_based import QUANTTransformer
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.feature_selection import VarianceThreshold, chi2
-from sklearn.metrics import r2_score
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -42,8 +39,11 @@ from tscglue.tabular import (
     SparseScaler,
 )
 from tscglue.utils import (
+    FeatureSpec,
+    ModelSpec,
     _noop,
     _run_in_subprocess,
+    count_gpus,
     log,
     read_array,
     read_model,
@@ -55,14 +55,6 @@ from tscglue.weasel_features import WEASELTransformerV2Unsupervised
 
 
 MODELS_DICTIONARY = {
-    "multirockethydra-ridgecv": (
-        {"hydra": SparseScaler, "multirocket": StandardScaler},
-        lambda **_: RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 10)),
-    ),
-    "multirockethydra-p-ridgecv": (
-        {"hydra": SparseScaler, "multirocket": StandardScaler},
-        lambda **_: RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10)),
-    ),
     "quant-etc": (
         {"quant": NoScaler},
         lambda seed=None, n_jobs=1, **_: ExtraTreesClassifier(
@@ -72,10 +64,6 @@ MODELS_DICTIONARY = {
             random_state=seed,
             n_jobs=n_jobs,
         ),
-    ),
-    "rdst-ridgecv": (
-        {"rdst": StandardScaler},
-        lambda **_: RidgeClassifierCVIndicator(alphas=np.logspace(-4, 4, 20)),
     ),
     "rdst-p-ridgecv": (
         {"rdst": StandardScaler},
@@ -349,50 +337,6 @@ def _fit_transform_inline(
     save_array(Xt, f"Xt_{feature_id}", output_dir)
 
 
-@dataclass(frozen=True)
-class FeatureSpec:
-    feature_name: str
-    feature_seed: int | None = None
-    use_subprocess: bool = True
-    support_gpu: bool = False
-
-    def get_feature_id(self):
-        return (
-            f"{self.feature_name}_s_{self.feature_seed}"
-            if self.feature_seed is not None
-            else self.feature_name
-        )
-
-    @staticmethod
-    def split_lanes(features) -> tuple[list["FeatureSpec"], list["FeatureSpec"]]:
-        """Split specs into (device lane, cpu lane) on ``support_gpu``, keeping order.
-
-        Only meaningful when a device is available; callers without one run every
-        spec on the main thread rather than splitting.
-        """
-        gpu: list[FeatureSpec] = []
-        cpu: list[FeatureSpec] = []
-        for ft in features:
-            (gpu if ft.support_gpu else cpu).append(ft)
-        return gpu, cpu
-
-
-@dataclass(frozen=True)
-class ModelSpec:
-    model_name: str
-    model_seed: int
-    level: int
-    features: tuple[FeatureSpec, ...]
-    fold_seeds: tuple[int, ...]
-
-    def get_model_id(self):
-        return f"{self.model_name}_s_{self.model_seed}"
-
-    @property
-    def n_repetitions(self) -> int:
-        return len(self.fold_seeds)
-
-
 def _load_feature_dict_v10(directory, feature_specs):
     """Load feature arrays using read_array with (feat_type, repetition) specs."""
     feature_dict = {}
@@ -442,29 +386,22 @@ def _train_one_model_v10(
     return (train_idx, val_idx, proba, clf.classes_, model_size, train_dur, model_id, fold_number)
 
 
-class LokyStackerV10Base(BaseClassifier):
+class TSCGlueEnhancedV4(BaseClassifier):
     _tags = {"capability:multivariate": True}
 
-    DEFAULT_MODEL_NAMES = [
-        "multirockethydra-bestk-p-ridgecv",
-        "quant-etc",
-        "rdst-p-ridgecv",
-    ]
-    STACKING_MODEL = "probability-ridgecv"
-    prune_constant: bool = False
+    MEAN_STACKER_NAME = "probability-stack-mean"
+    BALANCED_MEAN_STACKER_NAME = "probability-stack-mean-balanced"
+    MEAN_STACKER_EXCLUDE = ("probability-ridgecv", "probability-ridgecv-balanced")
 
+    # TODO remove: duplicates the scaler keys in MODELS_DICTIONARY. Keep the
+    # (multirocket, hydra) order when replacing it, feature seeds are drawn in it.
     def _get_feature_names(self, model_name: str) -> tuple[str, ...]:
         """Return required feature type names for a model."""
-        if model_name in (
-            "multirockethydra-bestk-p-ridgecv",
-            "multirockethydra-p-ridgecv",
-            "multirockethydra-ridgecv",
-            "multirockethydra-etc",
-        ):
+        if model_name in ("multirockethydra-bestk-p-ridgecv", "multirockethydra-etc"):
             return ("multirocket", "hydra")
         elif model_name in ("quant-etc", "quant-p-ridgecv"):
             return ("quant",)
-        elif model_name in ("rdst-p-ridgecv", "rdst-ridgecv", "rdst-etc"):
+        elif model_name in ("rdst-p-ridgecv", "rdst-etc"):
             return ("rdst",)
         elif model_name in ("rstsf-random-etc", "rstsf-random-p-ridgecv"):
             return ("rstsf-random",)
@@ -546,33 +483,49 @@ class LokyStackerV10Base(BaseClassifier):
         random_state=None,
         k_folds=10,
         n_jobs=1,
-        keep_features=False,
         verbose=0,
-        model_names=None,
         n_repetitions=1,
-        compute_dtype=None,
-        stacking_models=None,
-        selection=None,
         n_gpus=0,
         runs_dir=None,
         eval_metric="accuracy",
+        preset="medium",
+        prune_constant=True,
+        compute_dtype=None,
         predict_batch_size=None,
-        meta_stacking_models=None,
     ):
+        assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
+        assert eval_metric in _VALID_EVAL_METRICS, (
+            f"eval_metric must be one of {_VALID_EVAL_METRICS}; got {eval_metric!r}"
+        )
+        assert preset in _ENHANCED_PRESETS, (
+            f"preset must be one of {_ENHANCED_PRESETS}; got {preset!r}"
+        )
         super().__init__()
+        self.preset = preset
+        self.prune_constant = prune_constant
+
+        if preset == "low":
+            self.model_names = list(_ENHANCED_LOW_MODELS)
+            # Only one stacker is trained here, so the served head has to be
+            # known pre-fit rather than picked from fitted candidates.
+            self.stacking_models = [_ENHANCED_SERVED_HEAD[(preset, eval_metric)]]
+        elif preset == "medium":
+            self.model_names = list(_ENHANCED_MEDIUM_MODELS)
+            self.stacking_models = list(_ENHANCED_PLAIN_STACKERS)
+        else:  # high, best
+            self.model_names = list(_ENHANCED_HIGH_MODELS)
+            self.stacking_models = list(_ENHANCED_HIGH_STACKERS)
+        # best = high, plus a meta stacker over the base and stacker OOF probabilities.
+        self.meta_stacking_models = [_ENHANCED_META_STACKER] if preset == "best" else []
+
         self.k_folds = int(k_folds)
         self.random_state = random_state
         self.n_jobs = int(n_jobs)
         self.n_gpus = int(n_gpus)
-        self.keep_features = bool(keep_features)
+        self.keep_features = False
         self.verbose = int(verbose)
         self.n_repetitions = int(n_repetitions)
         self.compute_dtype = np.dtype(compute_dtype) if compute_dtype is not None else None
-        self.stacking_models = (
-            stacking_models if stacking_models is not None else [self.STACKING_MODEL]
-        )
-        self.selection = selection
-        self.meta_stacking_models = list(meta_stacking_models or [])
         self.runs_dir = runs_dir
         self.eval_metric = eval_metric
         assert predict_batch_size is None or predict_batch_size > 0, (
@@ -591,12 +544,8 @@ class LokyStackerV10Base(BaseClassifier):
         self._model_dir = self._base_dir / "models"
         self._tmpdir: Path | None = self._base_dir / "features_training"
 
-        self.model_names = model_names
-
         # Build model specs from flat list; derive unique features
-        self.model_specs = self.build_model_specs(
-            self.model_names if self.model_names is not None else self.DEFAULT_MODEL_NAMES
-        )
+        self.model_specs = self.build_model_specs(self.model_names)
         self.best_model = (
             self.stacking_models[0] if self.stacking_models else self.model_specs[0].get_model_id()
         )
@@ -719,12 +668,34 @@ class LokyStackerV10Base(BaseClassifier):
             [fn(X[start : start + batch_size]) for start in range(0, n_samples, batch_size)]
         )
 
+    def _mean_members(self, pool=None) -> list[str]:
+        """Mean members of ``pool`` (default: every stacker), minus its ridge.
+
+        The pool is an argument because ``high`` builds two means from two
+        disjoint-except-``probability-nn`` halves of ``stacking_models``.
+        """
+        pool = self.stacking_models if pool is None else pool
+        return [m for m in pool if m not in self.MEAN_STACKER_EXCLUDE]
+
+    def _mean_pools(self) -> dict[str, list[str]]:
+        """Mean candidate name -> the stackers it averages, for this preset."""
+        if self.preset == "low":
+            return {}
+        pools = {self.MEAN_STACKER_NAME: _ENHANCED_PLAIN_STACKERS}
+        if self.preset == "high":
+            pools[self.BALANCED_MEAN_STACKER_NAME] = _ENHANCED_BALANCED_STACKERS
+        return {name: self._mean_members(pool) for name, pool in pools.items()}
+
     def _predict_proba(self, X):
         batch_size = self._resolve_batch_size(self._batch_for_call)
         if self._fallback_path.exists():
             fallback = read_model("fallback", str(self._model_dir))
             return self._in_batches(fallback.predict_proba, X, batch_size)
-        return self.predict_proba_per_model(X, predict_batch_size=batch_size)[self.best_model]
+        probas = self.predict_proba_per_model(X, predict_batch_size=batch_size)
+        mean_pools = self._mean_pools()
+        if self.best_model in mean_pools:
+            return np.mean([probas[m] for m in mean_pools[self.best_model]], axis=0)
+        return probas[self.best_model]
 
     def _predict(self, X):
         if self._fallback_path.exists():
@@ -736,6 +707,9 @@ class LokyStackerV10Base(BaseClassifier):
 
     # ----------------- prediction row helpers -----------------
 
+    # TODO replace the list of per-(sample, class) dicts with per-model sum/count
+    # arrays; this and _aggregate_prediction_matrix then go away. The bookkeeping
+    # alone costs ~30s to predict 10k samples at preset="high".
     def add_probabilities(self, probas, classes, model_name, level, indices=None):
         preds = []
         row_indices = np.arange(len(probas)) if indices is None else np.asarray(indices)
@@ -967,11 +941,11 @@ class LokyStackerV10Base(BaseClassifier):
     # ----------------- fallback -----------------
 
     def _fit_fallback(self, X, y, fit_start_time):
-        log(
-            "Falling back to MultiRocketHydraClassifier", level=1, start_time=fit_start_time,
-            verbose=self.verbose,
-        )
-        fallback = MultiRocketHydraClassifier(random_state=self.random_state, n_jobs=self.n_jobs)
+        # Local import: tscglue.fallback imports from this module.
+        from tscglue.fallback import MRHydraET
+
+        log("Falling back to MRHydraET", level=1, start_time=fit_start_time, verbose=self.verbose)
+        fallback = MRHydraET(random_state=self.random_state, n_jobs=self.n_jobs)
         fallback.fit(X, y)
         save_model(fallback, "fallback", str(self._model_dir))
         log(
@@ -999,26 +973,7 @@ class LokyStackerV10Base(BaseClassifier):
             start_time=fit_start,
             verbose=self.verbose,
         )
-        try:
-            import torch
-
-            _gpu_torch = torch.cuda.device_count()
-        except Exception:
-            _gpu_torch = 0
-        try:
-            import subprocess
-
-            _gpu_smi = len(
-                subprocess.check_output(
-                    ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                    stderr=subprocess.DEVNULL,
-                )
-                .decode()
-                .strip()
-                .splitlines()
-            )
-        except Exception:
-            _gpu_smi = 0
+        _gpu_torch, _gpu_smi = count_gpus()
         _gpu_used = 1 if self.n_gpus != 0 else 0
         log(
             f"GPUs set/available[torch]/available[smi]/used/ {_gpu_used}/{_gpu_torch}/{_gpu_smi}/{_gpu_used}",
@@ -1394,24 +1349,10 @@ class LokyStackerV10Base(BaseClassifier):
         return True
 
     def _select_best_model(self):
-        if self.selection is None:
-            return
-        if self.selection == "best":
-            candidates = self._oof_scores
-        elif self.selection == "best-stacking":
-            candidates = [s for s in self._oof_scores if s["level"] == 1]
-        elif self.selection == "best-base":
-            candidates = [s for s in self._oof_scores if s["level"] == 0]
-        else:
-            raise ValueError(f"Unknown selection strategy: {self.selection!r}")
-        if not candidates:
-            return
-        higher_is_better = self.eval_metric != "log_loss"
-        self.best_model = (max if higher_is_better else min)(
-            candidates, key=lambda s: s["oof_score"]
-        )["model"]
+        self.best_model = _ENHANCED_SERVED_HEAD[(self.preset, self.eval_metric)]
         log(
-            f"Selected best model ({self.selection}): {self.best_model}", level=1,
+            f"Serving {self.best_model} (preset={self.preset}, eval_metric={self.eval_metric})",
+            level=1,
             verbose=self.verbose,
         )
 
@@ -1427,6 +1368,8 @@ class LokyStackerV10Base(BaseClassifier):
             )
         return d
 
+    # TODO unreachable: needs keep_features=True, which __init__ never sets. Either
+    # expose keep_features or drop this, _get_training_dir and the polars import.
     def get_oof_predictions(self) -> pl.DataFrame:
         d = self._get_training_dir()
         frames = []
@@ -1696,8 +1639,8 @@ class LokyStackerV10Base(BaseClassifier):
 
 
 # ---------------------------------------------------------------------------
-# Level-0 (base) pools, one per preset. Single source of truth: the classes
-# below select among these rather than each redeclaring a list.
+# Level-0 (base) pools, one per preset. Single source of truth: the presets
+# select among these rather than each redeclaring a list.
 # ---------------------------------------------------------------------------
 
 # The five representations every preset builds on.
@@ -1733,23 +1676,6 @@ _ENHANCED_HIGH_MODELS = [
     "weasel-bestk-p-ridgecv",
     "weasel-etc",
 ]
-
-
-def _robust_r2(y, pred):
-    """Outlier-robust R²: ordinary R² on predictions clipped to the target range.
-
-    Standard R² is dominated by its single largest squared residual, so one
-    off-scale prediction (a high-leverage ridge extrapolation, e.g. -4 on a
-    target in [0, 0.18]) can drive it to large negative values even when the
-    model is good on the other 99% of samples. Clipping predictions to
-    [min(y), max(y)] before scoring neutralises such nonsensical values — and is
-    a no-op for well-behaved models (ETR, clipped variants), so it only changes
-    the pathological cases. It also matches how ``ClippedRegressor`` actually
-    serves predictions, and stays on the same scale as ``r2_score``.
-    """
-    y = np.asarray(y, dtype=float)
-    pred = np.asarray(pred, dtype=float)
-    return float(r2_score(y, np.clip(pred, np.nanmin(y), np.nanmax(y))))
 
 
 def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0, stratify=True):
@@ -1815,153 +1741,6 @@ _ENHANCED_SERVED_HEAD = {
     ("best", "roc_auc"): _ENHANCED_META_STACKER,
     ("best", "log_loss"): _ENHANCED_META_STACKER,
 }
-
-
-class TSCGlueEnhancedV3(LokyStackerV10Base):
-    DEFAULT_MODEL_NAMES = list(_ENHANCED_MEDIUM_MODELS)
-    MEAN_STACKER_NAME = "probability-stack-mean"
-    BALANCED_MEAN_STACKER_NAME = "probability-stack-mean-balanced"
-    MEAN_STACKER_EXCLUDE = ("probability-ridgecv", "probability-ridgecv-balanced")
-
-    def __init__(
-        self,
-        random_state=None,
-        k_folds=10,
-        n_jobs=1,
-        verbose=0,
-        n_repetitions=1,
-        n_gpus=0,
-        runs_dir=None,
-        eval_metric="accuracy",
-        preset="medium",
-        compute_dtype=None,
-        predict_batch_size=None,
-    ):
-        assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
-        assert eval_metric in _VALID_EVAL_METRICS, (
-            f"eval_metric must be one of {_VALID_EVAL_METRICS}; got {eval_metric!r}"
-        )
-        assert preset in _ENHANCED_PRESETS, (
-            f"preset must be one of {_ENHANCED_PRESETS}; got {preset!r}"
-        )
-        self.preset = preset
-
-        meta_stacking_models = None
-        if preset == "low":
-            model_names = list(_ENHANCED_LOW_MODELS)
-            # Only one stacker is trained here, so the served head has to be
-            # known pre-fit rather than picked from fitted candidates.
-            stacking_models = [_ENHANCED_SERVED_HEAD[(preset, eval_metric)]]
-        elif preset == "medium":
-            model_names = list(_ENHANCED_MEDIUM_MODELS)
-            stacking_models = list(_ENHANCED_PLAIN_STACKERS)
-        else:  # high, best
-            model_names = list(_ENHANCED_HIGH_MODELS)
-            stacking_models = list(_ENHANCED_HIGH_STACKERS)
-            if preset == "best":
-                # high, plus a meta stacker over the base and stacker OOF probabilities.
-                meta_stacking_models = [_ENHANCED_META_STACKER]
-
-        super().__init__(
-            random_state=random_state,
-            n_repetitions=n_repetitions,
-            k_folds=k_folds,
-            n_jobs=n_jobs,
-            keep_features=False,
-            verbose=verbose,
-            n_gpus=n_gpus,
-            runs_dir=runs_dir,
-            model_names=model_names,
-            stacking_models=stacking_models,
-            meta_stacking_models=meta_stacking_models,
-            eval_metric=eval_metric,
-            compute_dtype=compute_dtype,
-            predict_batch_size=predict_batch_size,
-        )
-
-    def _mean_members(self, pool=None) -> list[str]:
-        """Mean members of ``pool`` (default: every stacker), minus its ridge.
-
-        The pool is an argument because ``high`` builds two means from two
-        disjoint-except-``probability-nn`` halves of ``stacking_models``.
-        """
-        pool = self.stacking_models if pool is None else pool
-        return [m for m in pool if m not in self.MEAN_STACKER_EXCLUDE]
-
-    def _mean_pools(self) -> dict[str, list[str]]:
-        """Mean candidate name -> the stackers it averages, for this preset."""
-        if self.preset == "low":
-            return {}
-        pools = {self.MEAN_STACKER_NAME: _ENHANCED_PLAIN_STACKERS}
-        if self.preset == "high":
-            pools[self.BALANCED_MEAN_STACKER_NAME] = _ENHANCED_BALANCED_STACKERS
-        return {name: self._mean_members(pool) for name, pool in pools.items()}
-
-    def _select_best_model(self):
-        if self.preset == "low":
-            # One stacker, so there is nothing to select and no mean to build.
-            # selection is None, so this keeps best_model = stacking_models[0]
-            # from __init__ — the same head the table below resolves to.
-            super()._select_best_model()
-        self.best_model = _ENHANCED_SERVED_HEAD[(self.preset, self.eval_metric)]
-        log(
-            f"Serving {self.best_model} (preset={self.preset}, eval_metric={self.eval_metric})",
-            level=1,
-            verbose=self.verbose,
-        )
-
-    def _predict_proba(self, X):
-        mean_pools = self._mean_pools()
-        if self._fallback_path.exists() or self.best_model not in mean_pools:
-            return super()._predict_proba(X)
-        batch_size = self._resolve_batch_size(self._batch_for_call)
-        probas = self.predict_proba_per_model(X, predict_batch_size=batch_size)
-        return np.mean([probas[m] for m in mean_pools[self.best_model]], axis=0)
-
-    def _fit_fallback(self, X, y, fit_start_time):
-        # Local import: tscglue.fallback imports from this module.
-        from tscglue.fallback import MRHydraET
-
-        log("Falling back to MRHydraET", level=1, start_time=fit_start_time, verbose=self.verbose)
-        fallback = MRHydraET(random_state=self.random_state, n_jobs=self.n_jobs)
-        fallback.fit(X, y)
-        save_model(fallback, "fallback", str(self._model_dir))
-        log(
-            "Fallback model trained successfully", level=1, start_time=fit_start_time,
-            verbose=self.verbose,
-        )
-
-
-class TSCGlueEnhancedV4(TSCGlueEnhancedV3):
-    def __init__(
-        self,
-        random_state=None,
-        k_folds=10,
-        n_jobs=1,
-        verbose=0,
-        n_repetitions=1,
-        n_gpus=0,
-        runs_dir=None,
-        eval_metric="accuracy",
-        preset="medium",
-        prune_constant=True,
-        compute_dtype=None,
-        predict_batch_size=None,
-    ):
-        super().__init__(
-            random_state=random_state,
-            k_folds=k_folds,
-            n_jobs=n_jobs,
-            verbose=verbose,
-            n_repetitions=n_repetitions,
-            n_gpus=n_gpus,
-            runs_dir=runs_dir,
-            eval_metric=eval_metric,
-            preset=preset,
-            compute_dtype=compute_dtype,
-            predict_batch_size=predict_batch_size,
-        )
-        self.prune_constant = prune_constant
 
 
 class TSCGlueClassifier(TSCGlueEnhancedV4):

@@ -7,11 +7,27 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  test:
+  list-tests:
     runs-on: ubuntu-latest
-    permissions:
-      checks: write
-      pull-requests: write
+    outputs:
+      tests: ${{ steps.tests.outputs.tests }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: List test files
+      id: tests
+      run: echo "tests=$(ls tests/test_*.py | xargs -n1 basename -s .py | jq -R . | jq -sc .)" >> $GITHUB_OUTPUT
+
+  test:
+    name: ${{ matrix.test }}
+    needs: list-tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test: ${{ fromJson(needs.list-tests.outputs.tests) }}
 
     steps:
     - name: Checkout code
@@ -29,10 +45,30 @@ jobs:
       run: make download-models
 
     - name: Run tests
-      run: uv run --no-sync pytest tests/ -vv -W ignore::DeprecationWarning --capture=no --durations=0 --cache-clear --maxfail=1 --junit-xml=test-results.xml
+      run: uv run --no-sync pytest tests/${{ matrix.test }}.py -vv -W ignore::DeprecationWarning --capture=no --durations=0 --cache-clear --maxfail=1 --junit-xml=test-results.xml
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ matrix.test }}
+        path: test-results.xml
+
+  publish:
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      pull-requests: write
+
+    steps:
+    - name: Download test results
+      uses: actions/download-artifact@v4
+      with:
+        path: test-results
 
     - name: Publish test results
       uses: EnricoMi/publish-unit-test-result-action@v2
-      if: always()
       with:
-        files: test-results.xml
+        files: test-results/**/*.xml

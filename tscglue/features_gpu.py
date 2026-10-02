@@ -2,7 +2,7 @@
 
 ``get_feature_transformer("hydra", device=...)`` returns ``HydraTransformerDevice``
 instead of aeon's transformer whenever a non-cpu device is asked for, which is what
-``TSCGlueEnhancedV3`` uses to move hydra onto the GPU.
+``TSCGlueEnhancedV4`` uses to move hydra onto the GPU.
 """
 
 import warnings
