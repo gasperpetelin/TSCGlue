@@ -21,17 +21,14 @@ from sklearn.preprocessing import StandardScaler
 
 from tscglue.models import (
     DictMultiScaler,
-    FeatureSpec,
-    ModelSpec,
     _fit_transform_in_subprocess,
     _fit_transform_inline,
     _load_feature_dict_v10,
-    _robust_r2,
     _transform_in_subprocess,
     _transform_inline,
     generate_folds,
 )
-from tscglue.utils import read_array, read_model, save_array, save_model
+from tscglue.utils import FeatureSpec, ModelSpec, read_array, read_model, save_array, save_model
 from tscglue.tabular import ClippedRegressor, NoScaler, SparseScaler
 from tscglue.utils import _noop, _run_in_subprocess, log
 
@@ -514,10 +511,6 @@ class TSCGlueRegressor(BaseRegressor):
                         oof_rmse = float(np.sqrt(np.nanmean(residuals**2)))
                         oof_mae = float(np.nanmean(np.abs(residuals)))
                         oof_r2 = float(r2_score(y, oof_preds[model_id_result]))
-                        # Outlier-robust R² (predictions clipped to the target
-                        # range before scoring) so a single off-scale sample
-                        # (high-leverage ridge extrapolation) can't dominate it.
-                        oof_r2_robust = _robust_r2(y, oof_preds[model_id_result])
                         base_oof_r2[model_id_result] = oof_r2
                         self._oof_scores.append(
                             {
@@ -526,14 +519,12 @@ class TSCGlueRegressor(BaseRegressor):
                                 "oof_rmse": oof_rmse,
                                 "oof_mae": oof_mae,
                                 "oof_r2": oof_r2,
-                                "oof_r2_robust": oof_r2_robust,
                                 "train_time": model_train_times.pop(model_id_result),
                             }
                         )
                         log(
                             f"OOF  {model_id_result:<48}"
-                            f"RMSE {oof_rmse:7.4f}   MAE {oof_mae:7.4f}   "
-                            f"R² {oof_r2:>10.4f}   robust R² {oof_r2_robust:>8.4f}",
+                            f"RMSE {oof_rmse:7.4f}   MAE {oof_mae:7.4f}   R² {oof_r2:>10.4f}",
                             level=1,
                             start_time=fit_start,
                             verbose=self.verbose,
