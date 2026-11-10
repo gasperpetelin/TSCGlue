@@ -161,7 +161,7 @@ def test_predict_batching_matches_unbatched():
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = TSCGlueClassifier(
-            random_state=0, k_folds=3, n_jobs=2, preset="low", n_gpus=0, runs_dir=tmp_dir
+            random_state=0, k_folds=3, n_jobs=2, preset="medium", n_gpus=0, runs_dir=tmp_dir
         )
         model.fit(X_train, y_train)
 
@@ -196,7 +196,7 @@ def test_predict_batch_size_from_constructor_and_per_call():
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         model = TSCGlueClassifier(
-            random_state=0, k_folds=3, n_jobs=2, preset="low", n_gpus=0, runs_dir=tmp_dir,
+            random_state=0, k_folds=3, n_jobs=2, preset="medium", n_gpus=0, runs_dir=tmp_dir,
             predict_batch_size=15,
         )
         model.fit(X_train, y_train)
