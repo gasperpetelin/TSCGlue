@@ -492,10 +492,16 @@ class TSCGlueEnhancedV4(BaseClassifier):
         prune_constant=True,
         compute_dtype=None,
         predict_batch_size=None,
+        fold_method="stratified-kfold",
     ):
         assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
         assert eval_metric in _VALID_EVAL_METRICS, (
             f"eval_metric must be one of {_VALID_EVAL_METRICS}; got {eval_metric!r}"
+        )
+        # "stratified-kfold": StratifiedKFold, unstratified KFold when every class is smaller
+        # than k_folds. "round-robin": stratified round-robin folds for any class size.
+        assert fold_method in utils.FOLD_METHODS, (
+            f"fold_method must be one of {utils.FOLD_METHODS}; got {fold_method!r}"
         )
         assert preset in _ENHANCED_PRESETS, (
             f"preset must be one of {_ENHANCED_PRESETS}; got {preset!r}"
@@ -519,6 +525,7 @@ class TSCGlueEnhancedV4(BaseClassifier):
         self.meta_stacking_models = [_ENHANCED_META_STACKER] if preset == "best" else []
 
         self.k_folds = int(k_folds)
+        self.fold_method = fold_method
         self.random_state = random_state
         self.n_jobs = int(n_jobs)
         self.n_gpus = int(n_gpus)
@@ -1037,7 +1044,8 @@ class TSCGlueEnhancedV4(BaseClassifier):
                     fold_counter = 0
                     for fold_seed in spec.fold_seeds:
                         rep_splits = generate_folds(
-                            X, y, n_splits=self.k_folds, n_repetitions=1, random_state=fold_seed
+                            X, y, n_splits=self.k_folds, n_repetitions=1, random_state=fold_seed,
+                            fold_method=self.fold_method,
                         )
                         for _, (train_idx, val_idx) in enumerate(rep_splits):
                             fold_model_seed = int(fold_rng.integers(0, 2**31 - 1))
@@ -1178,7 +1186,8 @@ class TSCGlueEnhancedV4(BaseClassifier):
                 save_array(prob_array, "Xt_probabilities", str(self._tmpdir))
 
                 stacker_splits = generate_folds(
-                    X, y, n_splits=self.k_folds, n_repetitions=1, random_state=stacker_fold_seed
+                    X, y, n_splits=self.k_folds, n_repetitions=1, random_state=stacker_fold_seed,
+                    fold_method=self.fold_method,
                 )
                 if not self._fit_stacking_level(
                     executor, X, y, self.stacking_models, "probabilities", stacker_splits,
@@ -1196,7 +1205,7 @@ class TSCGlueEnhancedV4(BaseClassifier):
                     save_array(meta_array, "Xt_meta-probabilities", str(self._tmpdir))
                     meta_splits = generate_folds(
                         X, y, n_splits=self.k_folds, n_repetitions=1,
-                        random_state=self._get_feature_seed(),
+                        random_state=self._get_feature_seed(), fold_method=self.fold_method,
                     )
                     if not self._fit_stacking_level(
                         executor, X, y, self.meta_stacking_models, "meta-probabilities",
@@ -1678,11 +1687,14 @@ _ENHANCED_HIGH_MODELS = [
 ]
 
 
-def generate_folds(X, y, n_splits=5, n_repetitions=5, random_state=0, stratify=True):
+def generate_folds(
+    X, y, n_splits=5, n_repetitions=5, random_state=0, stratify=True, fold_method="stratified-kfold"
+):
     all_folds = []
     for i in range(n_repetitions):
         folds = utils.get_folds(
-            X, y, n_splits=n_splits, random_state=random_state + i, stratify=stratify
+            X, y, n_splits=n_splits, random_state=random_state + i, stratify=stratify,
+            fold_method=fold_method,
         )
         all_folds.extend(folds)
     return all_folds

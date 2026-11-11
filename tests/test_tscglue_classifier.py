@@ -358,6 +358,60 @@ def test_missing_classes_helper():
     assert model._missing_classes(np.array([0, 2])) == [1]
 
 
+def test_default_fold_method_is_stratified_kfold():
+    """The default fold_method keeps StratifiedKFold's splits."""
+    from sklearn.model_selection import StratifiedKFold
+
+    y = np.repeat(np.arange(4), 12)
+    X = np.zeros((len(y), 1))
+    skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=3)
+    expected = [(tr.tolist(), va.tolist()) for tr, va in skf.split(X, y)]
+    assert utils.get_folds(X, y, n_splits=10, random_state=3) == expected
+    explicit = utils.get_folds(X, y, n_splits=10, random_state=3, fold_method="stratified-kfold")
+    assert explicit == expected
+
+
+def test_round_robin_folds_keep_every_class():
+    """52 classes x 2 cases, where StratifiedKFold refuses: round-robin folds partition the
+    cases, differ in size by at most one, and keep every class in every training part."""
+    y = np.repeat(np.arange(52), 2)
+    X = np.zeros((len(y), 1))
+    folds = utils.get_folds(X, y, n_splits=10, random_state=0, fold_method="round-robin")
+
+    assert len(folds) == 10
+    assert sorted(i for _, va in folds for i in va) == list(range(len(y)))
+    sizes = [len(va) for _, va in folds]
+    assert max(sizes) - min(sizes) <= 1
+    for tr, va in folds:
+        assert set(tr).isdisjoint(va)
+        assert len(np.unique(y[tr])) == 52
+    assert folds == utils.get_folds(X, y, n_splits=10, random_state=0, fold_method="round-robin")
+    assert folds != utils.get_folds(X, y, n_splits=10, random_state=1, fold_method="round-robin")
+
+
+def test_unknown_fold_method_raises():
+    with pytest.raises(ValueError):
+        utils.get_folds(np.zeros((4, 1)), np.array([0, 0, 1, 1]), n_splits=2, fold_method="kfold")
+    with tempfile.TemporaryDirectory() as tmp_dir, pytest.raises(AssertionError):
+        TSCGlueClassifier(fold_method="kfold", runs_dir=tmp_dir)
+
+
+def test_round_robin_fold_method_fits_the_stack():
+    """2 cases per class and k_folds=3: round-robin keeps every class in every training
+    part, so the stack is fitted instead of the fallback."""
+    X_train, y_train = _make_classification_data(n_per_class=2, n_classes=6, seed=0)
+    X_test, _ = _make_classification_data(n_per_class=2, n_classes=6, seed=1)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCGlueClassifier(
+            random_state=0, k_folds=3, n_jobs=2, preset="low", n_gpus=0, runs_dir=tmp_dir,
+            fold_method="round-robin",
+        )
+        model.fit(X_train, y_train)
+        assert not model._fallback_path.exists(), "round-robin folds should not need the fallback"
+        assert model.predict_proba(X_test).shape == (len(X_test), 6)
+
+
 def test_hydra_transformer_is_device_routed():
     """A non-cpu device swaps aeon's hydra for the torch one; cpu keeps aeon's."""
     from aeon.transformations.collection.convolution_based._hydra import HydraTransformer
