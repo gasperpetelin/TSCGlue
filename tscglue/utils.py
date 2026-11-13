@@ -216,7 +216,48 @@ def load_dataset(dataset_name):
     return X_train, y_train, X_test, y_test
 
 
-def get_folds(X, y, n_splits=10, random_state=None, stratify=True):
+FOLD_METHODS = ("stratified-kfold", "round-robin")
+
+
+def _round_robin_folds(y, n_splits, random_state):
+    """Stratified folds for any class size.
+
+    The classes and the cases within each class are shuffled, then the cases are dealt to
+    the folds in turn, continuing across classes, so fold sizes differ by at most one. A
+    class with c cases lands in min(c, n_splits) folds, so with c >= 2 every training part
+    keeps it. StratifiedKFold allocates the same way, but refuses when every class has
+    fewer than n_splits cases.
+    """
+    y = np.asarray(y)
+    if n_splits > len(y):
+        raise ValueError(
+            f"n_splits={n_splits} cannot be greater than the number of samples {len(y)}"
+        )
+    rng = np.random.default_rng(random_state)
+    fold_of = np.empty(len(y), dtype=int)
+    offset = 0
+    for cls in rng.permutation(np.unique(y)):
+        idx = rng.permutation(np.flatnonzero(y == cls))
+        fold_of[idx] = (offset + np.arange(len(idx))) % n_splits
+        offset += len(idx)
+    return [
+        (np.flatnonzero(fold_of != k).tolist(), np.flatnonzero(fold_of == k).tolist())
+        for k in range(n_splits)
+    ]
+
+
+def get_folds(X, y, n_splits=10, random_state=None, stratify=True, fold_method="round-robin"):
+    """Train/validation index splits.
+
+    With stratify=True, fold_method picks the splitter: "round-robin" (default) uses
+    stratified round-robin folds for any class size; "stratified-kfold" uses StratifiedKFold
+    and falls back to unstratified KFold when every class has fewer than n_splits cases.
+    With stratify=False (regression) it is always KFold.
+    """
+    if fold_method not in FOLD_METHODS:
+        raise ValueError(f"fold_method must be one of {FOLD_METHODS}; got {fold_method!r}")
+    if stratify and fold_method == "round-robin":
+        return _round_robin_folds(y, n_splits, random_state)
     folds = []
     if stratify:
         try:
