@@ -492,14 +492,15 @@ class TSCGlueEnhancedV4(BaseClassifier):
         prune_constant=True,
         compute_dtype=None,
         predict_batch_size=None,
-        fold_method="stratified-kfold",
+        fold_method="round-robin",
     ):
         assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
         assert eval_metric in _VALID_EVAL_METRICS, (
             f"eval_metric must be one of {_VALID_EVAL_METRICS}; got {eval_metric!r}"
         )
+        # "round-robin" (default): stratified round-robin folds for any class size.
         # "stratified-kfold": StratifiedKFold, unstratified KFold when every class is smaller
-        # than k_folds. "round-robin": stratified round-robin folds for any class size.
+        # than k_folds.
         assert fold_method in utils.FOLD_METHODS, (
             f"fold_method must be one of {utils.FOLD_METHODS}; got {fold_method!r}"
         )
@@ -1688,7 +1689,7 @@ _ENHANCED_HIGH_MODELS = [
 
 
 def generate_folds(
-    X, y, n_splits=5, n_repetitions=5, random_state=0, stratify=True, fold_method="stratified-kfold"
+    X, y, n_splits=5, n_repetitions=5, random_state=0, stratify=True, fold_method="round-robin"
 ):
     all_folds = []
     for i in range(n_repetitions):

@@ -246,12 +246,12 @@ def _round_robin_folds(y, n_splits, random_state):
     ]
 
 
-def get_folds(X, y, n_splits=10, random_state=None, stratify=True, fold_method="stratified-kfold"):
+def get_folds(X, y, n_splits=10, random_state=None, stratify=True, fold_method="round-robin"):
     """Train/validation index splits.
 
-    With stratify=True, fold_method picks the splitter: "stratified-kfold" uses
-    StratifiedKFold and falls back to unstratified KFold when every class has fewer than
-    n_splits cases; "round-robin" uses stratified round-robin folds for any class size.
+    With stratify=True, fold_method picks the splitter: "round-robin" (default) uses
+    stratified round-robin folds for any class size; "stratified-kfold" uses StratifiedKFold
+    and falls back to unstratified KFold when every class has fewer than n_splits cases.
     With stratify=False (regression) it is always KFold.
     """
     if fold_method not in FOLD_METHODS:

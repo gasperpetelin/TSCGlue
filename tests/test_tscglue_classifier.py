@@ -358,15 +358,23 @@ def test_missing_classes_helper():
     assert model._missing_classes(np.array([0, 2])) == [1]
 
 
-def test_default_fold_method_is_stratified_kfold():
-    """The default fold_method keeps StratifiedKFold's splits."""
+def test_default_fold_method_is_round_robin():
+    y = np.repeat(np.arange(4), 12)
+    X = np.zeros((len(y), 1))
+    expected = utils.get_folds(X, y, n_splits=10, random_state=3, fold_method="round-robin")
+    assert utils.get_folds(X, y, n_splits=10, random_state=3) == expected
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        assert TSCGlueClassifier(runs_dir=tmp_dir).fold_method == "round-robin"
+
+
+def test_stratified_kfold_fold_method_matches_sklearn():
+    """fold_method="stratified-kfold" keeps StratifiedKFold's splits."""
     from sklearn.model_selection import StratifiedKFold
 
     y = np.repeat(np.arange(4), 12)
     X = np.zeros((len(y), 1))
     skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=3)
     expected = [(tr.tolist(), va.tolist()) for tr, va in skf.split(X, y)]
-    assert utils.get_folds(X, y, n_splits=10, random_state=3) == expected
     explicit = utils.get_folds(X, y, n_splits=10, random_state=3, fold_method="stratified-kfold")
     assert explicit == expected
 
