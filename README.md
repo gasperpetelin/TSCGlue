@@ -55,37 +55,3 @@ y_pred = model.predict(X_test)
 accuracy = accuracy_score(y_test, y_pred)
 print(f"Accuracy: {accuracy:.4f}")
 ```
-
-
-# Preset composition
-
-Which models each `(preset, eval_metric)` pair actually uses to produce its prediction.
-
-| Model | `low` Acc. | `low` LL | `medium` Acc. | `medium` LL | `high` Acc. | `high` LL | `best` any |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **Level 0: base models** |  |  |  |  |  |  |  |
-| MultiRocket + Hydra | R | R | R | R | R, ET | R, ET | R, ET |
-| QUANT | ET | ET | ET | ET | R, ET | R, ET | R, ET |
-| RDST | R | R | R | R | R, ET | R, ET | R, ET |
-| RSTSF | ET | ET | ET | ET | R, ET | R, ET | R, ET |
-| MantisV2 + Chronos-2 |  |  | R | R | R, ET | R, ET | R, ET |
-| WEASEL 2.0 |  |  | R | R | R, ET | R, ET | R, ET |
-| **Number of representations** | **5** | **5** | **8** | **8** | **8** | **8** | **8** |
-| **Number of base models** | **4** | **4** | **6** | **6** | **12** | **12** | **12** |
-| **Level 1: stacking models used** |  |  |  |  |  |  |  |
-| R | ✓ |  |  |  |  |  | ✓ |
-| LR |  |  | ✓ |  |  |  | ✓ |
-| ET |  | ✓ | ✓ | ✓ |  | ✓ | ✓ |
-| RF |  |  | ✓ |  |  |  | ✓ |
-| MLP |  |  | ✓ |  | ✓ |  | ✓ |
-| R-b |  |  |  |  |  |  | ✓ |
-| LR-b |  |  |  |  | ✓ |  | ✓ |
-| ET-b |  |  |  |  | ✓ |  | ✓ |
-| RF-b |  |  |  |  | ✓ |  | ✓ |
-| **Number of stacking models used** | **1** | **1** | **4** | **1** | **4** | **1** | **9** |
-| **Level 2: combining model used** |  |  |  |  |  |  |  |
-| Mean\* |  |  | ✓ |  |  |  |  |
-| Mean-b\* |  |  |  |  | ✓ |  |  |
-| ET |  |  |  |  |  |  | ✓ |
-
-\* From previous layer only.
