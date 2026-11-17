@@ -311,8 +311,8 @@ def test_low_preset_serves_its_single_stacker(eval_metric, expected_head):
     assert np.isfinite(proba).all()
 
 
-def test_best_preset_serves_meta_stacker():
-    """`best` = high plus a meta stacker over the base and stacker OOF probabilities."""
+def test_best_preset_serves_blend_head():
+    """`best` = high, served through the wmean-T-ll-L2 blend of base and stacker probabilities."""
     X_train, y_train = _make_classification_data(n_per_class=9, n_classes=3, seed=0)
     X_test, _ = _make_classification_data(n_per_class=2, n_classes=3, seed=1)
 
@@ -327,16 +327,17 @@ def test_best_preset_serves_meta_stacker():
         )
         assert len(model.model_specs) == 12
         assert len(model.stacking_models) == 9
-        assert model.meta_stacking_models == ["meta-probability-et"]
 
         model.fit(X_train, y_train)
         proba = model.predict_proba(X_test)
         per_model = model.predict_proba_per_model(X_test)
 
-    assert model.best_model == "meta-probability-et"
-    # 12 base models + 9 stackers, one column per class each.
-    assert len(model._meta_probability_columns) == (12 + 9) * 3
-    np.testing.assert_allclose(proba, per_model["meta-probability-et"])
+    assert model.best_model == "wmean-T-ll-L2"
+    # 12 base models + 9 stackers, and nothing above them.
+    assert len(model.blend_members_) == 12 + 9
+    assert set(per_model) == set(model.blend_members_)
+    members = np.stack([per_model[m] for m in model.blend_members_])
+    np.testing.assert_allclose(proba, model.blend_.predict(members))
     assert proba.shape == (len(X_test), 3)
     assert np.isfinite(proba).all()
     np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
