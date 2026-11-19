@@ -8,21 +8,14 @@ dependencies = [
     "polars",
     "scikit-learn>=1.9,<1.10",
     "tqdm",
-    "seaborn",
     "aeon>=1.6.0",
     "huggingface-hub",
-    "imblearn",
-    "click",
-    "pyarrow",
-    "statsmodels",
     "tsfresh",
-    "lightgbm",
 ]
 
 [project.optional-dependencies]
 torch = [
     "torch",
-    "pytorch-lightning",
     "chronos-forecasting",
     "mantis-tsfm>=1.0.0",
     "transformers",
@@ -30,7 +23,6 @@ torch = [
 ]
 cpu = [
     "torch",
-    "pytorch-lightning",
     "chronos-forecasting",
     "mantis-tsfm>=1.0.0",
     "transformers",
@@ -38,7 +30,6 @@ cpu = [
 ]
 cu124 = [
     "torch",
-    "pytorch-lightning",
     "chronos-forecasting",
     "mantis-tsfm>=1.0.0",
     "transformers",
@@ -46,7 +37,6 @@ cu124 = [
 ]
 cu132 = [
     "torch",
-    "pytorch-lightning",
     "chronos-forecasting",
     "mantis-tsfm>=1.0.0",
     "transformers",
