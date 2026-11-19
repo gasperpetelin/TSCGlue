@@ -16,7 +16,6 @@ dependencies = [
     "pyarrow",
     "statsmodels",
     "tsfresh",
-    "catboost",
     "lightgbm",
 ]
 
