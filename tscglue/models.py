@@ -27,6 +27,7 @@ from sklearn.preprocessing import StandardScaler
 from tscglue import utils
 from tscglue.drcif_features import DrCIFExtractor
 from tscglue.features_gpu import HydraTransformerDevice
+from tscglue.heads import Blend, blend_candidates
 from tscglue.interval_models import RSTSFRandomTransformer
 from tscglue.models_tsfm import Chronos2Embedding, MantisEmbedding
 from tscglue.rdst_features import RDSTFloat64
@@ -100,16 +101,6 @@ MODELS_DICTIONARY = {
         lambda seed=None, n_jobs=1, **_: ExtraTreesClassifier(
             n_estimators=1000,
             class_weight="balanced",
-            random_state=seed,
-            n_jobs=n_jobs,
-        ),
-    ),
-    # Meta stacker of the ``best`` preset: probability-et, fed the level-0 and
-    # level-1 OOF probabilities side by side.
-    "meta-probability-et": (
-        {"meta-probabilities": NoScaler},
-        lambda seed=None, n_jobs=1, **_: ExtraTreesClassifier(
-            n_estimators=1000,
             random_state=seed,
             n_jobs=n_jobs,
         ),
@@ -519,11 +510,9 @@ class TSCGlueEnhancedV4(BaseClassifier):
         elif preset == "medium":
             self.model_names = list(_ENHANCED_MEDIUM_MODELS)
             self.stacking_models = list(_ENHANCED_PLAIN_STACKERS)
-        else:  # high, best
+        else:  # high, best (= high, served through the wmean-T-ll-L2 blend)
             self.model_names = list(_ENHANCED_HIGH_MODELS)
             self.stacking_models = list(_ENHANCED_HIGH_STACKERS)
-        # best = high, plus a meta stacker over the base and stacker OOF probabilities.
-        self.meta_stacking_models = [_ENHANCED_META_STACKER] if preset == "best" else []
 
         self.k_folds = int(k_folds)
         self.fold_method = fold_method
@@ -568,7 +557,6 @@ class TSCGlueEnhancedV4(BaseClassifier):
         self._oof_scores: list[dict] = []
         self._transform_times: list[dict] = []
         self._probability_columns: list[tuple[int, str, Any]] | None = None
-        self._meta_probability_columns: list[tuple[int, str, Any]] | None = None
 
         self._fallback_path: Path = self._model_dir / "fallback.pkl"
 
@@ -700,6 +688,8 @@ class TSCGlueEnhancedV4(BaseClassifier):
             fallback = read_model("fallback", str(self._model_dir))
             return self._in_batches(fallback.predict_proba, X, batch_size)
         probas = self.predict_proba_per_model(X, predict_batch_size=batch_size)
+        if self.best_model == _ENHANCED_BLEND_HEAD:
+            return self.blend_.predict(np.stack([probas[m] for m in self.blend_members_]))
         mean_pools = self._mean_pools()
         if self.best_model in mean_pools:
             return np.mean([probas[m] for m in mean_pools[self.best_model]], axis=0)
@@ -1196,26 +1186,10 @@ class TSCGlueEnhancedV4(BaseClassifier):
                 ):
                     return
 
-                # -------- meta stacking --------
-                # Trained on the level-0 and level-1 OOF probabilities side by side. Its
-                # seeds are drawn only here, so presets without meta stackers keep theirs.
-                if self.meta_stacking_models:
-                    meta_array, self._meta_probability_columns = self._build_probability_array(
-                        n_samples=X.shape[0], levels=(0, 1)
-                    )
-                    save_array(meta_array, "Xt_meta-probabilities", str(self._tmpdir))
-                    meta_splits = generate_folds(
-                        X, y, n_splits=self.k_folds, n_repetitions=1,
-                        random_state=self._get_feature_seed(), fold_method=self.fold_method,
-                    )
-                    if not self._fit_stacking_level(
-                        executor, X, y, self.meta_stacking_models, "meta-probabilities",
-                        meta_splits, level=2, fit_start=fit_start,
-                    ):
-                        return
-
                 log("Fit complete", level=1, start_time=fit_start, verbose=self.verbose)
                 self._select_best_model()
+                if self.best_model == _ENHANCED_BLEND_HEAD:
+                    self._fit_blend_head(X, y, fit_start)
 
         finally:
             if not self.keep_features and self._tmpdir and self._tmpdir.exists():
@@ -1366,6 +1340,38 @@ class TSCGlueEnhancedV4(BaseClassifier):
             verbose=self.verbose,
         )
 
+    def _fit_blend_head(self, X, y, fit_start):
+        """Fit ``wmean-T-ll-L2`` (``tscglue.heads.Blend``) on base and stacker OOF probabilities.
+
+        Its heads get held-out predictions from the same kind of folds as the levels below
+        (``k_folds``, ``fold_method``). Rows a member never predicted are left out of the fit.
+        Its seed is drawn only here, so the other presets keep theirs.
+        """
+        d = self._require_tmpdir()
+        prob_files = sorted(p for p in d.glob("pred_*.npy") if not p.name.endswith("_meta.npy"))
+        names, probs = [], []
+        for path in prob_files:
+            name = path.stem[5:]  # strip pred_
+            prob, _level, classes = self._load_model_predictions(name)
+            order = [classes.index(self._label_to_python(c)) for c in self.classes_]
+            names.append(name)
+            probs.append(prob[:, order])
+        P = np.stack(probs)
+        class_idx = {self._label_to_python(c): i for i, c in enumerate(self.classes_)}
+        y_idx = np.array([class_idx[self._label_to_python(v)] for v in y])
+        rows = np.isfinite(P).all(axis=(0, 2))
+        l1 = [names.index(m) for m in self._mean_members(_ENHANCED_BALANCED_STACKERS)]
+        self.blend_members_ = names
+        splits = generate_folds(
+            X[rows], y[rows], n_splits=self.k_folds, n_repetitions=1,
+            random_state=self._get_feature_seed(), fold_method=self.fold_method,
+        )
+        candidates = blend_candidates(l1, list(range(len(names))))
+        self.blend_ = Blend(candidates).fit(P[:, rows], y_idx[rows], splits)
+        weights = ", ".join(f"{c}={w:.2f}" for c, w in self.blend_.weights_.items())
+        log(f"Fitted {_ENHANCED_BLEND_HEAD}: {weights}", level=1, start_time=fit_start,
+            verbose=self.verbose)
+
     # ----------------- inspection helpers -----------------
 
     def _get_training_dir(self) -> str:
@@ -1491,28 +1497,8 @@ class TSCGlueEnhancedV4(BaseClassifier):
                 )
             )
 
-            # ---- meta-stacking predictions ----
-            if self.meta_stacking_models:
-                meta_array = self._aggregate_prediction_matrix(
-                    predictions=predictions,
-                    n_samples=X.shape[0],
-                    probability_columns=self._meta_probability_columns,
-                )
-                save_array(meta_array, "Xt_meta-probabilities", str(features_stack))
-                predictions.extend(
-                    self._predict_stacking_level(
-                        executor, self.meta_stacking_models, "meta-probabilities",
-                        features_stack, level=2, predict_start=predict_start,
-                    )
-                )
-
             levels = {m: 1 for m in self.stacking_models}
-            levels |= {m: 2 for m in self.meta_stacking_models}
-            model_ids = (
-                [spec.get_model_id() for spec in self.model_specs]
-                + self.stacking_models
-                + self.meta_stacking_models
-            )
+            model_ids = [spec.get_model_id() for spec in self.model_specs] + self.stacking_models
             out = {}
             for model_id in model_ids:
                 level = levels.get(model_id, 0)
@@ -1728,9 +1714,10 @@ _ENHANCED_HIGH_STACKERS = _ENHANCED_PLAIN_STACKERS + [
     name for name in _ENHANCED_BALANCED_STACKERS if name not in _ENHANCED_PLAIN_STACKERS
 ]
 
-# Level-2 meta stacker of ``best``: trained on the level-0 and level-1 OOF
-# probabilities side by side, and served for every eval_metric.
-_ENHANCED_META_STACKER = "meta-probability-et"
+# Head served by ``best`` for every eval_metric: temperature + weights over the
+# heads mean-L1, wmean-T-ll-{L1,L0L1} and caruana-T-ll-{L1,L0L1}, fit on their
+# held-out predictions (tscglue.heads.Blend).
+_ENHANCED_BLEND_HEAD = "wmean-T-ll-L2"
 
 # The served head for every (preset, eval_metric) pair. At ``medium``/``high``
 # every head is trained regardless, so eval_metric only picks which already
@@ -1749,10 +1736,10 @@ _ENHANCED_SERVED_HEAD = {
     ("high", "f1"): "probability-stack-mean-balanced",
     ("high", "roc_auc"): "probability-stack-mean-balanced",
     ("high", "log_loss"): "probability-et",
-    ("best", "accuracy"): _ENHANCED_META_STACKER,
-    ("best", "f1"): _ENHANCED_META_STACKER,
-    ("best", "roc_auc"): _ENHANCED_META_STACKER,
-    ("best", "log_loss"): _ENHANCED_META_STACKER,
+    ("best", "accuracy"): _ENHANCED_BLEND_HEAD,
+    ("best", "f1"): _ENHANCED_BLEND_HEAD,
+    ("best", "roc_auc"): _ENHANCED_BLEND_HEAD,
+    ("best", "log_loss"): _ENHANCED_BLEND_HEAD,
 }
 
 
