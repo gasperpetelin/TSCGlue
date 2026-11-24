@@ -178,6 +178,24 @@ def test_mlp_thread_limited_matches_mlp():
     )
 
 
+@pytest.mark.parametrize(
+    "head, kwargs",
+    [
+        (RidgeClassifierCVDecisionProba, {"alphas": (0.5, 5.0), "fit_intercept": False}),
+        (RidgeClassifierCVIndicator, {"alphas": (0.5, 5.0), "class_weight": "balanced"}),
+        (MLPClassifierThreadLimited, {"hidden_layer_sizes": (7,), "max_iter": 7, "alpha": 0.1}),
+    ],
+)
+def test_parent_params_pass_through_and_survive_clone(head, kwargs):
+    cloned = clone(head(n_jobs=4, **kwargs))
+
+    params = cloned.get_params()
+    assert set(params) == set(head.__mro__[1]().get_params()) | {"n_jobs"}
+    assert params["n_jobs"] == 4
+    for name, value in kwargs.items():
+        assert params[name] == value
+
+
 def test_clone_preserves_mlp_thread_limited_params():
     clf = MLPClassifierThreadLimited(hidden_layer_sizes=(7,), max_iter=7, random_state=3, n_jobs=4)
 

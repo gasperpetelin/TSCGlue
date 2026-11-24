@@ -2,6 +2,7 @@
 
 # TODO import tabular models into this
 
+import inspect
 from time import perf_counter
 
 import numpy as np
@@ -14,28 +15,27 @@ from sklearn.utils.extmath import softmax
 from threadpoolctl import threadpool_limits
 
 
+def _parent_params_and_n_jobs(cls):
+    """Give ``cls.__init__(self, *, n_jobs=1, **kwargs)`` the parent's parameters plus ``n_jobs``
+    as its signature: sklearn's get_params/clone read the parameter names from it, so without
+    this they would only see ``n_jobs`` and clone would reset the rest to their defaults."""
+    parent = inspect.signature(cls.__mro__[1].__init__)
+    params = [
+        p if p.name == "self" else p.replace(kind=inspect.Parameter.KEYWORD_ONLY)
+        for p in parent.parameters.values()
+        if p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    ]
+    params.append(inspect.Parameter("n_jobs", inspect.Parameter.KEYWORD_ONLY, default=1))
+    cls.__init__.__signature__ = parent.replace(parameters=params)
+    return cls
+
+
+@_parent_params_and_n_jobs
 class RidgeClassifierCVDecisionProba(RidgeClassifierCV):
     """RidgeClassifierCV with softmax probabilities and ``n_jobs`` as a BLAS thread budget."""
 
-    def __init__(
-        self,
-        alphas=(0.1, 1.0, 10.0),
-        *,
-        fit_intercept=True,
-        scoring=None,
-        cv=None,
-        class_weight=None,
-        store_cv_results=False,
-        n_jobs=1,
-    ):
-        super().__init__(
-            alphas=alphas,
-            fit_intercept=fit_intercept,
-            scoring=scoring,
-            cv=cv,
-            class_weight=class_weight,
-            store_cv_results=store_cv_results,
-        )
+    def __init__(self, *, n_jobs=1, **kwargs):
+        super().__init__(**kwargs)
         self.n_jobs = n_jobs
 
     def fit(self, X, y):
@@ -50,28 +50,12 @@ class RidgeClassifierCVDecisionProba(RidgeClassifierCV):
         return softmax(scores)
 
 
+@_parent_params_and_n_jobs
 class RidgeClassifierCVIndicator(RidgeClassifierCV):
     """RidgeClassifierCV whose probabilities are a one-hot indicator of the predicted class."""
 
-    def __init__(
-        self,
-        alphas=(0.1, 1.0, 10.0),
-        *,
-        fit_intercept=True,
-        scoring=None,
-        cv=None,
-        class_weight=None,
-        store_cv_results=False,
-        n_jobs=1,
-    ):
-        super().__init__(
-            alphas=alphas,
-            fit_intercept=fit_intercept,
-            scoring=scoring,
-            cv=cv,
-            class_weight=class_weight,
-            store_cv_results=store_cv_results,
-        )
+    def __init__(self, *, n_jobs=1, **kwargs):
+        super().__init__(**kwargs)
         self.n_jobs = n_jobs
 
     def predict_proba(self, X):
@@ -242,62 +226,12 @@ class RareClassSafeLogisticCV(BaseEstimator, ClassifierMixin):
             return self.estimator_.predict_proba(X)
 
 
+@_parent_params_and_n_jobs
 class MLPClassifierThreadLimited(MLPClassifier):
     """MLPClassifier with ``n_jobs`` as a BLAS thread budget."""
 
-    def __init__(
-        self,
-        hidden_layer_sizes=(100,),
-        activation="relu",
-        *,
-        solver="adam",
-        alpha=0.0001,
-        batch_size="auto",
-        learning_rate="constant",
-        learning_rate_init=0.001,
-        power_t=0.5,
-        max_iter=200,
-        shuffle=True,
-        random_state=None,
-        tol=1e-4,
-        verbose=False,
-        warm_start=False,
-        momentum=0.9,
-        nesterovs_momentum=True,
-        early_stopping=False,
-        validation_fraction=0.1,
-        beta_1=0.9,
-        beta_2=0.999,
-        epsilon=1e-8,
-        n_iter_no_change=10,
-        max_fun=15000,
-        n_jobs=1,
-    ):
-        super().__init__(
-            hidden_layer_sizes=hidden_layer_sizes,
-            activation=activation,
-            solver=solver,
-            alpha=alpha,
-            batch_size=batch_size,
-            learning_rate=learning_rate,
-            learning_rate_init=learning_rate_init,
-            power_t=power_t,
-            max_iter=max_iter,
-            shuffle=shuffle,
-            random_state=random_state,
-            tol=tol,
-            verbose=verbose,
-            warm_start=warm_start,
-            momentum=momentum,
-            nesterovs_momentum=nesterovs_momentum,
-            early_stopping=early_stopping,
-            validation_fraction=validation_fraction,
-            beta_1=beta_1,
-            beta_2=beta_2,
-            epsilon=epsilon,
-            n_iter_no_change=n_iter_no_change,
-            max_fun=max_fun,
-        )
+    def __init__(self, *, n_jobs=1, **kwargs):
+        super().__init__(**kwargs)
         self.n_jobs = n_jobs
 
     def fit(self, X, y):
