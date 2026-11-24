@@ -38,6 +38,7 @@ from tscglue.tabular import (
     RidgeClassifierCVDecisionProba,
     RidgeClassifierCVIndicator,
     SparseScaler,
+    ThreadLimitedClassifier,
 )
 from tscglue.utils import (
     FeatureSpec,
@@ -119,8 +120,8 @@ MODELS_DICTIONARY = {
     ),
     "probability-nn": (
         {"probabilities": StandardScaler},
-        lambda seed=None, **_: MLPClassifier(
-            hidden_layer_sizes=(100,), max_iter=500, random_state=seed
+        lambda seed=None, **_: ThreadLimitedClassifier(
+            MLPClassifier(hidden_layer_sizes=(100,), max_iter=500, random_state=seed)
         ),
     ),
     "multirockethydra-bestk-p-ridgecv": (

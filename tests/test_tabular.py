@@ -1,19 +1,37 @@
 import numpy as np
 import pytest
 from sklearn.base import clone
-from sklearn.linear_model import RidgeCV
+from sklearn.feature_selection import f_classif
+from sklearn.linear_model import LogisticRegressionCV, RidgeCV
+from sklearn.neural_network import MLPClassifier
+from threadpoolctl import threadpool_info
 
 from tscglue.tabular import (
     AutoSelectKBestClassifier,
     ClippedRegressor,
     NoScaler,
+    RareClassSafeLogisticCV,
     RidgeClassifierCVDecisionProba,
     RidgeClassifierCVIndicator,
     SparseScaler,
+    ThreadLimitedClassifier,
 )
 
-HEADS = [RidgeClassifierCVDecisionProba, RidgeClassifierCVIndicator, AutoSelectKBestClassifier]
+HEADS = [
+    RidgeClassifierCVDecisionProba,
+    RidgeClassifierCVIndicator,
+    AutoSelectKBestClassifier,
+    RareClassSafeLogisticCV,
+]
 SCALERS = [SparseScaler, NoScaler]
+
+
+def _blas_threads():
+    """Thread counts of the BLAS libraries threadpoolctl can see (e.g. OpenBLAS)."""
+    return {lib["num_threads"] for lib in threadpool_info() if lib["user_api"] == "blas"}
+
+
+needs_blas = pytest.mark.skipif(not _blas_threads(), reason="no BLAS visible to threadpoolctl")
 
 
 def _make_data(n_classes=2, n_per_class=25, n_features=12, seed=0, str_labels=False):
@@ -93,6 +111,83 @@ def test_n_jobs_does_not_change_the_fitted_model(head, n_jobs):
     np.testing.assert_allclose(
         other.predict_proba(X), baseline.predict_proba(X), rtol=1e-8, atol=1e-10
     )
+
+
+@needs_blas
+def test_logisticcv_fits_under_the_blas_limit(monkeypatch):
+    seen = []
+    original_fit = LogisticRegressionCV.fit
+
+    def spy(self, X, y, **kwargs):
+        seen.append(_blas_threads())
+        return original_fit(self, X, y, **kwargs)
+
+    monkeypatch.setattr(LogisticRegressionCV, "fit", spy)
+    X, y = _make_data(n_classes=3)
+    RareClassSafeLogisticCV(Cs=3, n_jobs=1).fit(X, y)
+
+    assert seen == [{1}]
+
+
+@needs_blas
+def test_autoselect_feature_selection_runs_under_the_blas_limit():
+    seen = []
+
+    def score_func(X, y):
+        seen.append(_blas_threads())
+        return f_classif(X, y)
+
+    X, y = _make_data(n_classes=3)
+    AutoSelectKBestClassifier(k=5, score_func=score_func, n_jobs=1).fit(X, y)
+
+    assert seen == [{1}]
+
+
+@needs_blas
+def test_thread_limited_classifier_fits_and_predicts_under_the_blas_limit(monkeypatch):
+    seen = []
+    original_fit = MLPClassifier.fit
+    original_proba = MLPClassifier.predict_proba
+
+    def spy_fit(self, X, y):
+        seen.append(_blas_threads())
+        return original_fit(self, X, y)
+
+    def spy_proba(self, X):
+        seen.append(_blas_threads())
+        return original_proba(self, X)
+
+    monkeypatch.setattr(MLPClassifier, "fit", spy_fit)
+    monkeypatch.setattr(MLPClassifier, "predict_proba", spy_proba)
+    X, y = _make_data(n_classes=3)
+    clf = ThreadLimitedClassifier(MLPClassifier(max_iter=50, random_state=0), n_jobs=1).fit(X, y)
+    clf.predict_proba(X)
+
+    assert seen == [{1}, {1}]
+
+
+def test_thread_limited_classifier_matches_the_bare_estimator():
+    X, y = _make_data(n_classes=3)
+    mlp = MLPClassifier(max_iter=500, random_state=0)
+
+    bare = clone(mlp).fit(X, y)
+    wrapped = ThreadLimitedClassifier(mlp).fit(X, y)
+
+    np.testing.assert_array_equal(wrapped.classes_, bare.classes_)
+    np.testing.assert_allclose(
+        wrapped.predict_proba(X), bare.predict_proba(X), rtol=1e-8, atol=1e-10
+    )
+
+
+def test_clone_preserves_thread_limited_classifier_params():
+    clf = ThreadLimitedClassifier(MLPClassifier(max_iter=7, random_state=3), n_jobs=4)
+
+    cloned = clone(clf)
+
+    assert cloned.n_jobs == 4
+    assert cloned.estimator is not clf.estimator
+    assert cloned.estimator.get_params() == clf.estimator.get_params()
+    assert ThreadLimitedClassifier().n_jobs == 1
 
 
 def test_clipped_regressor_fits_and_predicts():

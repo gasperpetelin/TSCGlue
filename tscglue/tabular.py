@@ -8,6 +8,7 @@ import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, TransformerMixin, clone
 from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
 from sklearn.linear_model import RidgeClassifierCV
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.utils.extmath import softmax
 from threadpoolctl import threadpool_limits
@@ -150,13 +151,15 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
         # use, so nothing downstream changes.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            t0 = perf_counter()
-            Xt = var.fit_transform(X) if var is not None else X
-            t_var = perf_counter() - t0
+            # score_func (e.g. chi2's Y.T @ X) runs BLAS outside the classifier's own limit
+            with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+                t0 = perf_counter()
+                Xt = var.fit_transform(X) if var is not None else X
+                t_var = perf_counter() - t0
 
-            t0 = perf_counter()
-            Xt = select.fit_transform(Xt, y)
-            t_select = perf_counter() - t0
+                t0 = perf_counter()
+                Xt = select.fit_transform(Xt, y)
+                t_select = perf_counter() - t0
 
             t0 = perf_counter()
             clf.fit(Xt, y)
@@ -189,14 +192,24 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
 
 
 class RareClassSafeLogisticCV(BaseEstimator, ClassifierMixin):
-    def __init__(self, Cs=10, fixed_C=1.0, solver="lbfgs", max_iter=1000, class_weight=None):
+    """Logistic regression (CV over C) that survives singleton classes; ``n_jobs`` is a BLAS
+    thread budget."""
+
+    def __init__(
+        self, Cs=10, fixed_C=1.0, solver="lbfgs", max_iter=1000, class_weight=None, n_jobs=1
+    ):
         self.Cs = Cs
         self.fixed_C = fixed_C
         self.solver = solver
         self.max_iter = max_iter
         self.class_weight = class_weight
+        self.n_jobs = n_jobs
 
     def fit(self, X, y):
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self._fit(X, y)
+
+    def _fit(self, X, y):
         from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 
         min_count = int(np.unique(y, return_counts=True)[1].min())
@@ -223,10 +236,36 @@ class RareClassSafeLogisticCV(BaseEstimator, ClassifierMixin):
         return self
 
     def predict(self, X):
-        return self.estimator_.predict(X)
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self.estimator_.predict(X)
 
     def predict_proba(self, X):
-        return self.estimator_.predict_proba(X)
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self.estimator_.predict_proba(X)
+
+
+class ThreadLimitedClassifier(BaseEstimator, ClassifierMixin):
+    """Fit and predict ``estimator`` (default ``MLPClassifier()``) with ``n_jobs`` as a BLAS
+    thread budget, for classifiers that have no ``n_jobs`` of their own."""
+
+    def __init__(self, estimator=None, n_jobs=1):
+        self.estimator = estimator
+        self.n_jobs = n_jobs
+
+    def fit(self, X, y):
+        self.estimator_ = clone(self.estimator) if self.estimator is not None else MLPClassifier()
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            self.estimator_.fit(X, y)
+        self.classes_ = self.estimator_.classes_
+        return self
+
+    def predict(self, X):
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self.estimator_.predict(X)
+
+    def predict_proba(self, X):
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self.estimator_.predict_proba(X)
 
 
 class ClippedRegressor(BaseEstimator, RegressorMixin):
