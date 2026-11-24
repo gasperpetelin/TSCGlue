@@ -68,25 +68,31 @@ MODELS_DICTIONARY = {
     ),
     "rdst-p-ridgecv": (
         {"rdst": StandardScaler},
-        lambda **_: RidgeClassifierCVDecisionProba(alphas=np.logspace(-4, 4, 20)),
+        lambda n_jobs=1, **_: RidgeClassifierCVDecisionProba(
+            alphas=np.logspace(-4, 4, 20), n_jobs=n_jobs
+        ),
     ),
     "probability-ridgecv": (
         {"probabilities": StandardScaler},
-        lambda **_: RidgeClassifierCVIndicator(alphas=np.logspace(-3, 3, 20)),
+        lambda n_jobs=1, **_: RidgeClassifierCVIndicator(
+            alphas=np.logspace(-3, 3, 20), n_jobs=n_jobs
+        ),
     ),
     "probability-ridgecv-balanced": (
         {"probabilities": StandardScaler},
-        lambda **_: RidgeClassifierCVIndicator(
-            alphas=np.logspace(-3, 3, 20), class_weight="balanced"
+        lambda n_jobs=1, **_: RidgeClassifierCVIndicator(
+            alphas=np.logspace(-3, 3, 20), class_weight="balanced", n_jobs=n_jobs
         ),
     ),
     "probability-logisticcv": (
         {"probabilities": StandardScaler},
-        lambda **_: RareClassSafeLogisticCV(Cs=np.logspace(-3, 3, 20)),
+        lambda n_jobs=1, **_: RareClassSafeLogisticCV(Cs=np.logspace(-3, 3, 20), n_jobs=n_jobs),
     ),
     "probability-logisticcv-balanced": (
         {"probabilities": StandardScaler},
-        lambda **_: RareClassSafeLogisticCV(Cs=np.logspace(-3, 3, 20), class_weight="balanced"),
+        lambda n_jobs=1, **_: RareClassSafeLogisticCV(
+            Cs=np.logspace(-3, 3, 20), class_weight="balanced", n_jobs=n_jobs
+        ),
     ),
     "probability-et": (
         {"probabilities": NoScaler},
@@ -119,25 +125,27 @@ MODELS_DICTIONARY = {
     ),
     "probability-nn": (
         {"probabilities": StandardScaler},
-        lambda seed=None, **_: MLPClassifierThreadLimited(
-            hidden_layer_sizes=(100,), max_iter=500, random_state=seed
+        lambda seed=None, n_jobs=1, **_: MLPClassifierThreadLimited(
+            hidden_layer_sizes=(100,), max_iter=500, random_state=seed, n_jobs=n_jobs
         ),
     ),
     "multirockethydra-bestk-p-ridgecv": (
         {"hydra": SparseScaler, "multirocket": StandardScaler},
-        lambda prepruned_features=False, **_: AutoSelectKBestClassifier(
-            variance_filter=not prepruned_features
+        lambda prepruned_features=False, n_jobs=1, **_: AutoSelectKBestClassifier(
+            variance_filter=not prepruned_features, n_jobs=n_jobs
         ),
     ),
     "weasel-bestk-p-ridgecv": (
         {"weasel": NoScaler},
-        lambda prepruned_features=False, **_: AutoSelectKBestClassifier(
-            k=30000, score_func=chi2, variance_filter=not prepruned_features
+        lambda prepruned_features=False, n_jobs=1, **_: AutoSelectKBestClassifier(
+            k=30000, score_func=chi2, variance_filter=not prepruned_features, n_jobs=n_jobs
         ),
     ),
     "fm-p-ridgecv": (
         {"mantis": StandardScaler, "chronos2": StandardScaler},
-        lambda **_: RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10)),
+        lambda n_jobs=1, **_: RidgeClassifierCVDecisionProba(
+            alphas=np.logspace(-3, 3, 10), n_jobs=n_jobs
+        ),
     ),
     "rstsf-random-etc": (
         {"rstsf-random": NoScaler},
@@ -192,11 +200,15 @@ MODELS_DICTIONARY = {
     ),
     "quant-p-ridgecv": (
         {"quant": StandardScaler},
-        lambda **_: RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10)),
+        lambda n_jobs=1, **_: RidgeClassifierCVDecisionProba(
+            alphas=np.logspace(-3, 3, 10), n_jobs=n_jobs
+        ),
     ),
     "rstsf-random-p-ridgecv": (
         {"rstsf-random": StandardScaler},
-        lambda **_: RidgeClassifierCVDecisionProba(alphas=np.logspace(-3, 3, 10)),
+        lambda n_jobs=1, **_: RidgeClassifierCVDecisionProba(
+            alphas=np.logspace(-3, 3, 10), n_jobs=n_jobs
+        ),
     ),
 }
 
@@ -484,8 +496,12 @@ class TSCGlueEnhancedV4(BaseClassifier):
         compute_dtype=None,
         predict_batch_size=None,
         fold_method="round-robin",
+        n_jobs_per_model=2,
     ):
         assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
+        assert int(n_jobs_per_model) >= 1, (
+            f"n_jobs_per_model must be at least 1; got {n_jobs_per_model}"
+        )
         assert eval_metric in _VALID_EVAL_METRICS, (
             f"eval_metric must be one of {_VALID_EVAL_METRICS}; got {eval_metric!r}"
         )
@@ -518,6 +534,9 @@ class TSCGlueEnhancedV4(BaseClassifier):
         self.fold_method = fold_method
         self.random_state = random_state
         self.n_jobs = int(n_jobs)
+        # Fold models run n_jobs // n_jobs_per_model at a time, each with n_jobs_per_model
+        # threads (at most n_jobs): fewer models in RAM at once on the same cores.
+        self.n_jobs_per_model = int(n_jobs_per_model)
         self.n_gpus = int(n_gpus)
         self.keep_features = False
         self.verbose = int(verbose)
@@ -569,6 +588,17 @@ class TSCGlueEnhancedV4(BaseClassifier):
 
     def _get_feature_seed(self) -> int:
         return int(self.feature_seed.integers(0, 2**31 - 1, dtype=np.int32))
+
+    def _total_jobs(self) -> int:
+        return (os.cpu_count() or 1) if self.n_jobs == -1 else self.n_jobs
+
+    def _threads_per_model(self) -> int:
+        """Threads each fold model gets: n_jobs_per_model, at most n_jobs."""
+        return min(self.n_jobs_per_model, self._total_jobs())
+
+    def _n_workers(self) -> int:
+        """Fold models run at once: n_jobs // threads per model, at least 1."""
+        return max(1, self._total_jobs() // self._threads_per_model())
 
     def _resolve_batch_size(self, per_call) -> int | None:
         bs = self.predict_batch_size if per_call is None else per_call
@@ -1017,8 +1047,8 @@ class TSCGlueEnhancedV4(BaseClassifier):
         mp_ctx = multiprocessing.get_context("forkserver")
 
         try:
-            with ProcessPoolExecutor(max_workers=self.n_jobs, mp_context=mp_ctx) as executor:
-                warm = [executor.submit(_noop) for _ in range(self.n_jobs)]
+            with ProcessPoolExecutor(max_workers=self._n_workers(), mp_context=mp_ctx) as executor:
+                warm = [executor.submit(_noop) for _ in range(self._n_workers())]
                 predictions = []
 
                 self.fit_transform_features(X, fit_start_time=fit_start)
@@ -1056,7 +1086,7 @@ class TSCGlueEnhancedV4(BaseClassifier):
                             fold_counter += 1
                 tasks = fold_major(tasks, fold_index=0)
 
-                n_workers = min(self.n_jobs, len(tasks))
+                n_workers = min(self._n_workers(), len(tasks))
                 log(
                     f"Starting training with {n_workers} workers for {len(tasks)} models",
                     level=2,
@@ -1064,7 +1094,10 @@ class TSCGlueEnhancedV4(BaseClassifier):
                     verbose=self.verbose,
                 )
 
-                base_kwargs = {"prepruned_features": self.prune_constant}
+                base_kwargs = {
+                    "prepruned_features": self.prune_constant,
+                    "n_jobs": self._threads_per_model(),
+                }
                 futures = {
                     executor.submit(_train_one_model_v10, *t, model_kwargs=base_kwargs): t
                     for t in tasks
@@ -1234,7 +1267,7 @@ class TSCGlueEnhancedV4(BaseClassifier):
                     )
                 )
 
-        n_workers = min(self.n_jobs, len(stack_tasks))
+        n_workers = min(self._n_workers(), len(stack_tasks))
         log(
             f"Starting stacking training with {n_workers} workers for {len(stack_tasks)} models",
             level=2,
@@ -1243,7 +1276,11 @@ class TSCGlueEnhancedV4(BaseClassifier):
         )
 
         predictions = []
-        futures = {executor.submit(_train_one_model_v10, *t): t for t in stack_tasks}
+        stack_kwargs = {"n_jobs": self._threads_per_model()}
+        futures = {
+            executor.submit(_train_one_model_v10, *t, model_kwargs=stack_kwargs): t
+            for t in stack_tasks
+        }
         model_groups = defaultdict(list)
         model_train_times: dict[str, list[float]] = defaultdict(list)
 
@@ -1446,7 +1483,8 @@ class TSCGlueEnhancedV4(BaseClassifier):
             tasks = fold_major(tasks, fold_index=5)
 
             log(
-                f"Starting prediction with {self.n_jobs} workers for {len(tasks)} first-level models",
+                f"Starting prediction with {self._n_workers()} workers for {len(tasks)} "
+                "first-level models",
                 level=1,
                 start_time=predict_start,
                 verbose=self.verbose,
@@ -1538,7 +1576,8 @@ class TSCGlueEnhancedV4(BaseClassifier):
 
         label = "stacking" if level == 1 else "meta-stacking"
         log(
-            f"Starting prediction with {self.n_jobs} workers for {len(stack_tasks)} {label} models",
+            f"Starting prediction with {self._n_workers()} workers for {len(stack_tasks)} "
+            f"{label} models",
             level=1,
             start_time=predict_start,
             verbose=self.verbose,
@@ -1596,8 +1635,8 @@ class TSCGlueEnhancedV4(BaseClassifier):
 
         try:
             # One executor for the whole call, so forkserver warmup is paid once.
-            with ProcessPoolExecutor(max_workers=self.n_jobs, mp_context=mp_ctx) as executor:
-                warm = [executor.submit(_noop) for _ in range(self.n_jobs)]
+            with ProcessPoolExecutor(max_workers=self._n_workers(), mp_context=mp_ctx) as executor:
+                warm = [executor.submit(_noop) for _ in range(self._n_workers())]
 
                 if batch_size is None or batch_size >= n_samples:
                     return self._predict_proba_batch(X, executor, predict_start)

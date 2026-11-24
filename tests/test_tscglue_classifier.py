@@ -9,9 +9,11 @@ from sklearn.metrics import accuracy_score
 
 from tscglue import utils
 from tscglue.models import (
+    MODELS_DICTIONARY,
     TSCGlueClassifier,
     fold_major,
     get_feature_transformer,
+    get_model_v6,
 )
 from tscglue.utils import FeatureSpec
 
@@ -23,6 +25,30 @@ def test_fold_major_orders_tasks_fold_by_fold_keeping_model_order():
     ordered = fold_major(tasks, fold_index=0)
 
     assert ordered == [(fold, model) for fold in range(3) for model in ["mrh", "quant", "rdst"]]
+
+
+@pytest.mark.parametrize(
+    "n_jobs, n_jobs_per_model, workers, threads",
+    [(12, 2, 6, 2), (12, 1, 12, 1), (5, 2, 2, 2), (1, 2, 1, 1)],
+)
+def test_n_jobs_per_model_splits_n_jobs_into_workers_and_threads(
+    n_jobs, n_jobs_per_model, workers, threads
+):
+    clf = TSCGlueClassifier(n_jobs=n_jobs, n_jobs_per_model=n_jobs_per_model)
+
+    assert clf._n_workers() == workers
+    assert clf._threads_per_model() == threads
+
+
+def test_n_jobs_per_model_defaults_to_2():
+    assert TSCGlueClassifier().n_jobs_per_model == 2
+
+
+@pytest.mark.parametrize("name", sorted(MODELS_DICTIONARY))
+def test_every_fold_model_takes_n_jobs(name):
+    _, clf = get_model_v6(name, seed=0, n_jobs=3)
+
+    assert clf.n_jobs == 3
 
 
 def test_model_accuracy_on_coffee():
