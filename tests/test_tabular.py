@@ -9,12 +9,12 @@ from threadpoolctl import threadpool_info
 from tscglue.tabular import (
     AutoSelectKBestClassifier,
     ClippedRegressor,
+    MLPClassifierThreadLimited,
     NoScaler,
     RareClassSafeLogisticCV,
     RidgeClassifierCVDecisionProba,
     RidgeClassifierCVIndicator,
     SparseScaler,
-    ThreadLimitedClassifier,
 )
 
 HEADS = [
@@ -144,7 +144,7 @@ def test_autoselect_feature_selection_runs_under_the_blas_limit():
 
 
 @needs_blas
-def test_thread_limited_classifier_fits_and_predicts_under_the_blas_limit(monkeypatch):
+def test_mlp_fits_and_predicts_under_the_blas_limit(monkeypatch):
     seen = []
     original_fit = MLPClassifier.fit
     original_proba = MLPClassifier.predict_proba
@@ -160,34 +160,32 @@ def test_thread_limited_classifier_fits_and_predicts_under_the_blas_limit(monkey
     monkeypatch.setattr(MLPClassifier, "fit", spy_fit)
     monkeypatch.setattr(MLPClassifier, "predict_proba", spy_proba)
     X, y = _make_data(n_classes=3)
-    clf = ThreadLimitedClassifier(MLPClassifier(max_iter=50, random_state=0), n_jobs=1).fit(X, y)
+    clf = MLPClassifierThreadLimited(max_iter=50, random_state=0, n_jobs=1).fit(X, y)
     clf.predict_proba(X)
 
     assert seen == [{1}, {1}]
 
 
-def test_thread_limited_classifier_matches_the_bare_estimator():
+def test_mlp_thread_limited_matches_mlp():
     X, y = _make_data(n_classes=3)
-    mlp = MLPClassifier(max_iter=500, random_state=0)
 
-    bare = clone(mlp).fit(X, y)
-    wrapped = ThreadLimitedClassifier(mlp).fit(X, y)
+    plain = MLPClassifier(max_iter=500, random_state=0).fit(X, y)
+    limited = MLPClassifierThreadLimited(max_iter=500, random_state=0).fit(X, y)
 
-    np.testing.assert_array_equal(wrapped.classes_, bare.classes_)
+    np.testing.assert_array_equal(limited.classes_, plain.classes_)
     np.testing.assert_allclose(
-        wrapped.predict_proba(X), bare.predict_proba(X), rtol=1e-8, atol=1e-10
+        limited.predict_proba(X), plain.predict_proba(X), rtol=1e-8, atol=1e-10
     )
 
 
-def test_clone_preserves_thread_limited_classifier_params():
-    clf = ThreadLimitedClassifier(MLPClassifier(max_iter=7, random_state=3), n_jobs=4)
+def test_clone_preserves_mlp_thread_limited_params():
+    clf = MLPClassifierThreadLimited(hidden_layer_sizes=(7,), max_iter=7, random_state=3, n_jobs=4)
 
     cloned = clone(clf)
 
     assert cloned.n_jobs == 4
-    assert cloned.estimator is not clf.estimator
-    assert cloned.estimator.get_params() == clf.estimator.get_params()
-    assert ThreadLimitedClassifier().n_jobs == 1
+    assert cloned.get_params() == clf.get_params()
+    assert MLPClassifierThreadLimited().n_jobs == 1
 
 
 def test_clipped_regressor_fits_and_predicts():

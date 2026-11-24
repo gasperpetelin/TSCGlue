@@ -118,13 +118,16 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
         )
 
     def fit(self, X, y):
-        return self._fit(X, y)
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self._fit(X, y)
 
     def predict(self, X):
-        return self._predict(X)
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self._predict(X)
 
     def predict_proba(self, X):
-        return self._predict_proba(X)
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self._predict_proba(X)
 
     # internal helpers
     def _fit(self, X, y):
@@ -151,15 +154,13 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
         # use, so nothing downstream changes.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            # score_func (e.g. chi2's Y.T @ X) runs BLAS outside the classifier's own limit
-            with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
-                t0 = perf_counter()
-                Xt = var.fit_transform(X) if var is not None else X
-                t_var = perf_counter() - t0
+            t0 = perf_counter()
+            Xt = var.fit_transform(X) if var is not None else X
+            t_var = perf_counter() - t0
 
-                t0 = perf_counter()
-                Xt = select.fit_transform(Xt, y)
-                t_select = perf_counter() - t0
+            t0 = perf_counter()
+            Xt = select.fit_transform(Xt, y)
+            t_select = perf_counter() - t0
 
             t0 = perf_counter()
             clf.fit(Xt, y)
@@ -206,10 +207,6 @@ class RareClassSafeLogisticCV(BaseEstimator, ClassifierMixin):
         self.n_jobs = n_jobs
 
     def fit(self, X, y):
-        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
-            return self._fit(X, y)
-
-    def _fit(self, X, y):
         from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 
         min_count = int(np.unique(y, return_counts=True)[1].min())
@@ -231,29 +228,6 @@ class RareClassSafeLogisticCV(BaseEstimator, ClassifierMixin):
                 l1_ratios=(0.0,),
                 use_legacy_attributes=False,
             )
-        self.estimator_.fit(X, y)
-        self.classes_ = self.estimator_.classes_
-        return self
-
-    def predict(self, X):
-        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
-            return self.estimator_.predict(X)
-
-    def predict_proba(self, X):
-        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
-            return self.estimator_.predict_proba(X)
-
-
-class ThreadLimitedClassifier(BaseEstimator, ClassifierMixin):
-    """Fit and predict ``estimator`` (default ``MLPClassifier()``) with ``n_jobs`` as a BLAS
-    thread budget, for classifiers that have no ``n_jobs`` of their own."""
-
-    def __init__(self, estimator=None, n_jobs=1):
-        self.estimator = estimator
-        self.n_jobs = n_jobs
-
-    def fit(self, X, y):
-        self.estimator_ = clone(self.estimator) if self.estimator is not None else MLPClassifier()
         with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
             self.estimator_.fit(X, y)
         self.classes_ = self.estimator_.classes_
@@ -266,6 +240,77 @@ class ThreadLimitedClassifier(BaseEstimator, ClassifierMixin):
     def predict_proba(self, X):
         with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
             return self.estimator_.predict_proba(X)
+
+
+class MLPClassifierThreadLimited(MLPClassifier):
+    """MLPClassifier with ``n_jobs`` as a BLAS thread budget."""
+
+    def __init__(
+        self,
+        hidden_layer_sizes=(100,),
+        activation="relu",
+        *,
+        solver="adam",
+        alpha=0.0001,
+        batch_size="auto",
+        learning_rate="constant",
+        learning_rate_init=0.001,
+        power_t=0.5,
+        max_iter=200,
+        shuffle=True,
+        random_state=None,
+        tol=1e-4,
+        verbose=False,
+        warm_start=False,
+        momentum=0.9,
+        nesterovs_momentum=True,
+        early_stopping=False,
+        validation_fraction=0.1,
+        beta_1=0.9,
+        beta_2=0.999,
+        epsilon=1e-8,
+        n_iter_no_change=10,
+        max_fun=15000,
+        n_jobs=1,
+    ):
+        super().__init__(
+            hidden_layer_sizes=hidden_layer_sizes,
+            activation=activation,
+            solver=solver,
+            alpha=alpha,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            learning_rate_init=learning_rate_init,
+            power_t=power_t,
+            max_iter=max_iter,
+            shuffle=shuffle,
+            random_state=random_state,
+            tol=tol,
+            verbose=verbose,
+            warm_start=warm_start,
+            momentum=momentum,
+            nesterovs_momentum=nesterovs_momentum,
+            early_stopping=early_stopping,
+            validation_fraction=validation_fraction,
+            beta_1=beta_1,
+            beta_2=beta_2,
+            epsilon=epsilon,
+            n_iter_no_change=n_iter_no_change,
+            max_fun=max_fun,
+        )
+        self.n_jobs = n_jobs
+
+    def fit(self, X, y):
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return super().fit(X, y)
+
+    def predict(self, X):
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return super().predict(X)
+
+    def predict_proba(self, X):
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return super().predict_proba(X)
 
 
 class ClippedRegressor(BaseEstimator, RegressorMixin):
