@@ -1054,6 +1054,7 @@ class TSCGlueEnhancedV4(BaseClassifier):
                                 )
                             )
                             fold_counter += 1
+                tasks = fold_major(tasks, fold_index=0)
 
                 n_workers = min(self.n_jobs, len(tasks))
                 log(
@@ -1442,6 +1443,7 @@ class TSCGlueEnhancedV4(BaseClassifier):
                             fold,
                         )
                     )
+            tasks = fold_major(tasks, fold_index=5)
 
             log(
                 f"Starting prediction with {self.n_jobs} workers for {len(tasks)} first-level models",
@@ -1685,6 +1687,15 @@ def generate_folds(
         )
         all_folds.extend(folds)
     return all_folds
+
+
+def fold_major(tasks, fold_index):
+    """``tasks`` ordered fold by fold (fold 0 of every model, then fold 1, ...), keeping the model
+    order within a fold. The task lists are built model by model; queued that way, the workers
+    start on every fold of the first model at once, which in the presets is the heaviest
+    (multirocket + hydra). Each task carries its own seed, so the order does not change results.
+    """
+    return sorted(tasks, key=lambda task: task[fold_index])
 
 
 _VALID_EVAL_METRICS = {"accuracy", "f1", "log_loss", "roc_auc"}

@@ -10,9 +10,19 @@ from sklearn.metrics import accuracy_score
 from tscglue import utils
 from tscglue.models import (
     TSCGlueClassifier,
+    fold_major,
     get_feature_transformer,
 )
 from tscglue.utils import FeatureSpec
+
+
+def test_fold_major_orders_tasks_fold_by_fold_keeping_model_order():
+    # Built model by model, as in _fit: (fold, model).
+    tasks = [(fold, model) for model in ["mrh", "quant", "rdst"] for fold in range(3)]
+
+    ordered = fold_major(tasks, fold_index=0)
+
+    assert ordered == [(fold, model) for fold in range(3) for model in ["mrh", "quant", "rdst"]]
 
 
 def test_model_accuracy_on_coffee():
