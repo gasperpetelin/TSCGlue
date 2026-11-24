@@ -6,15 +6,18 @@ import tempfile
 import numpy as np
 import pytest
 from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import StandardScaler
 
-from tscglue import utils
+from tscglue import models, utils
 from tscglue.models import (
     MODELS_DICTIONARY,
+    DictMultiScaler,
     TSCGlueClassifier,
     fold_major,
     get_feature_transformer,
     get_model_v6,
 )
+from tscglue.tabular import NoScaler, SparseScaler
 from tscglue.utils import FeatureSpec
 
 
@@ -49,6 +52,33 @@ def test_every_fold_model_takes_n_jobs(name):
     _, clf = get_model_v6(name, seed=0, n_jobs=3)
 
     assert clf.n_jobs == 3
+
+
+@pytest.mark.parametrize("use_idx", [False, True])
+def test_dict_multi_scaler_chunked_transform_matches_whole_block(monkeypatch, tmp_path, use_idx):
+    rng = np.random.default_rng(0)
+    feats = {}
+    for name, arr in {
+        "hydra": rng.integers(0, 5, (50, 6)).astype(np.float32),
+        "multirocket": rng.standard_normal((50, 9)),
+        "quant": rng.standard_normal((50, 4)),
+    }.items():
+        np.save(tmp_path / f"{name}.npy", arr)
+        feats[name] = np.load(tmp_path / f"{name}.npy", mmap_mode="r")  # as read_array does
+    idx = rng.permutation(50)[:37] if use_idx else None
+    scaler = DictMultiScaler(
+        {"hydra": SparseScaler(), "multirocket": StandardScaler(), "quant": NoScaler()}
+    ).fit(feats, idx=idx)
+
+    # 7 rows of multirocket (9 x float64) per chunk: several chunks and a partial last one
+    monkeypatch.setattr(models, "TRANSFORM_CHUNK_BYTES", 7 * 9 * 8)
+    chunked = scaler.transform(feats, idx=idx)
+
+    whole = np.hstack([
+        s.transform(feats[key] if idx is None else feats[key][idx])
+        for key, s in scaler.scalers_.items()
+    ])
+    np.testing.assert_array_equal(chunked, whole)
 
 
 def test_model_accuracy_on_coffee():

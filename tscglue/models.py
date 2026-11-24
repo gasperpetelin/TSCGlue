@@ -1809,6 +1809,10 @@ def select_rows(arr, idx):
     return arr[idx]
 
 
+# Bytes of input rows per chunk in DictMultiScaler.transform (rows = this // row size).
+TRANSFORM_CHUNK_BYTES = 64 * 1024 * 1024
+
+
 class DictMultiScaler(BaseEstimator, TransformerMixin):
     """
     Like MultiScaler but receives a dict of numpy arrays keyed by feature group name.
@@ -1843,15 +1847,20 @@ class DictMultiScaler(BaseEstimator, TransformerMixin):
         n_samples = X[keys[0]].shape[0] if idx is None else len(idx)
         dtype = np.result_type(*(X[key].dtype for key in keys))
 
-        # Pre-allocate the full output once; fill it column-by-column so at most
-        # one scaled feature-group chunk exists alongside it at any given time,
-        # instead of holding every chunk plus a freshly hstack'd copy at once.
+        # Pre-allocate the full output once and fill it a block of rows at a time, so
+        # only one chunk of selected rows and its scaled copy exist alongside it, instead of
+        # a full copy of the rows plus a full scaled copy. The scalers are row-wise (each
+        # value uses its column's fitted statistics), so the result is the same.
         out = np.empty((n_samples, sum(widths)), dtype=dtype)
+        rows = None if idx is None else np.asarray(idx)
         col = 0
         for key, width in zip(keys, widths):
-            scaled = self.scalers_[key].transform(select_rows(X[key], idx))
-            out[:, col:col + width] = scaled
-            del scaled
+            scaler = self.scalers_[key]
+            chunk_rows = max(1, TRANSFORM_CHUNK_BYTES // max(1, width * X[key].dtype.itemsize))
+            for start in range(0, n_samples, chunk_rows):
+                stop = min(start + chunk_rows, n_samples)
+                chunk = X[key][start:stop] if rows is None else X[key][rows[start:stop]]
+                out[start:stop, col:col + width] = scaler.transform(chunk)
             col += width
 
         return out
