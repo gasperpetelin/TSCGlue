@@ -2,39 +2,40 @@
 
 # TODO import tabular models into this
 
+import inspect
 from time import perf_counter
 
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, TransformerMixin, clone
 from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
 from sklearn.linear_model import RidgeClassifierCV
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.utils.extmath import softmax
 from threadpoolctl import threadpool_limits
 
 
+def _parent_params_and_n_jobs(cls):
+    """Give ``cls.__init__(self, *, n_jobs=1, **kwargs)`` the parent's parameters plus ``n_jobs``
+    as its signature: sklearn's get_params/clone read the parameter names from it, so without
+    this they would only see ``n_jobs`` and clone would reset the rest to their defaults."""
+    parent = inspect.signature(cls.__mro__[1].__init__)
+    params = [
+        p if p.name == "self" else p.replace(kind=inspect.Parameter.KEYWORD_ONLY)
+        for p in parent.parameters.values()
+        if p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    ]
+    params.append(inspect.Parameter("n_jobs", inspect.Parameter.KEYWORD_ONLY, default=1))
+    cls.__init__.__signature__ = parent.replace(parameters=params)
+    return cls
+
+
+@_parent_params_and_n_jobs
 class RidgeClassifierCVDecisionProba(RidgeClassifierCV):
     """RidgeClassifierCV with softmax probabilities and ``n_jobs`` as a BLAS thread budget."""
 
-    def __init__(
-        self,
-        alphas=(0.1, 1.0, 10.0),
-        *,
-        fit_intercept=True,
-        scoring=None,
-        cv=None,
-        class_weight=None,
-        store_cv_results=False,
-        n_jobs=1,
-    ):
-        super().__init__(
-            alphas=alphas,
-            fit_intercept=fit_intercept,
-            scoring=scoring,
-            cv=cv,
-            class_weight=class_weight,
-            store_cv_results=store_cv_results,
-        )
+    def __init__(self, *, n_jobs=1, **kwargs):
+        super().__init__(**kwargs)
         self.n_jobs = n_jobs
 
     def fit(self, X, y):
@@ -49,28 +50,12 @@ class RidgeClassifierCVDecisionProba(RidgeClassifierCV):
         return softmax(scores)
 
 
+@_parent_params_and_n_jobs
 class RidgeClassifierCVIndicator(RidgeClassifierCV):
     """RidgeClassifierCV whose probabilities are a one-hot indicator of the predicted class."""
 
-    def __init__(
-        self,
-        alphas=(0.1, 1.0, 10.0),
-        *,
-        fit_intercept=True,
-        scoring=None,
-        cv=None,
-        class_weight=None,
-        store_cv_results=False,
-        n_jobs=1,
-    ):
-        super().__init__(
-            alphas=alphas,
-            fit_intercept=fit_intercept,
-            scoring=scoring,
-            cv=cv,
-            class_weight=class_weight,
-            store_cv_results=store_cv_results,
-        )
+    def __init__(self, *, n_jobs=1, **kwargs):
+        super().__init__(**kwargs)
         self.n_jobs = n_jobs
 
     def predict_proba(self, X):
@@ -117,13 +102,16 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
         )
 
     def fit(self, X, y):
-        return self._fit(X, y)
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self._fit(X, y)
 
     def predict(self, X):
-        return self._predict(X)
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self._predict(X)
 
     def predict_proba(self, X):
-        return self._predict_proba(X)
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self._predict_proba(X)
 
     # internal helpers
     def _fit(self, X, y):
@@ -189,12 +177,18 @@ class AutoSelectKBestClassifier(BaseEstimator, ClassifierMixin):
 
 
 class RareClassSafeLogisticCV(BaseEstimator, ClassifierMixin):
-    def __init__(self, Cs=10, fixed_C=1.0, solver="lbfgs", max_iter=1000, class_weight=None):
+    """Logistic regression (CV over C) that survives singleton classes; ``n_jobs`` is a BLAS
+    thread budget."""
+
+    def __init__(
+        self, Cs=10, fixed_C=1.0, solver="lbfgs", max_iter=1000, class_weight=None, n_jobs=1
+    ):
         self.Cs = Cs
         self.fixed_C = fixed_C
         self.solver = solver
         self.max_iter = max_iter
         self.class_weight = class_weight
+        self.n_jobs = n_jobs
 
     def fit(self, X, y):
         from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
@@ -218,15 +212,39 @@ class RareClassSafeLogisticCV(BaseEstimator, ClassifierMixin):
                 l1_ratios=(0.0,),
                 use_legacy_attributes=False,
             )
-        self.estimator_.fit(X, y)
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            self.estimator_.fit(X, y)
         self.classes_ = self.estimator_.classes_
         return self
 
     def predict(self, X):
-        return self.estimator_.predict(X)
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self.estimator_.predict(X)
 
     def predict_proba(self, X):
-        return self.estimator_.predict_proba(X)
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return self.estimator_.predict_proba(X)
+
+
+@_parent_params_and_n_jobs
+class MLPClassifierThreadLimited(MLPClassifier):
+    """MLPClassifier with ``n_jobs`` as a BLAS thread budget."""
+
+    def __init__(self, *, n_jobs=1, **kwargs):
+        super().__init__(**kwargs)
+        self.n_jobs = n_jobs
+
+    def fit(self, X, y):
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return super().fit(X, y)
+
+    def predict(self, X):
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return super().predict(X)
+
+    def predict_proba(self, X):
+        with threadpool_limits(limits=None if self.n_jobs == -1 else self.n_jobs):
+            return super().predict_proba(X)
 
 
 class ClippedRegressor(BaseEstimator, RegressorMixin):

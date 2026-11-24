@@ -20,7 +20,6 @@ from aeon.transformations.collection.interval_based import QUANTTransformer
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.feature_selection import VarianceThreshold, chi2
-from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -33,6 +32,7 @@ from tscglue.models_tsfm import Chronos2Embedding, MantisEmbedding
 from tscglue.rdst_features import RDSTFloat64
 from tscglue.tabular import (
     AutoSelectKBestClassifier,
+    MLPClassifierThreadLimited,
     NoScaler,
     RareClassSafeLogisticCV,
     RidgeClassifierCVDecisionProba,
@@ -119,7 +119,7 @@ MODELS_DICTIONARY = {
     ),
     "probability-nn": (
         {"probabilities": StandardScaler},
-        lambda seed=None, **_: MLPClassifier(
+        lambda seed=None, **_: MLPClassifierThreadLimited(
             hidden_layer_sizes=(100,), max_iter=500, random_state=seed
         ),
     ),
