@@ -3,6 +3,7 @@ import os
 import threading
 import shutil
 import uuid
+import warnings
 from collections import defaultdict
 from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -213,6 +214,31 @@ MODELS_DICTIONARY = {
 }
 
 
+# How TSCGlueEnhancedV4 treats NaNs in X (the ``missing_values`` parameter).
+MISSING_VALUE_MODES = ("impute_mask", "impute", "error")
+
+
+def impute_missing(X: np.ndarray) -> np.ndarray:
+    """Fill NaNs in a (n_cases, n_channels, n_timepoints) array, one series at a time.
+
+    Interior gaps are linearly interpolated, leading and trailing gaps take the nearest
+    observed value, and a series with no observed value at all becomes 0. Returns ``X``
+    itself when it holds no NaN, otherwise a filled copy.
+    """
+    X = np.asarray(X)
+    if not np.issubdtype(X.dtype, np.floating):
+        return X
+    missing = np.isnan(X)
+    if not missing.any():
+        return X
+    out = X.copy()
+    t = np.arange(X.shape[-1])
+    for i, c in zip(*np.nonzero(missing.any(axis=-1))):
+        observed = ~missing[i, c]
+        out[i, c] = np.interp(t, t[observed], X[i, c, observed]) if observed.any() else 0.0
+    return out
+
+
 def get_model_v6(name, seed=None, n_jobs=1, model_dir=None, prepruned_features=False, **kwargs):
     """Returns (DictMultiScaler, classifier) for feature and stacking models."""
     if name not in MODELS_DICTIONARY:
@@ -390,7 +416,8 @@ def _train_one_model_v10(
 
 
 class TSCGlueEnhancedV4(BaseClassifier):
-    _tags = {"capability:multivariate": True}
+    # NaNs are imputed in _prepare_x (see ``missing_values``), so aeon must let them through.
+    _tags = {"capability:multivariate": True, "capability:missing_values": True}
 
     MEAN_STACKER_NAME = "probability-stack-mean"
     BALANCED_MEAN_STACKER_NAME = "probability-stack-mean-balanced"
@@ -497,8 +524,21 @@ class TSCGlueEnhancedV4(BaseClassifier):
         predict_batch_size=None,
         fold_method="round-robin",
         n_jobs_per_model=2,
+        missing_values="impute_mask",
     ):
         assert n_gpus in (0, 1, -1), f"n_gpus must be 0, 1, or -1; got {n_gpus}"
+        # How NaNs in X are handled, in fit and predict alike:
+        # "impute_mask" (default): impute (see impute_missing), then append a 0/1 mask
+        #     channel (1 = observed, 0 = imputed) for every channel that had a NaN in the
+        #     training data. Those channels are stored in ``mask_channels_`` and get their
+        #     mask at predict time too; a channel that only has NaNs at predict time is
+        #     imputed without a mask, with a warning. Channels must keep their order.
+        #     Training data without NaNs gets no mask, so it runs exactly as without this.
+        # "impute": impute only, never add mask channels.
+        # "error": raise a ValueError on any NaN.
+        assert missing_values in MISSING_VALUE_MODES, (
+            f"missing_values must be one of {MISSING_VALUE_MODES}; got {missing_values!r}"
+        )
         assert int(n_jobs_per_model) >= 1, (
             f"n_jobs_per_model must be at least 1; got {n_jobs_per_model}"
         )
@@ -549,6 +589,7 @@ class TSCGlueEnhancedV4(BaseClassifier):
         )
         self.predict_batch_size = predict_batch_size
         self._batch_for_call = None
+        self.missing_values = missing_values
 
         self.cv_splits = None
         self.feature_seed = np.random.default_rng(random_state)
@@ -578,6 +619,49 @@ class TSCGlueEnhancedV4(BaseClassifier):
         self._probability_columns: list[tuple[int, str, Any]] | None = None
 
         self._fallback_path: Path = self._model_dir / "fallback.pkl"
+
+    # ----------------- missing values -----------------
+
+    def _prepare_x(self, X, fit=False):
+        """Apply ``missing_values`` to X: the array the rest of fit/predict works on.
+
+        With ``fit=True`` this also records ``mask_channels_``, the channels that get a
+        mask channel from then on.
+        """
+        X = np.asarray(X)
+        # getattr defaults: models pickled before ``missing_values`` existed behave as before
+        mode = getattr(self, "missing_values", "error")
+        if np.issubdtype(X.dtype, np.floating):
+            missing = np.isnan(X)
+            nan_channels = np.flatnonzero(missing.any(axis=(0, 2))).tolist()
+        else:
+            missing, nan_channels = None, []
+        if nan_channels and mode == "error":
+            raise ValueError(
+                f"X has missing values in channels {nan_channels} and missing_values='error'"
+            )
+        if fit:
+            self.mask_channels_ = nan_channels if mode == "impute_mask" else []
+        mask_channels = getattr(self, "mask_channels_", [])
+        if not fit and mode == "impute_mask":
+            unmasked = sorted(set(nan_channels) - set(mask_channels))
+            if unmasked:
+                warnings.warn(
+                    f"Channels {unmasked} have missing values at predict time but had none "
+                    "during fit; they are imputed without a mask channel.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+        if not nan_channels and not mask_channels:
+            return X
+        filled = impute_missing(X)
+        if not mask_channels:
+            return filled
+        if missing is None:
+            observed = np.ones((X.shape[0], len(mask_channels), X.shape[2]), dtype=filled.dtype)
+        else:
+            observed = (~missing[:, mask_channels]).astype(filled.dtype)
+        return np.concatenate([filled, observed], axis=1)
 
     # ----------------- utils -----------------
 
@@ -713,11 +797,15 @@ class TSCGlueEnhancedV4(BaseClassifier):
         return {name: self._mean_members(pool) for name, pool in pools.items()}
 
     def _predict_proba(self, X):
+        return self._served_proba(self._prepare_x(X))
+
+    def _served_proba(self, X):
+        """Probabilities of the served head for an already-prepared X (see _prepare_x)."""
         batch_size = self._resolve_batch_size(self._batch_for_call)
         if self._fallback_path.exists():
             fallback = read_model("fallback", str(self._model_dir))
             return self._in_batches(fallback.predict_proba, X, batch_size)
-        probas = self.predict_proba_per_model(X, predict_batch_size=batch_size)
+        probas = self._predict_proba_per_model_prepared(X, predict_batch_size=batch_size)
         if self.best_model == _ENHANCED_BLEND_HEAD:
             return self.blend_.predict(np.stack([probas[m] for m in self.blend_members_]))
         mean_pools = self._mean_pools()
@@ -726,11 +814,12 @@ class TSCGlueEnhancedV4(BaseClassifier):
         return probas[self.best_model]
 
     def _predict(self, X):
+        X = self._prepare_x(X)
         if self._fallback_path.exists():
             fallback = read_model("fallback", str(self._model_dir))
             batch_size = self._resolve_batch_size(self._batch_for_call)
             return self._in_batches(fallback.predict, X, batch_size)
-        probas = self._predict_proba(X)
+        probas = self._served_proba(X)
         return self.classes_[np.argmax(probas, axis=1)]
 
     # ----------------- prediction row helpers -----------------
@@ -985,6 +1074,8 @@ class TSCGlueEnhancedV4(BaseClassifier):
 
     def _fit(self, X, y):
         fit_start = perf_counter()
+        # Everything below, the fallback included, sees the imputed (+ mask) array.
+        X = self._prepare_x(X, fit=True)
         if self.compute_dtype is None:
             self.compute_dtype = np.asarray(X).dtype
         log(
@@ -1620,7 +1711,16 @@ class TSCGlueEnhancedV4(BaseClassifier):
         subprocess-lane feature, a re-read of every fold-model pickle), so sizes belong in
         the hundreds or thousands. Results are not bit-reproducible across batch sizes --
         hydra is convolved in float32, putting the heads it feeds at ~1e-10 in probability.
+        NaNs in X are handled as set by ``missing_values``.
         """
+        return self._predict_proba_per_model_prepared(
+            self._prepare_x(X), predict_batch_size=predict_batch_size
+        )
+
+    def _predict_proba_per_model_prepared(
+        self, X: np.ndarray, predict_batch_size=None
+    ) -> dict[str, np.ndarray]:
+        """predict_proba_per_model for an X that has already been through _prepare_x."""
         predict_start = perf_counter()
         log("Starting prediction", level=1, start_time=predict_start, verbose=self.verbose)
 
