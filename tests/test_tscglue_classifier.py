@@ -1,7 +1,9 @@
 """Tests for TSCGlueClassifier."""
 
 import dataclasses
+import pickle
 import tempfile
+import warnings
 
 import numpy as np
 import pytest
@@ -16,6 +18,7 @@ from tscglue.models import (
     fold_major,
     get_feature_transformer,
     get_model_v6,
+    impute_missing,
 )
 from tscglue.tabular import NoScaler, SparseScaler
 from tscglue.utils import FeatureSpec
@@ -581,3 +584,192 @@ def test_hydra_device_falls_back_to_cpu_without_cuda():
     expected = HydraTransformerDevice(random_state=0, device="cpu").fit_transform(X)
     np.testing.assert_array_equal(Xt, expected)
     assert transformer.device == "cuda", "device is a constructor param and must not be mutated"
+
+
+# ----------------- missing values -----------------
+
+
+def test_impute_missing_fills_interior_edges_and_empty_series():
+    nan = np.nan
+    X = np.array(
+        [
+            [[1.0, nan, 3.0, nan, nan, 6.0], [nan, nan, 2.0, 4.0, nan, nan]],
+            [[nan, nan, nan, nan, nan, nan], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+        ]
+    )
+    out = impute_missing(X)
+    np.testing.assert_array_equal(out[0, 0], [1, 2, 3, 4, 5, 6])  # interior gaps
+    np.testing.assert_array_equal(out[0, 1], [2, 2, 2, 4, 4, 4])  # leading / trailing gaps
+    np.testing.assert_array_equal(out[1, 0], np.zeros(6))  # nothing observed
+    np.testing.assert_array_equal(out[1, 1], X[1, 1])  # untouched
+    assert np.isnan(X).sum() == 13, "the input must not be modified"
+    assert out.dtype == X.dtype
+
+
+def test_impute_missing_returns_input_without_nans():
+    X = np.random.default_rng(0).standard_normal((3, 2, 8))
+    assert impute_missing(X) is X
+
+
+def _nan_at(X, positions):
+    X = X.copy()
+    for i, c, t in positions:
+        X[i, c, t] = np.nan
+    return X
+
+
+def test_prepare_x_masks_channels_with_nans_in_train():
+    rng = np.random.default_rng(0)
+    X = _nan_at(rng.standard_normal((5, 4, 10)), [(0, 0, 3), (2, 3, 0), (4, 3, 9)])
+    clf = TSCGlueClassifier()
+    Xp = clf._prepare_x(X, fit=True)
+
+    assert clf.mask_channels_ == [0, 3]
+    assert Xp.shape == (5, 4 + 2, 10)
+    assert not np.isnan(Xp).any()
+    np.testing.assert_array_equal(Xp[:, :4], impute_missing(X))
+    np.testing.assert_array_equal(Xp[:, 4], (~np.isnan(X[:, 0])).astype(float))
+    np.testing.assert_array_equal(Xp[:, 5], (~np.isnan(X[:, 3])).astype(float))
+    assert Xp[0, 4, 3] == 0 and Xp[2, 5, 0] == 0 and Xp[4, 5, 9] == 0
+    assert Xp[:, 4:].sum() == 2 * 5 * 10 - 3, "1 = observed, 0 = imputed"
+
+
+def test_prepare_x_recreates_masks_at_predict_and_warns_on_new_nan_channels():
+    rng = np.random.default_rng(0)
+    clf = TSCGlueClassifier()
+    clf._prepare_x(_nan_at(rng.standard_normal((5, 4, 10)), [(0, 0, 3), (1, 3, 5)]), fit=True)
+    assert clf.mask_channels_ == [0, 3]
+
+    # predict: NaNs only in channel 2, which had none during fit
+    X_test = _nan_at(rng.standard_normal((3, 4, 10)), [(1, 2, 4)])
+    with pytest.warns(UserWarning, match=r"Channels \[2\]"):
+        Xp = clf._prepare_x(X_test)
+
+    assert Xp.shape == (3, 4 + 2, 10), "same layout as in training"
+    assert not np.isnan(Xp).any()
+    np.testing.assert_array_equal(Xp[:, :4], impute_missing(X_test))
+    np.testing.assert_array_equal(Xp[:, 4:], 1.0)  # channels 0 and 3 are fully observed
+
+
+def test_prepare_x_masks_follow_the_test_data():
+    rng = np.random.default_rng(0)
+    clf = TSCGlueClassifier()
+    clf._prepare_x(_nan_at(rng.standard_normal((5, 2, 10)), [(0, 1, 3)]), fit=True)
+
+    X_test = _nan_at(rng.standard_normal((3, 2, 10)), [(2, 1, 7)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # channel 1 is masked, so no warning
+        Xp = clf._prepare_x(X_test)
+    assert Xp.shape == (3, 3, 10)
+    assert Xp[2, 2, 7] == 0 and Xp[:, 2].sum() == 3 * 10 - 1
+
+
+def test_prepare_x_without_nans_in_train_adds_no_mask():
+    rng = np.random.default_rng(0)
+    clf = TSCGlueClassifier()
+    X = rng.standard_normal((5, 2, 10))
+    assert clf._prepare_x(X, fit=True) is X
+    assert clf.mask_channels_ == []
+
+    with pytest.warns(UserWarning, match=r"Channels \[0\]"):
+        Xp = clf._prepare_x(_nan_at(X, [(0, 0, 0)]))
+    assert Xp.shape == X.shape and not np.isnan(Xp).any()
+
+
+def test_prepare_x_impute_mode_never_masks():
+    rng = np.random.default_rng(0)
+    clf = TSCGlueClassifier(missing_values="impute")
+    X = _nan_at(rng.standard_normal((5, 2, 10)), [(0, 1, 3)])
+    Xp = clf._prepare_x(X, fit=True)
+    assert clf.mask_channels_ == []
+    assert Xp.shape == X.shape and not np.isnan(Xp).any()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        clf._prepare_x(_nan_at(X, [(1, 0, 2)]))
+
+
+def test_missing_values_error_mode_raises():
+    X, y = _make_classification_data(n_per_class=4, n_classes=2)
+    X = _nan_at(X, [(0, 0, 3)])
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        clf = TSCGlueClassifier(missing_values="error", runs_dir=tmp_dir)
+        with pytest.raises(ValueError, match="missing_values='error'"):
+            clf.fit(X, y)
+
+
+def test_unknown_missing_values_mode_raises():
+    with pytest.raises(AssertionError, match="missing_values"):
+        TSCGlueClassifier(missing_values="drop")
+
+
+def test_mask_channels_survive_pickling():
+    rng = np.random.default_rng(0)
+    clf = TSCGlueClassifier()
+    clf._prepare_x(_nan_at(rng.standard_normal((5, 3, 10)), [(0, 2, 1)]), fit=True)
+    restored = pickle.loads(pickle.dumps(clf))
+    assert restored.mask_channels_ == [2]
+    assert restored.missing_values == "impute_mask"
+
+
+def _two_channel_data(seed):
+    X, y = _make_classification_data(n_per_class=10, n_classes=3, n_timesteps=32, seed=seed)
+    noise = np.random.default_rng(seed).standard_normal(X.shape).astype(X.dtype)
+    return np.concatenate([X, noise], axis=1), y
+
+
+@pytest.mark.parametrize("mode, mask_channels", [("impute_mask", [0]), ("impute", [])])
+def test_fit_predict_with_missing_values(mode, mask_channels):
+    """End to end: NaNs in channel 0 at fit; channels 0 and 1 at predict."""
+    X_train, y_train = _two_channel_data(seed=0)
+    X_test, _ = _two_channel_data(seed=1)
+    rng = np.random.default_rng(0)
+    X_train[:, 0][rng.random(X_train[:, 0].shape) < 0.2] = np.nan
+    X_test[rng.random(X_test.shape) < 0.2] = np.nan
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = TSCGlueClassifier(
+            random_state=0,
+            k_folds=3,
+            n_jobs=2,
+            preset="low",
+            missing_values=mode,
+            runs_dir=tmp_dir,
+        )
+        model.fit(X_train, y_train)
+        assert model.mask_channels_ == mask_channels
+        assert not model._fallback_path.exists(), "the stack must run, not the fallback"
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            proba = model.predict_proba(X_test)
+            y_pred = model.predict(X_test)
+            per_model = model.predict_proba_per_model(X_test)
+        new_channel = [w for w in caught if "Channels [1]" in str(w.message)]
+        assert bool(new_channel) == (mode == "impute_mask")
+
+    assert proba.shape == (len(X_test), 3)
+    assert np.isfinite(proba).all()
+    np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
+    assert y_pred.shape == (len(X_test),)
+    assert per_model and all(np.isfinite(p).all() for p in per_model.values())
+
+
+def test_clean_data_gives_the_same_predictions_in_every_mode():
+    """Without NaNs, missing_values must not change anything."""
+    X_train, y_train = _two_channel_data(seed=0)
+    X_test, _ = _two_channel_data(seed=1)
+    probas = {}
+    for mode in ("impute_mask", "error"):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model = TSCGlueClassifier(
+                random_state=0,
+                k_folds=3,
+                n_jobs=2,
+                preset="low",
+                missing_values=mode,
+                runs_dir=tmp_dir,
+            )
+            model.fit(X_train, y_train)
+            assert model.mask_channels_ == []
+            probas[mode] = model.predict_proba(X_test)
+    assert np.max(np.abs(probas["impute_mask"] - probas["error"])) < BATCH_PROBA_ATOL

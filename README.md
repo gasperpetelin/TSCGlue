@@ -55,3 +55,18 @@ y_pred = model.predict(X_test)
 accuracy = accuracy_score(y_test, y_pred)
 print(f"Accuracy: {accuracy:.4f}")
 ```
+
+## Missing values
+
+`X` may contain NaNs. `missing_values` sets how they are handled:
+
+- `"impute_mask"` (default): each series is linearly interpolated (gaps at the start or end
+  take the nearest observed value) and every channel that had a NaN in the training data
+  gets an extra 0/1 mask channel (1 = observed, 0 = imputed). The masked channels are kept
+  in `mask_channels_` and get their mask at predict time too. A channel that only has NaNs
+  at predict time is imputed without a mask, with a warning. Training data without NaNs
+  gets no mask, so it runs exactly as before.
+- `"impute"`: interpolate only, no mask channels.
+- `"error"`: raise a `ValueError` on any NaN.
+
+Channels must be in the same order at fit and predict time.
